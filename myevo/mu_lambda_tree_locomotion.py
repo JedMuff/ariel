@@ -15,6 +15,9 @@ Key features:
 - Visualization and progress tracking
 """
 
+# Enable modern type annotations
+from __future__ import annotations
+
 # IMPORTANT: Set thread limits BEFORE importing numpy/mujoco to prevent nested parallelism
 # When using multiprocessing, each worker should use only 1 thread
 import os
@@ -23,9 +26,6 @@ os.environ["MKL_NUM_THREADS"] = "1"          # Intel MKL (NumPy)
 os.environ["OPENBLAS_NUM_THREADS"] = "1"     # OpenBLAS (NumPy)
 os.environ["NUMEXPR_NUM_THREADS"] = "1"      # NumExpr
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"   # macOS Accelerate framework
-
-# Enable modern type annotations
-from __future__ import annotations
 
 # Standard library
 import random

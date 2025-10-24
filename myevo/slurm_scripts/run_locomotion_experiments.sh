@@ -3,7 +3,7 @@
 #SBATCH --output=slurm_out/locomotion-%A_%a.out
 #SBATCH --error=slurm_out/locomotion-%A_%a.err
 #SBATCH --time=100:00:00
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=30
 #SBATCH --array=0-39
 
 # Virtual environment path - UPDATE THIS to match your cluster setup
