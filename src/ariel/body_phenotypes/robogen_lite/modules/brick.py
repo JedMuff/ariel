@@ -51,6 +51,9 @@ class BrickModule(Module):
             size=ariel_modules_config.BRICK_DIMENSIONS,
             pos=[0, ariel_modules_config.BRICK_DIMENSIONS[0], 0],
             rgba=(28 / 255, 119 / 255, 195 / 255, 1),
+            solref=[0.01, 1.0],  # Softer contact: [timeconst, dampratio]
+            solimp=[0.9, 0.95, 0.001, 0.5, 2],  # Constraint impedance: [dmin, dmax, width, midpoint, power]
+            friction=[1.0, 0.005, 0.0001],  # [sliding, torsional, rolling]
         )
 
         # ========= Attachment Points =========

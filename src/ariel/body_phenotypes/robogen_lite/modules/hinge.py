@@ -71,6 +71,9 @@ class HingeModule(Module):
             mass=STATOR_MASS,
             size=np.array(STATOR_DIMENSIONS) * SHRINK,  # z-fighting
             rgba=(223 / 255, 41 / 255, 53 / 255, 1),
+            solref=[0.01, 1.0],  # Softer contact: [timeconst, dampratio]
+            solimp=[0.9, 0.95, 0.001, 0.5, 2],  # Constraint impedance: [dmin, dmax, width, midpoint, power]
+            friction=[1.0, 0.005, 0.0001],  # [sliding, torsional, rolling]
         )
 
         # ========= Rotor =========
@@ -85,6 +88,9 @@ class HingeModule(Module):
             mass=ROTOR_MASS,
             size=ROTOR_DIMENSIONS,
             rgba=(160 / 255, 24 / 255, 33 / 255, 1),
+            solref=[0.01, 1.0],  # Softer contact: [timeconst, dampratio]
+            solimp=[0.9, 0.95, 0.001, 0.5, 2],  # Constraint impedance: [dmin, dmax, width, midpoint, power]
+            friction=[1.0, 0.005, 0.0001],  # [sliding, torsional, rolling]
         )
 
         # ======== Attachment Points =========

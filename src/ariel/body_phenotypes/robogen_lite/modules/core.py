@@ -69,6 +69,9 @@ class CoreModule(Module):
             size=CORE_DIMENSIONS,
             pos=[0, CORE_DIMENSIONS[0], 0],
             rgba=(253 / 255, 202 / 255, 64 / 255, 1),
+            solref=[0.01, 1.0],  # Softer contact: [timeconst, dampratio]
+            solimp=[0.9, 0.95, 0.001, 0.5, 2],  # Constraint impedance: [dmin, dmax, width, midpoint, power]
+            friction=[1.0, 0.005, 0.0001],  # [sliding, torsional, rolling]
         )
 
         # ========= Attachment Points =========
