@@ -15,6 +15,15 @@ Key features:
 - Visualization and progress tracking
 """
 
+# IMPORTANT: Set thread limits BEFORE importing numpy/mujoco to prevent nested parallelism
+# When using multiprocessing, each worker should use only 1 thread
+import os
+os.environ["OMP_NUM_THREADS"] = "1"          # OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"          # Intel MKL (NumPy)
+os.environ["OPENBLAS_NUM_THREADS"] = "1"     # OpenBLAS (NumPy)
+os.environ["NUMEXPR_NUM_THREADS"] = "1"      # NumExpr
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"   # macOS Accelerate framework
+
 # Enable modern type annotations
 from __future__ import annotations
 
@@ -963,12 +972,75 @@ class TreeLocomotionEvolution:
         )
 
 
+def parse_args():
+    """Parse command line arguments."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Evolutionary morphology optimization using mu-lambda strategy with locomotion fitness"
+    )
+
+    # Core experiment parameters
+    parser.add_argument(
+        "--enable-lamarckian",
+        action="store_true",
+        help="Enable Lamarckian evolution (offspring inherit optimized weights from parents)"
+    )
+    parser.add_argument(
+        "--use-novelty",
+        action="store_true",
+        help="Enable novelty search (fitness = locomotion * novelty)"
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=30,
+        help="Number of parallel workers for evaluation (default: 30)"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility (default: 42)"
+    )
+    parser.add_argument(
+        "--num-generations",
+        type=int,
+        default=50,
+        help="Number of generations to evolve (default: 50)"
+    )
+    parser.add_argument(
+        "--experiment-name",
+        type=str,
+        default=None,
+        help="Name prefix for experiment directory (default: auto-generated from timestamp)"
+    )
+
+    return parser.parse_args()
+
+
 def main() -> None:
     """Main entry point."""
+    # Parse command line arguments
+    args = parse_args()
+
     # Create timestamped data directory (once in main process)
     global DATA
+    global SEED
+    global RNG
+    SEED = args.seed
+
+    # Re-seed random number generators with command-line seed
+    random.seed(SEED)
+    np.random.seed(SEED)
+    RNG = np.random.default_rng(SEED)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    DATA = CWD / "__data__" / f"{SCRIPT_NAME}_{timestamp}"
+    if args.experiment_name:
+        dir_name = f"{args.experiment_name}_{timestamp}"
+    else:
+        dir_name = f"{SCRIPT_NAME}_{timestamp}"
+    DATA = CWD / "__data__" / dir_name
     DATA.mkdir(exist_ok=True, parents=True)
 
     # Create evolution system with all hyperparameters exposed
@@ -1004,13 +1076,13 @@ def main() -> None:
         cmaes_population_size=20,        # CMA-ES population size
 
         # Novelty search parameters
-        use_novelty=True,               # Enable novelty search
+        use_novelty=args.use_novelty,    # Enable novelty search (from command line)
         novelty_min_distance=3.0,        # Archive min distance
         novelty_k_neighbors=1,           # K-nearest neighbors
         novelty_adaptive=False,          # Adaptive archive
 
         # Lamarckian evolution parameters
-        enable_lamarckian=True,          # Enable Lamarckian weight inheritance
+        enable_lamarckian=args.enable_lamarckian,  # Enable Lamarckian weight inheritance (from command line)
         lamarckian_crossover_mode="closest_parent",  # Weight combination mode: average, parent1, random, closest_parent
 
         # Video recording parameters
@@ -1020,13 +1092,13 @@ def main() -> None:
         video_platform="macos",          # Video codec: "macos" or "windows"
 
         # System parameters
-        seed=SEED,
-        num_workers=30,                   # Parallel workers (currently 1)
+        seed=args.seed,                  # Random seed (from command line)
+        num_workers=args.num_workers,    # Parallel workers (from command line)
         verbose=True,
     )
 
     # Run evolution
-    all_individuals = evolution.run(num_generations=50)
+    all_individuals = evolution.run(num_generations=args.num_generations)
 
     # Plot fitness history
     evolution.plot_fitness_history_wrapper(all_individuals)
