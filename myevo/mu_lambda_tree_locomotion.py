@@ -294,9 +294,7 @@ class TreeLocomotionEvolution:
         if self.use_novelty:
             self.novelty_archive = KDTreeArchive(
                 min_distance=None,  # Store all individuals
-                feature_extractor=lambda ind: extract_morphological_vector(
-                    MorphologicalMeasures(Body(ind.tree, max_part_limit=self.max_part_limit))
-                ),
+                feature_extractor=self._extract_morphological_features,
             )
             console.print(
                 f"[bold cyan]Novelty Search:[/bold cyan] Morphological (KDTree), "
@@ -323,6 +321,26 @@ class TreeLocomotionEvolution:
                 f"Video Recording: {'Enabled' if enable_video_recording else 'Disabled'}"
                 f"{f' (every {video_interval} gen, {video_duration}s, {video_platform})' if enable_video_recording else ''}\n"
             )
+
+    def _extract_morphological_features(self, ind):
+        """Extract morphological features for novelty calculation.
+
+        This method is used as a feature extractor for the KDTreeArchive.
+        It must be a regular method (not a lambda) to support pickling for multiprocessing.
+
+        Parameters
+        ----------
+        ind : object
+            Individual with a .tree attribute.
+
+        Returns
+        -------
+        np.ndarray
+            Morphological feature vector.
+        """
+        return extract_morphological_vector(
+            MorphologicalMeasures(Body(ind.tree, max_part_limit=self.max_part_limit))
+        )
 
     def optimize_controller_cmaes_wrapper(
         self,
@@ -986,13 +1004,13 @@ def main() -> None:
         cmaes_population_size=20,        # CMA-ES population size
 
         # Novelty search parameters
-        use_novelty=False,               # Enable novelty search
+        use_novelty=True,               # Enable novelty search
         novelty_min_distance=3.0,        # Archive min distance
         novelty_k_neighbors=1,           # K-nearest neighbors
         novelty_adaptive=False,          # Adaptive archive
 
         # Lamarckian evolution parameters
-        enable_lamarckian=False,          # Enable Lamarckian weight inheritance
+        enable_lamarckian=True,          # Enable Lamarckian weight inheritance
         lamarckian_crossover_mode="closest_parent",  # Weight combination mode: average, parent1, random, closest_parent
 
         # Video recording parameters
@@ -1003,12 +1021,12 @@ def main() -> None:
 
         # System parameters
         seed=SEED,
-        num_workers=4,                   # Parallel workers (currently 1)
+        num_workers=30,                   # Parallel workers (currently 1)
         verbose=True,
     )
 
     # Run evolution
-    all_individuals = evolution.run(num_generations=2)
+    all_individuals = evolution.run(num_generations=50)
 
     # Plot fitness history
     evolution.plot_fitness_history_wrapper(all_individuals)
