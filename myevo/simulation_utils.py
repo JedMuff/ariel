@@ -127,6 +127,9 @@ def calculate_displacement_fitness(
     This uses the x-axis displacement (forward direction in ARIEL) from
     a baseline time to avoid advantages from initial falling/settling.
 
+    A height penalty is applied: if the robot's initial height (z-coordinate)
+    is above 1 metre, the initial height is subtracted from the fitness.
+
     Parameters
     ----------
     tracker : Tracker
@@ -139,7 +142,7 @@ def calculate_displacement_fitness(
     Returns
     -------
     float
-        Forward displacement in meters from baseline time to end.
+        Forward displacement in meters from baseline time to end, with height penalty applied.
     """
     # Get timestep information
     dt = model.opt.timestep
@@ -157,7 +160,17 @@ def calculate_displacement_fitness(
     # X-axis is forward direction in ARIEL
     x_displacement = final_pos[0] - initial_pos[0]
 
-    return float(x_displacement)
+    # Z-axis is vertical direction (height)
+    initial_height = initial_pos[2]
+
+    # Apply height penalty if initial height is above 0.21m
+    # (allows up to 1 core + 3 bricks stacked below it)
+    if initial_height > 0.21:
+        fitness = x_displacement - initial_height
+    else:
+        fitness = x_displacement
+
+    return float(fitness)
 
 
 def simulate_with_controller(
