@@ -243,13 +243,19 @@ class TreeLocomotionEvolution:
         self.enable_lamarckian = enable_lamarckian
         self.lamarckian_crossover_mode = lamarckian_crossover_mode
         if self.enable_lamarckian:
-            self.weight_manager = ParentWeightManager(crossover_mode=lamarckian_crossover_mode)
+            self.weight_manager = ParentWeightManager(
+                crossover_mode=lamarckian_crossover_mode,
+                sigma=sigma_init,
+            )
         else:
             self.weight_manager = None
 
         # Non-Lamarckian initial weight inheritance manager
         # Stores initial (pre-optimization) weights for inheritance across generations
-        self._initial_weight_manager = ParentWeightManager(crossover_mode=lamarckian_crossover_mode)
+        self._initial_weight_manager = ParentWeightManager(
+            crossover_mode=lamarckian_crossover_mode,
+            sigma=sigma_init,
+        )
 
         self._current_generation_map: dict = {}  # Temporary genotype → Individual mapping
 
@@ -467,13 +473,21 @@ class TreeLocomotionEvolution:
         initial_weights = None
 
         if self.enable_lamarckian and individual is not None and self.weight_manager is not None:
-            # Lamarckian: inherit optimized weights from parent
-            parent_weights = self.weight_manager.get_parent_weights(individual, offspring_tree=tree)
+            # Lamarckian: inherit optimized weights from parent (adapted to offspring morphology)
+            parent_weights = self.weight_manager.get_parent_weights(
+                individual,
+                offspring_tree=tree,
+                offspring_layer_sizes=controller.layer_sizes,
+            )
             if parent_weights is not None:
                 initial_weights = parent_weights
         elif individual is not None and self._initial_weight_manager is not None:
-            # Non-Lamarckian: inherit initial weights from parent (if has parent)
-            parent_initial_weights = self._initial_weight_manager.get_parent_weights(individual, offspring_tree=tree)
+            # Non-Lamarckian: inherit initial weights from parent (adapted to offspring morphology)
+            parent_initial_weights = self._initial_weight_manager.get_parent_weights(
+                individual,
+                offspring_tree=tree,
+                offspring_layer_sizes=controller.layer_sizes,
+            )
             if parent_initial_weights is not None:
                 initial_weights = parent_initial_weights
 
@@ -483,7 +497,7 @@ class TreeLocomotionEvolution:
 
         # Store initial weights for non-Lamarckian inheritance by offspring
         if self._initial_weight_manager is not None:
-            self._initial_weight_manager.store_weights(id(tree), initial_weights)
+            self._initial_weight_manager.store_weights(id(tree), initial_weights, controller.layer_sizes)
 
         # Get controller weights - either via CMA-ES or direct use
         if self.use_cmaes:
@@ -495,14 +509,27 @@ class TreeLocomotionEvolution:
 
             # Store learned weights for potential inheritance by offspring
             if self.weight_manager is not None:
-                self.weight_manager.store_weights(id(tree), optimized_weights)
+                self.weight_manager.store_weights(id(tree), optimized_weights, controller.layer_sizes)
 
             # Save brain files directly if save_dir is available
             if save_dir is not None:
                 import csv
+                import json
                 save_path = Path(save_dir)
                 np.save(save_path / "initial_brain.npy", initial_weights)
                 np.save(save_path / "optimized_brain.npy", optimized_weights)
+
+                # Save metadata about neural network architecture
+                metadata = {
+                    "controller_hidden_layers": self.controller_hidden_layers,
+                    "controller_activation": self.controller_activation,
+                    "layer_sizes": controller.layer_sizes,
+                    "num_actuators": model.nu,
+                    "num_weights": len(optimized_weights),
+                    "input_size": model.nq + model.nv,
+                }
+                with open(save_path / "metadata.json", 'w') as f:
+                    json.dump(metadata, f, indent=2)
 
                 # Save learning curve
                 with open(save_path / "learning_curve.csv", 'w', newline='') as f:
@@ -542,15 +569,28 @@ class TreeLocomotionEvolution:
             # Store learned weights for Lamarckian inheritance (optimized weights)
             # In non-CMA-ES case, weights don't change, but we still store for Lamarckian mode
             if self.weight_manager is not None:
-                self.weight_manager.store_weights(id(tree), initial_weights)
+                self.weight_manager.store_weights(id(tree), initial_weights, controller.layer_sizes)
 
             # Save brain files directly if save_dir is available
             # No optimization in this case, so initial = optimized
             if save_dir is not None:
                 import csv
+                import json
                 save_path = Path(save_dir)
                 np.save(save_path / "initial_brain.npy", initial_weights)
                 np.save(save_path / "optimized_brain.npy", initial_weights)
+
+                # Save metadata about neural network architecture
+                metadata = {
+                    "controller_hidden_layers": self.controller_hidden_layers,
+                    "controller_activation": self.controller_activation,
+                    "layer_sizes": controller.layer_sizes,
+                    "num_actuators": model.nu,
+                    "num_weights": len(initial_weights),
+                    "input_size": model.nq + model.nv,
+                }
+                with open(save_path / "metadata.json", 'w') as f:
+                    json.dump(metadata, f, indent=2)
 
                 # Save empty learning curve (no CMA-ES)
                 with open(save_path / "learning_curve.csv", 'w', newline='') as f:
@@ -843,9 +883,11 @@ class TreeLocomotionEvolution:
 
                 # Try 1: Get from weight_manager
                 if self.weight_manager is not None and self.weight_manager.has_weights(id(best_tree)):
-                    weights = self.weight_manager.get_weights(id(best_tree))
-                    if self.verbose:
-                        console.print(f"[cyan]Got weights from weight_manager ({len(weights)} params)[/cyan]")
+                    weights_data = self.weight_manager.get_weights(id(best_tree))
+                    if weights_data is not None:
+                        weights, _ = weights_data  # Unpack (weights, layer_sizes) tuple
+                        if self.verbose:
+                            console.print(f"[cyan]Got weights from weight_manager ({len(weights)} params)[/cyan]")
 
                 # Try 2: Load from saved file (most reliable)
                 if weights is None and best_ind.id is not None:

@@ -181,8 +181,10 @@ def visualize_best_morphology(
     # Get controller weights
     if use_stored_weights and weight_manager is not None and weight_manager.has_weights(id(best_tree)):
         console.print("[cyan]Using learned weights from evolution...[/cyan]")
-        weights = weight_manager.get_weights(id(best_tree))
-        controller.set_weights(weights)
+        weights_data = weight_manager.get_weights(id(best_tree))
+        if weights_data is not None:
+            weights, _ = weights_data  # Unpack (weights, layer_sizes) tuple
+            controller.set_weights(weights)
     elif controller_params.get("use_cmaes", False):
         console.print("[cyan]Optimizing controller with CMA-ES for visualization...[/cyan]")
         from controller_optimizer import optimize_controller_cmaes

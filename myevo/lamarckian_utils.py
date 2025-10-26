@@ -14,6 +14,123 @@ import numpy as np
 from networkx import DiGraph
 
 
+def adapt_weights_to_morphology(
+    parent_weights: np.ndarray,
+    parent_layer_sizes: list[int],
+    offspring_layer_sizes: list[int],
+    rng: np.random.Generator,
+    sigma: float = 1.0,
+) -> np.ndarray:
+    """Adapt parent weights to fit offspring morphology.
+
+    When morphology changes (joints added/removed), the neural network
+    architecture changes. This function intelligently adapts parent weights:
+    - Hidden layer weights are fully preserved (sizes don't change)
+    - Input/output layer weights are adapted (grown/shrunk as needed)
+    - New weights are randomly initialized
+
+    Parameters
+    ----------
+    parent_weights : np.ndarray
+        Flat array of parent's learned weights
+    parent_layer_sizes : list[int]
+        Parent's layer sizes [input, hidden1, ..., output]
+    offspring_layer_sizes : list[int]
+        Offspring's layer sizes [input, hidden1, ..., output]
+    rng : np.random.Generator
+        Random number generator for new weights
+    sigma : float
+        Range for random initialization [-sigma, sigma]
+
+    Returns
+    -------
+    np.ndarray
+        Adapted flat weight array for offspring
+
+    Examples
+    --------
+    >>> # Parent: [59, 32, 16, 32, 23] -> offspring: [50, 32, 16, 32, 20]
+    >>> # Hidden layers [32, 16, 32] preserved, I/O adapted
+    >>> adapted = adapt_weights_to_morphology(
+    ...     parent_weights=parent_weights,
+    ...     parent_layer_sizes=[59, 32, 16, 32, 23],
+    ...     offspring_layer_sizes=[50, 32, 16, 32, 20],
+    ...     rng=np.random.default_rng(42),
+    ...     sigma=1.0,
+    ... )
+    """
+    # Step 1: Unpack parent weights into layer-by-layer structure
+    parent_layers = []
+    idx = 0
+
+    for i in range(len(parent_layer_sizes) - 1):
+        in_size = parent_layer_sizes[i]
+        out_size = parent_layer_sizes[i + 1]
+
+        # Extract weight matrix
+        w_size = in_size * out_size
+        w = parent_weights[idx:idx + w_size].reshape(in_size, out_size)
+        idx += w_size
+
+        # Extract bias vector
+        b = parent_weights[idx:idx + out_size]
+        idx += out_size
+
+        parent_layers.append({'w': w, 'b': b})
+
+    # Step 2: Adapt each layer to offspring architecture
+    offspring_layers = []
+
+    for i in range(len(offspring_layer_sizes) - 1):
+        parent_in_size = parent_layer_sizes[i]
+        parent_out_size = parent_layer_sizes[i + 1]
+        offspring_in_size = offspring_layer_sizes[i]
+        offspring_out_size = offspring_layer_sizes[i + 1]
+
+        parent_w = parent_layers[i]['w']
+        parent_b = parent_layers[i]['b']
+
+        # Adapt weight matrix
+        if parent_in_size == offspring_in_size and parent_out_size == offspring_out_size:
+            # Same size - copy directly
+            offspring_w = parent_w.copy()
+        elif parent_in_size <= offspring_in_size and parent_out_size <= offspring_out_size:
+            # Offspring larger - copy parent + random init for new weights
+            offspring_w = rng.uniform(-sigma, sigma, (offspring_in_size, offspring_out_size))
+            offspring_w[:parent_in_size, :parent_out_size] = parent_w
+        elif parent_in_size >= offspring_in_size and parent_out_size >= offspring_out_size:
+            # Offspring smaller - truncate parent weights
+            offspring_w = parent_w[:offspring_in_size, :offspring_out_size].copy()
+        else:
+            # Mixed case - one dimension grows, other shrinks
+            offspring_w = rng.uniform(-sigma, sigma, (offspring_in_size, offspring_out_size))
+            rows_to_copy = min(parent_in_size, offspring_in_size)
+            cols_to_copy = min(parent_out_size, offspring_out_size)
+            offspring_w[:rows_to_copy, :cols_to_copy] = parent_w[:rows_to_copy, :cols_to_copy]
+
+        # Adapt bias vector
+        if parent_out_size == offspring_out_size:
+            # Same size - copy directly
+            offspring_b = parent_b.copy()
+        elif parent_out_size < offspring_out_size:
+            # Offspring larger - copy parent + random init for new biases
+            offspring_b = rng.uniform(-sigma, sigma, offspring_out_size)
+            offspring_b[:parent_out_size] = parent_b
+        else:
+            # Offspring smaller - truncate parent biases
+            offspring_b = parent_b[:offspring_out_size].copy()
+
+        offspring_layers.append({'w': offspring_w, 'b': offspring_b})
+
+    # Step 3: Repack into flat array
+    flat_weights = []
+    for layer in offspring_layers:
+        flat_weights.append(layer['w'].flatten())
+        flat_weights.append(layer['b'])
+
+    return np.concatenate(flat_weights)
+
+
 def tree_distance(tree1: DiGraph, tree2: DiGraph, timeout: float = 1.0) -> float:
     """Compute tree edit distance between two tree genotypes.
 
@@ -103,7 +220,7 @@ class ParentWeightManager:
     different inheritance modes for crossover offspring.
     """
 
-    def __init__(self, crossover_mode: str = "average"):
+    def __init__(self, crossover_mode: str = "average", sigma: float = 1.0):
         """Initialize the weight manager.
 
         Parameters
@@ -115,13 +232,16 @@ class ParentWeightManager:
             - "parent1": Use only first parent's weights
             - "random": Randomly choose one parent's weights
             - "closest_parent": Use weights from parent with smallest tree edit distance
+        sigma : float, optional
+            Range for random weight initialization when adapting morphology, by default 1.0.
         """
-        self.learned_weights: dict[int, np.ndarray] = {}
+        self.learned_weights: dict[int, tuple[np.ndarray, list[int]]] = {}
         self.all_evaluated_individuals: list[Any] = []
         self.crossover_mode = crossover_mode
+        self.sigma = sigma
         self.rng = np.random.default_rng()
 
-    def store_weights(self, tree_id: int, weights: np.ndarray) -> None:
+    def store_weights(self, tree_id: int, weights: np.ndarray, layer_sizes: list[int]) -> None:
         """Store learned weights for a genotype.
 
         Parameters
@@ -130,8 +250,10 @@ class ParentWeightManager:
             ID of the tree genotype (use id(tree)).
         weights : np.ndarray
             Learned controller weights.
+        layer_sizes : list[int]
+            Neural network layer sizes [input, hidden1, ..., output].
         """
-        self.learned_weights[tree_id] = weights.copy()
+        self.learned_weights[tree_id] = (weights.copy(), layer_sizes.copy())
 
     def add_evaluated_individual(self, individual: Any) -> None:
         """Add an evaluated individual to the tracking list.
@@ -149,8 +271,11 @@ class ParentWeightManager:
         self,
         individual: Any,
         offspring_tree: DiGraph | None = None,
+        offspring_layer_sizes: list[int] | None = None,
     ) -> np.ndarray | None:
         """Get inherited weights from parent(s) for an individual.
+
+        Automatically adapts parent weights to fit offspring morphology if needed.
 
         Parameters
         ----------
@@ -159,11 +284,14 @@ class ParentWeightManager:
         offspring_tree : DiGraph | None, optional
             The offspring's tree genotype (needed for closest_parent mode),
             by default None.
+        offspring_layer_sizes : list[int] | None, optional
+            The offspring's neural network layer sizes for weight adaptation,
+            by default None.
 
         Returns
         -------
         np.ndarray | None
-            Inherited weights from parent(s), or None if not available.
+            Inherited (and adapted) weights from parent(s), or None if not available.
         """
         # Check if individual has parent information
         if "parent1_id" not in individual.tags:
@@ -191,12 +319,28 @@ class ParentWeightManager:
                 parent1_tree=parent1_tree,
                 parent2_tree=parent2_tree,
                 offspring_tree=offspring_tree,
+                offspring_layer_sizes=offspring_layer_sizes,
             )
         else:
             # Mutation offspring - inherit from single parent
             if parent1_tree is not None:
-                parent_weights = self.learned_weights.get(id(parent1_tree))
-                return parent_weights.copy() if parent_weights is not None else None
+                parent_data = self.learned_weights.get(id(parent1_tree))
+                if parent_data is None:
+                    return None
+
+                parent_weights, parent_layer_sizes = parent_data
+
+                # Adapt weights if offspring has different morphology
+                if offspring_layer_sizes is not None and parent_layer_sizes != offspring_layer_sizes:
+                    return adapt_weights_to_morphology(
+                        parent_weights=parent_weights,
+                        parent_layer_sizes=parent_layer_sizes,
+                        offspring_layer_sizes=offspring_layer_sizes,
+                        rng=self.rng,
+                        sigma=self.sigma,
+                    )
+                else:
+                    return parent_weights.copy()
             return None
 
     def _combine_parent_weights(
@@ -204,8 +348,11 @@ class ParentWeightManager:
         parent1_tree: DiGraph | None,
         parent2_tree: DiGraph | None,
         offspring_tree: DiGraph | None = None,
+        offspring_layer_sizes: list[int] | None = None,
     ) -> np.ndarray | None:
         """Combine weights from two parents for crossover offspring.
+
+        Automatically adapts both parents' weights to offspring morphology before combining.
 
         Parameters
         ----------
@@ -215,29 +362,55 @@ class ParentWeightManager:
             Second parent's tree genotype.
         offspring_tree : DiGraph | None, optional
             Offspring's tree genotype (for closest_parent mode), by default None.
+        offspring_layer_sizes : list[int] | None, optional
+            Offspring's neural network layer sizes for weight adaptation, by default None.
 
         Returns
         -------
         np.ndarray | None
-            Combined weights, or None if parents don't have weights.
+            Combined (and adapted) weights, or None if parents don't have weights.
         """
-        # Get weights from both parents if available
-        weights1 = self.learned_weights.get(id(parent1_tree)) if parent1_tree is not None else None
-        weights2 = self.learned_weights.get(id(parent2_tree)) if parent2_tree is not None else None
+        # Get weights and layer sizes from both parents if available
+        parent1_data = self.learned_weights.get(id(parent1_tree)) if parent1_tree is not None else None
+        parent2_data = self.learned_weights.get(id(parent2_tree)) if parent2_tree is not None else None
 
         # Handle cases where one or both parents don't have weights
+        if parent1_data is None and parent2_data is None:
+            return None
+
+        # Helper function to adapt parent weights to offspring
+        def adapt_parent(parent_data: tuple[np.ndarray, list[int]] | None) -> np.ndarray | None:
+            if parent_data is None:
+                return None
+            parent_weights, parent_layer_sizes = parent_data
+            if offspring_layer_sizes is not None and parent_layer_sizes != offspring_layer_sizes:
+                return adapt_weights_to_morphology(
+                    parent_weights=parent_weights,
+                    parent_layer_sizes=parent_layer_sizes,
+                    offspring_layer_sizes=offspring_layer_sizes,
+                    rng=self.rng,
+                    sigma=self.sigma,
+                )
+            else:
+                return parent_weights.copy()
+
+        # Adapt both parents to offspring morphology
+        weights1 = adapt_parent(parent1_data)
+        weights2 = adapt_parent(parent2_data)
+
+        # Handle cases where one parent doesn't have weights
         if weights1 is None:
-            return weights2.copy() if weights2 is not None else None
+            return weights2
         if weights2 is None:
-            return weights1.copy() if weights1 is not None else None
+            return weights1
 
         # Both parents have weights - combine based on crossover mode
         if self.crossover_mode == "parent1":
-            return weights1.copy()
+            return weights1
         elif self.crossover_mode == "average":
             return (weights1 + weights2) / 2
         elif self.crossover_mode == "random":
-            return weights1.copy() if self.rng.random() < 0.5 else weights2.copy()
+            return weights1 if self.rng.random() < 0.5 else weights2
         elif self.crossover_mode == "closest_parent":
             if offspring_tree is None:
                 # Fallback to average if no offspring tree provided
@@ -248,7 +421,7 @@ class ParentWeightManager:
             dist2 = tree_distance(offspring_tree, parent2_tree)
 
             # Return weights from closest parent
-            return weights1.copy() if dist1 <= dist2 else weights2.copy()
+            return weights1 if dist1 <= dist2 else weights2
         else:
             # Default to averaging
             return (weights1 + weights2) / 2
@@ -268,8 +441,8 @@ class ParentWeightManager:
         for tree_id in old_ids:
             del self.learned_weights[tree_id]
 
-    def get_weights(self, tree_id: int) -> np.ndarray | None:
-        """Retrieve stored weights for a genotype.
+    def get_weights(self, tree_id: int) -> tuple[np.ndarray, list[int]] | None:
+        """Retrieve stored weights and layer sizes for a genotype.
 
         Parameters
         ----------
@@ -278,11 +451,14 @@ class ParentWeightManager:
 
         Returns
         -------
-        np.ndarray | None
-            Stored weights, or None if not found.
+        tuple[np.ndarray, list[int]] | None
+            Tuple of (weights, layer_sizes), or None if not found.
         """
-        weights = self.learned_weights.get(tree_id)
-        return weights.copy() if weights is not None else None
+        data = self.learned_weights.get(tree_id)
+        if data is not None:
+            weights, layer_sizes = data
+            return (weights.copy(), layer_sizes.copy())
+        return None
 
     def has_weights(self, tree_id: int) -> bool:
         """Check if weights are stored for a genotype.

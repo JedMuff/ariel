@@ -1,5 +1,12 @@
 """Command-line script to record videos from saved robots.
 
+This script loads a saved robot from a directory containing:
+- body.json: Robot morphology
+- optimized_brain.npy (or initial_brain.npy): Neural network weights
+- metadata.json (optional): Neural network architecture info
+  - If present, uses saved architecture (controller_hidden_layers, controller_activation)
+  - If missing, uses default [32, 16, 32] architecture
+
 Usage:
     python record_saved_robot.py <path_to_individual_directory>
 
@@ -144,6 +151,21 @@ def main():
 
     body_graph = load_graph_from_json(body_file)
 
+    # Load metadata if available
+    metadata_file = individual_dir / "metadata.json"
+    controller_hidden_layers = None
+    controller_activation = None
+
+    if metadata_file.exists():
+        import json
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        controller_hidden_layers = metadata.get("controller_hidden_layers")
+        controller_activation = metadata.get("controller_activation")
+        console.print(f"[green]Loaded metadata:[/green] hidden_layers={controller_hidden_layers}, activation={controller_activation}")
+    else:
+        console.print(f"[yellow]No metadata.json found, will use default or command-line parameters[/yellow]")
+
     # Load brain (prefer optimized)
     brain_file = individual_dir / "optimized_brain.npy"
     if not brain_file.exists():
@@ -164,6 +186,8 @@ def main():
         brain_weights=brain_weights,
         output_path=output_path,
         duration=args.duration,
+        controller_hidden_layers=controller_hidden_layers,  # From metadata if available
+        controller_activation=controller_activation,  # From metadata if available
         video_width=args.width,
         video_height=args.height,
         video_fps=args.fps,
