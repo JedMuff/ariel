@@ -36,13 +36,15 @@ which python3
 python3 --version
 
 # Calculate experiment type and repetition from array task ID
-# Tasks 0-9:   Darwin + Locomotion
-# Tasks 10-19: Lamarckian + Locomotion
-# Tasks 20-29: Darwin + Novelty*Locomotion
-# Tasks 30-39: Lamarckian + Novelty*Locomotion
+# Now organized so all experiments run in parallel for each repetition:
+# Tasks 0-3:   Repetition 0 (all 4 experiments)
+# Tasks 4-7:   Repetition 1 (all 4 experiments)
+# Tasks 8-11:  Repetition 2 (all 4 experiments)
+# ...
+# Tasks 36-39: Repetition 9 (all 4 experiments)
 
-EXPERIMENT_ID=$((SLURM_ARRAY_TASK_ID / 10))
-REPETITION=$((SLURM_ARRAY_TASK_ID % 10))
+REPETITION=$((SLURM_ARRAY_TASK_ID / 4))
+EXPERIMENT_ID=$((SLURM_ARRAY_TASK_ID % 4))
 SEED=$((42 + REPETITION))
 
 echo "Experiment ID: $EXPERIMENT_ID"
