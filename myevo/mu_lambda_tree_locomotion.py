@@ -1114,7 +1114,7 @@ def main() -> None:
 
         # CMA-ES inner loop parameters
         use_cmaes=True,                  # Enable CMA-ES controller optimization
-        cmaes_budget=1000,                 # CMA-ES evaluations per morphology
+        cmaes_budget=2000,                 # CMA-ES evaluations per morphology
         cmaes_population_size=20,        # CMA-ES population size
 
         # Novelty search parameters
@@ -1128,7 +1128,7 @@ def main() -> None:
         lamarckian_crossover_mode="closest_parent",  # Weight combination mode: average, parent1, random, closest_parent
 
         # Video recording parameters
-        enable_video_recording=True,     # Enable video recording of best robot
+        enable_video_recording=False,     # Enable video recording of best robot
         video_interval=1,                # Record video every N generations
         video_duration=35.0,             # Video duration in seconds
         video_platform="macos",          # Video codec: "macos" or "windows"
