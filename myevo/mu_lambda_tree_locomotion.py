@@ -15,6 +15,9 @@ Key features:
 - Visualization and progress tracking
 """
 
+# Enable modern type annotations
+from __future__ import annotations
+
 # IMPORTANT: Set thread limits BEFORE importing numpy/mujoco to prevent nested parallelism
 # When using multiprocessing, each worker should use only 1 thread
 import os
@@ -23,9 +26,6 @@ os.environ["MKL_NUM_THREADS"] = "1"          # Intel MKL (NumPy)
 os.environ["OPENBLAS_NUM_THREADS"] = "1"     # OpenBLAS (NumPy)
 os.environ["NUMEXPR_NUM_THREADS"] = "1"      # NumExpr
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"   # macOS Accelerate framework
-
-# Enable modern type annotations
-from __future__ import annotations
 
 # Standard library
 import random
@@ -1101,10 +1101,10 @@ def main() -> None:
         max_depth=3,                     # Max tree depth
         max_part_limit=25,               # Max robot parts
         max_actuators=12,                # Max actuators
-        mutation_strength=1,             # Initial mutation strength
-        mutation_reps=1,                 # Initial mutation repetitions
+        mutation_strength=2,             # Initial mutation strength
+        mutation_reps=2,                 # Initial mutation repetitions
         mutate_attributes_prob=0.1,      # Self-adaptation mutation prob
-        enable_self_adaptation=False,    # Enable/disable self-adaptation
+        enable_self_adaptation=True,    # Enable/disable self-adaptation
 
         # Simulation parameters
         simulation_duration=35.0,        # Simulation time (seconds)
