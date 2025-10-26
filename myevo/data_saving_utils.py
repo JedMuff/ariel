@@ -201,21 +201,11 @@ def save_final_database(
         tree = ind.genotype.tree if isinstance(ind.genotype, TreeGenotype) else ind.genotype
 
         # Get parent IDs from tags
-        parent1_id = ind.tags.get("parent1_id", None)
-        parent2_id = ind.tags.get("parent2_id", None)
+        parent1_id = ind.tags.get("parent1_id", None) if ind.tags else None
+        parent2_id = ind.tags.get("parent2_id", None) if ind.tags else None
 
-        # Get individual_uuid from tags (persists across multiprocessing)
-        # Fall back to tree metadata if not in tags
-        individual_id_str = ind.tags.get("individual_uuid")
-        if individual_id_str is None:
-            individual_id_str = tree.graph.get("_individual_id")
-
-        # Determine directory path - use flat individuals/ folder
-        if individual_id_str:
-            directory = str(save_dir / "individuals" / f"individual_{individual_id_str}")
-        else:
-            # Fallback if no individual_id found
-            directory = ""
+        # Get directory path from tags (set during evaluation)
+        directory = ind.tags.get("log_dir", "") if ind.tags else ""
 
         # Count parts and actuators
         # Note: In robogen_lite, actuators are modules with type="HINGE"
@@ -224,9 +214,8 @@ def save_final_database(
 
         record = {
             "individual_id": ind.id,
-            "individual_uuid": individual_id_str,
             "generation": gen,
-            "fitness": ind.fitness if ind.fitness_ is not None else None,
+            "fitness": ind.fitness if ind.fitness is not None else None,
             "parent1_id": parent1_id,
             "parent2_id": parent2_id,
             "directory": directory,

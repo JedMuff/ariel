@@ -61,11 +61,13 @@ def evaluate_individual(
     fitness = fitness_function(individual.genotype, indiv_log_dir)
     individual.fitness = float(fitness)
 
-    # Store metadata in tags
-    individual.tags = {
+    # Update metadata in tags (preserve existing tags like parent IDs)
+    if individual.tags is None:
+        individual.tags = {}
+    individual.tags.update({
         "generation": generation,
         "log_dir": indiv_log_dir,
-    }
+    })
 
     return individual
 
@@ -130,10 +132,13 @@ def evaluate_population(
         # Assign results back to individuals
         for individual, (fitness, log_dir) in zip(to_evaluate, results):
             individual.fitness = fitness
-            individual.tags = {
+            # Update tags (preserve existing tags like parent IDs)
+            if individual.tags is None:
+                individual.tags = {}
+            individual.tags.update({
                 "generation": generation,
                 "log_dir": log_dir,
-            }
+            })
 
     return population
 
