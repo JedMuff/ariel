@@ -128,6 +128,9 @@ class TreeGenotype(Genotype):
         # Apply collision repair
         graph = self.repair_tree(graph)
 
+        # Enforce part and actuator constraints
+        graph = self.enforce_constraints(graph)
+
         return graph
 
     def _build_random_subtree(
@@ -184,6 +187,88 @@ class TreeGenotype(Genotype):
 
             # Recursively build subtree
             self._build_random_subtree(graph, child_id, depth - 1, module_type)
+
+    def count_actuators(self, tree: nx.DiGraph) -> int:
+        """Count the number of actuators (HINGE modules) in a tree.
+
+        Parameters
+        ----------
+        tree : nx.DiGraph
+            The tree to count actuators in.
+
+        Returns
+        -------
+        int
+            Number of HINGE modules in the tree.
+        """
+        return sum(1 for _, data in tree.nodes(data=True) if data.get("type") == "HINGE")
+
+    def enforce_constraints(self, tree: nx.DiGraph) -> nx.DiGraph:
+        """
+        Enforce part and actuator constraints by pruning the tree.
+
+        This method builds a new tree using BFS traversal. Starting from the core,
+        it incrementally adds nodes while respecting max_part_limit and max_actuators.
+        Nodes that would violate constraints (and their descendants) are excluded.
+
+        Parameters
+        ----------
+        tree : nx.DiGraph
+            The tree to enforce constraints on.
+
+        Returns
+        -------
+        nx.DiGraph
+            The tree with constraints enforced.
+        """
+        from collections import deque
+
+        # Start with just the CORE node
+        constrained_tree = nx.DiGraph()
+        constrained_tree.add_node(
+            IDX_OF_CORE,
+            **tree.nodes[IDX_OF_CORE]
+        )
+
+        # BFS queue - contains nodes to process (nodes that are in constrained tree)
+        queue = deque([IDX_OF_CORE])
+
+        # Process nodes in BFS order
+        while queue:
+            parent_id = queue.popleft()
+
+            # Get all children of this parent in the original tree
+            children = list(tree.successors(parent_id))
+
+            for child_id in children:
+                # Get child node attributes and edge attributes from original tree
+                child_attrs = tree.nodes[child_id]
+                edge_attrs = tree.edges[parent_id, child_id]
+
+                # Check if adding this child would violate constraints
+                num_parts = len(constrained_tree.nodes) + 1  # +1 for the new child
+                num_actuators = self.count_actuators(constrained_tree)
+
+                # Check if child is a HINGE (actuator)
+                if child_attrs.get("type") == "HINGE":
+                    num_actuators += 1
+
+                # Skip this child if it would violate constraints
+                if num_parts > self.max_part_limit:
+                    continue
+                if num_actuators > self.max_actuators:
+                    continue
+
+                # Add child node to constrained tree
+                constrained_tree.add_node(child_id, **child_attrs)
+
+                # Add edge from parent to child
+                constrained_tree.add_edge(parent_id, child_id, **edge_attrs)
+
+                # Add to queue to process its children later
+                queue.append(child_id)
+
+        return constrained_tree
 
     def repair_tree(self, tree: nx.DiGraph) -> nx.DiGraph:
         """
@@ -351,6 +436,9 @@ class TreeGenotype(Genotype):
         # Apply collision repair
         mutated_tree = self.repair_tree(mutated_tree)
 
+        # Enforce part and actuator constraints
+        mutated_tree = self.enforce_constraints(mutated_tree)
+
         return mutated_tree
 
     def mutation(self, population: np.ndarray) -> np.ndarray:
@@ -484,6 +572,10 @@ class TreeGenotype(Genotype):
         # Apply collision repair to both offspring
         offspring1 = self.repair_tree(offspring1)
         offspring2 = self.repair_tree(offspring2)
+
+        # Enforce part and actuator constraints
+        offspring1 = self.enforce_constraints(offspring1)
+        offspring2 = self.enforce_constraints(offspring2)
 
         return offspring1, offspring2
 
