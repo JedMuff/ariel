@@ -551,6 +551,21 @@ class TreeLocomotionEvolution:
             # Setup tracker
             tracker = setup_tracker(world_spec, data)
 
+            # Capture spawn height for penalty calculation
+            # Forward kinematics must be computed first to get correct positions
+            mj.mj_forward(model, data)
+
+            # Find core geom and get its initial height
+            spawn_height = None
+            for i in range(model.ngeom):
+                geom_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, i)
+                if geom_name and "core" in geom_name.lower():
+                    spawn_height = data.geom(i).xpos[2]  # z-coordinate
+                    break
+
+            if spawn_height is None:
+                raise ValueError("Could not find core geom to determine spawn height")
+
             # Run two-phase simulation: 5 seconds settling, then controlled locomotion
             settling_duration = 5.0
             control_duration = self.simulation_duration - settling_duration
@@ -564,7 +579,13 @@ class TreeLocomotionEvolution:
             )
 
             # Calculate fitness (baseline_time=0 since tracker was reset at start of control phase)
-            x_displacement = calculate_displacement_fitness(tracker, baseline_time=0.0, model=model)
+            # Pass spawn_height for the height penalty calculation
+            x_displacement = calculate_displacement_fitness(
+                tracker,
+                baseline_time=0.0,
+                model=model,
+                spawn_height=spawn_height
+            )
 
             # Store learned weights for Lamarckian inheritance (optimized weights)
             # In non-CMA-ES case, weights don't change, but we still store for Lamarckian mode

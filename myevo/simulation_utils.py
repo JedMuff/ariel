@@ -123,14 +123,16 @@ def calculate_displacement_fitness(
     tracker: Tracker,
     baseline_time: float,
     model: mj.MjModel,
+    spawn_height: float,
 ) -> float:
     """Calculate fitness as forward displacement from a baseline time.
 
     This uses the x-axis displacement (forward direction in ARIEL) from
     a baseline time to avoid advantages from initial falling/settling.
 
-    A height penalty is applied: if the robot's initial height (z-coordinate)
-    is above 1 metre, the initial height is subtracted from the fitness.
+    A height penalty is applied: if the robot's spawn height (morphology height)
+    is above 0.21m, the spawn height is subtracted from the fitness. This prevents
+    tall robots from exploiting falling/settling for free displacement.
 
     Parameters
     ----------
@@ -140,6 +142,9 @@ def calculate_displacement_fitness(
         Time in seconds to use as baseline (e.g., 1.0 for 1 second).
     model : mj.MjModel
         MuJoCo model (needed for timestep).
+    spawn_height : float
+        The spawn height (z-coordinate) of the robot's core at initialization.
+        This is the robot's morphological height used for the penalty.
 
     Returns
     -------
@@ -162,13 +167,10 @@ def calculate_displacement_fitness(
     # X-axis is forward direction in ARIEL
     x_displacement = final_pos[0] - initial_pos[0]
 
-    # Z-axis is vertical direction (height)
-    initial_height = initial_pos[2]
-
-    # Apply height penalty if initial height is above 0.21m
-    # (allows up to 1 core + 3 bricks stacked below it)
-    if initial_height > 0.21:
-        fitness = x_displacement - initial_height
+    # Apply height penalty based on spawn height (morphological height)
+    # (allows up to 1 core + 3 bricks stacked below it: 0.21m)
+    if spawn_height > 0.21:
+        fitness = x_displacement - spawn_height
     else:
         fitness = x_displacement
 
@@ -181,7 +183,7 @@ def simulate_with_controller(
     controller: FlexibleNeuralNetworkController,
     tracker: Tracker,
     duration: float,
-    time_steps_per_ctrl_step: int = 500,
+    time_steps_per_ctrl_step: int = 200,
     time_steps_per_save: int = 500,
 ) -> None:
     """Run a simulation with a neural network controller.
@@ -199,7 +201,7 @@ def simulate_with_controller(
     duration : float
         Simulation duration in seconds.
     time_steps_per_ctrl_step : int, optional
-        Control update frequency, by default 500.
+        Control update frequency, by default 200.
     time_steps_per_save : int, optional
         Tracking save frequency, by default 500.
     """
@@ -225,7 +227,7 @@ def simulate_with_settling_phase(
     tracker: Tracker,
     settling_duration: float,
     control_duration: float,
-    time_steps_per_ctrl_step: int = 500,
+    time_steps_per_ctrl_step: int = 200,
     time_steps_per_save: int = 500,
 ) -> None:
     """Run a two-phase simulation: passive settling, then active control.
@@ -251,7 +253,7 @@ def simulate_with_settling_phase(
     control_duration : float
         Duration of active control phase in seconds.
     time_steps_per_ctrl_step : int, optional
-        Control update frequency, by default 500.
+        Control update frequency, by default 200.
     time_steps_per_save : int, optional
         Tracking save frequency, by default 500.
     """
@@ -333,10 +335,24 @@ def evaluate_morphology_fitness(
     # Setup tracker
     tracker = setup_tracker(world_spec, data)
 
+    # Capture spawn height for penalty calculation
+    mj.mj_forward(model, data)
+
+    # Find core geom and get its initial height
+    spawn_height = None
+    for i in range(model.ngeom):
+        geom_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, i)
+        if geom_name and "core" in geom_name.lower():
+            spawn_height = data.geom(i).xpos[2]  # z-coordinate
+            break
+
+    if spawn_height is None:
+        raise ValueError("Could not find core geom to determine spawn height")
+
     # Run simulation
     simulate_with_controller(
         model, data, controller, tracker, simulation_duration
     )
 
     # Calculate fitness
-    return calculate_displacement_fitness(tracker, baseline_time, model)
+    return calculate_displacement_fitness(tracker, baseline_time, model, spawn_height)

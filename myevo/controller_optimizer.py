@@ -137,6 +137,21 @@ def optimize_controller_cmaes(
         # Setup tracker
         tracker = setup_tracker(world_spec, data)
 
+        # Capture spawn height for penalty calculation
+        # Forward kinematics must be computed first to get correct positions
+        mj.mj_forward(model, data)
+
+        # Find core geom and get its initial height
+        spawn_height = None
+        for i in range(model.ngeom):
+            geom_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, i)
+            if geom_name and "core" in geom_name.lower():
+                spawn_height = data.geom(i).xpos[2]  # z-coordinate
+                break
+
+        if spawn_height is None:
+            raise ValueError("Could not find core geom to determine spawn height")
+
         # Run two-phase simulation: 5 seconds settling, then controlled locomotion
         settling_duration = 5.0
         control_duration = simulation_duration - settling_duration
@@ -149,7 +164,7 @@ def optimize_controller_cmaes(
             control_duration=control_duration,
         )
 
-        # Calculate fitness as forward displacement
+        # Calculate fitness as forward displacement with height penalty
         # baseline_time=0 since tracker was reset at start of control phase
         dt = model.opt.timestep
         time_steps_per_save = 500  # As defined in Controller
@@ -164,7 +179,14 @@ def optimize_controller_cmaes(
 
         final_pos = tracker.history["xpos"][0][-1]
         x_displacement = final_pos[0] - initial_pos[0]
-        return float(x_displacement)
+
+        # Apply height penalty based on spawn height (morphology height)
+        if spawn_height > 0.21:
+            fitness = x_displacement - spawn_height
+        else:
+            fitness = x_displacement
+
+        return float(fitness)
 
     # Initialize CMA-ES optimizer
     instrum = ng.p.Array(shape=(num_weights,))
