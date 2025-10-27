@@ -54,7 +54,7 @@ class MujocoConfig(BaseSettings):
     # --- Option --- #
     # https://mujoco.readthedocs.io/en/stable/APIreference/APItypes.html#mjoption
     # https://mujoco.readthedocs.io/en/2.3.7/XMLreference.html#option
-    timestep: float = 0.02  # seconds
+    timestep: float = 0.002  # seconds (MuJoCo default, not currently applied to spec)
     integrator: int = int(mujoco.mjtIntegrator.mjINT_IMPLICITFAST)
 
     # --- Visual --- #

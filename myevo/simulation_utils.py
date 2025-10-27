@@ -23,13 +23,15 @@ if TYPE_CHECKING:
     from neural_network_controller import FlexibleNeuralNetworkController
 
 
-def create_robot_model(tree: DiGraph) -> tuple[mj.MjModel, mj.MjData, Any]:
+def create_robot_model(tree: DiGraph, check_collisions: bool = False) -> tuple[mj.MjModel, mj.MjData, Any]:
     """Build a MuJoCo model from a robot tree genotype.
 
     Parameters
     ----------
     tree : DiGraph
         The robot morphology graph (tree genotype).
+    check_collisions : bool, optional
+        Whether to check for self-collisions during construction, by default False.
 
     Returns
     -------
@@ -42,7 +44,7 @@ def create_robot_model(tree: DiGraph) -> tuple[mj.MjModel, mj.MjData, Any]:
     mj.set_mjcb_control(None)
 
     # Build robot from tree
-    robot_core = construct_mjspec_from_graph(tree)
+    robot_core = construct_mjspec_from_graph(tree, check_collisions=check_collisions)
 
     # Create world and spawn robot
     world = SimpleFlatWorld()
@@ -179,7 +181,7 @@ def simulate_with_controller(
     controller: FlexibleNeuralNetworkController,
     tracker: Tracker,
     duration: float,
-    time_steps_per_ctrl_step: int = 50,
+    time_steps_per_ctrl_step: int = 500,
     time_steps_per_save: int = 500,
 ) -> None:
     """Run a simulation with a neural network controller.
@@ -197,7 +199,7 @@ def simulate_with_controller(
     duration : float
         Simulation duration in seconds.
     time_steps_per_ctrl_step : int, optional
-        Control update frequency, by default 50.
+        Control update frequency, by default 500.
     time_steps_per_save : int, optional
         Tracking save frequency, by default 500.
     """
@@ -223,7 +225,7 @@ def simulate_with_settling_phase(
     tracker: Tracker,
     settling_duration: float,
     control_duration: float,
-    time_steps_per_ctrl_step: int = 50,
+    time_steps_per_ctrl_step: int = 500,
     time_steps_per_save: int = 500,
 ) -> None:
     """Run a two-phase simulation: passive settling, then active control.
@@ -249,7 +251,7 @@ def simulate_with_settling_phase(
     control_duration : float
         Duration of active control phase in seconds.
     time_steps_per_ctrl_step : int, optional
-        Control update frequency, by default 50.
+        Control update frequency, by default 500.
     time_steps_per_save : int, optional
         Tracking save frequency, by default 500.
     """

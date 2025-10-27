@@ -19,7 +19,7 @@ class Controller:
     controller_callback_function: Callable[..., Any]
 
     # How often to call the controller (for every simulation step)
-    time_steps_per_ctrl_step: int = 50  # control frequency
+    time_steps_per_ctrl_step: int = 500  # control frequency
 
     # How often to save the data
     time_steps_per_save: int = 500  # data-sampling frequency
