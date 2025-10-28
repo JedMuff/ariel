@@ -201,7 +201,7 @@ def simulate_with_controller(
     duration : float
         Simulation duration in seconds.
     time_steps_per_ctrl_step : int, optional
-        Control update frequency, by default 200.
+        Control update frequency, by default 100.
     time_steps_per_save : int, optional
         Tracking save frequency, by default 500.
     """
