@@ -941,8 +941,8 @@ def parse_args():
     parser.add_argument(
         "--cmaes-budget",
         type=int,
-        default=2000,
-        help="CMA-ES evaluations per morphology (default: 2000)"
+        default=1000,
+        help="CMA-ES evaluations per morphology (default: 1000)"
     )
     parser.add_argument(
         "--cmaes-population-size",
