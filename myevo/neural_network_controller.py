@@ -59,6 +59,14 @@ class FlexibleNeuralNetworkController:
     def calculate_input_size(self, model: mj.MjModel) -> int:
         """Calculate the input size based on the model.
 
+        Input consists of:
+        - Actuator positions (nu)
+        - Actuator velocities (nu)
+        - Core body orientation (3 Euler angles)
+        - Core body linear velocity (3D)
+        - Core body angular velocity (3D)
+        Total: 2*nu + 9
+
         Parameters
         ----------
         model : mj.MjModel
@@ -69,7 +77,8 @@ class FlexibleNeuralNetworkController:
         int
             Total input size
         """
-        self.input_size = model.nq + model.nv
+        # Input: actuator state (pos + vel) + core body state (orientation + vel + angvel)
+        self.input_size = 2 * self.num_actuators + 9
 
         # Define layer sizes: [input] + hidden_layers + [output]
         self.layer_sizes = [self.input_size] + self.hidden_layers + [self.num_actuators]
@@ -140,6 +149,14 @@ class FlexibleNeuralNetworkController:
     ) -> npt.NDArray[np.float64]:
         """Execute the neural network controller.
 
+        Constructs proprioceptive input from:
+        - Actuator joint positions (nu values)
+        - Actuator joint velocities (nu values)
+        - Core body orientation (3 Euler angles from quaternion)
+        - Core body linear velocity (3D)
+        - Core body angular velocity (3D)
+        Total: 2*nu + 9
+
         Parameters
         ----------
         model : mj.MjModel
@@ -156,8 +173,47 @@ class FlexibleNeuralNetworkController:
             msg = "Weights not set. Call set_weights first."
             raise ValueError(msg)
 
-        # Construct input vector
-        x = np.concatenate([data.qpos, data.qvel])
+        # Extract actuator joint states using model.actuator_trnid mapping
+        actuator_qpos = np.zeros(self.num_actuators)
+        actuator_qvel = np.zeros(self.num_actuators)
+
+        for i in range(self.num_actuators):
+            # Get the joint ID that this actuator controls
+            joint_id = model.actuator_trnid[i, 0]
+            if joint_id >= 0:
+                # Get position and velocity addresses for this joint
+                qposadr = model.jnt_qposadr[joint_id]
+                dofadr = model.jnt_dofadr[joint_id]
+                actuator_qpos[i] = data.qpos[qposadr]
+                actuator_qvel[i] = data.qvel[dofadr]
+
+        # Extract core body state from the free joint (always joint 0)
+        # Free joint format: qpos[0:7] = [x, y, z, qw, qx, qy, qz]
+        #                   qvel[0:6] = [vx, vy, vz, wx, wy, wz]
+        if model.nq >= 7 and model.nv >= 6:
+            # Extract quaternion and convert to Euler angles
+            quat = data.qpos[3:7]  # [qw, qx, qy, qz]
+            euler = self._quat_to_euler(quat)
+
+            # Extract linear velocity
+            linear_vel = data.qvel[0:3]
+
+            # Extract angular velocity
+            angular_vel = data.qvel[3:6]
+        else:
+            # Fallback if no free joint (shouldn't happen in our setup)
+            euler = np.zeros(3)
+            linear_vel = np.zeros(3)
+            angular_vel = np.zeros(3)
+
+        # Construct input vector: [actuator_pos, actuator_vel, orientation, lin_vel, ang_vel]
+        x = np.concatenate([
+            actuator_qpos,
+            actuator_qvel,
+            euler,
+            linear_vel,
+            angular_vel,
+        ])
 
         # Forward pass through all layers
         for i, layer in enumerate(self.weights):
@@ -171,3 +227,34 @@ class FlexibleNeuralNetworkController:
 
         # Scale outputs to joint angle range
         return x * (np.pi / 2)
+
+    def _quat_to_euler(self, quat: np.ndarray) -> np.ndarray:
+        """Convert quaternion to Euler angles (roll, pitch, yaw).
+
+        Parameters
+        ----------
+        quat : np.ndarray
+            Quaternion [qw, qx, qy, qz]
+
+        Returns
+        -------
+        np.ndarray
+            Euler angles [roll, pitch, yaw] in radians
+        """
+        qw, qx, qy, qz = quat
+
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (qw * qx + qy * qz)
+        cosr_cosp = 1 - 2 * (qx * qx + qy * qy)
+        roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+        # Pitch (y-axis rotation)
+        sinp = 2 * (qw * qy - qz * qx)
+        pitch = np.arcsin(np.clip(sinp, -1, 1))
+
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (qw * qz + qx * qy)
+        cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+        yaw = np.arctan2(siny_cosp, cosy_cosp)
+
+        return np.array([roll, pitch, yaw])

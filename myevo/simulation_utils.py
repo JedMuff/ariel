@@ -183,7 +183,7 @@ def simulate_with_controller(
     controller: FlexibleNeuralNetworkController,
     tracker: Tracker,
     duration: float,
-    time_steps_per_ctrl_step: int = 200,
+    time_steps_per_ctrl_step: int = 100,
     time_steps_per_save: int = 500,
 ) -> None:
     """Run a simulation with a neural network controller.
@@ -227,7 +227,7 @@ def simulate_with_settling_phase(
     tracker: Tracker,
     settling_duration: float,
     control_duration: float,
-    time_steps_per_ctrl_step: int = 200,
+    time_steps_per_ctrl_step: int = 100,
     time_steps_per_save: int = 500,
 ) -> None:
     """Run a two-phase simulation: passive settling, then active control.
@@ -253,7 +253,7 @@ def simulate_with_settling_phase(
     control_duration : float
         Duration of active control phase in seconds.
     time_steps_per_ctrl_step : int, optional
-        Control update frequency, by default 200.
+        Control update frequency, by default 100.
     time_steps_per_save : int, optional
         Tracking save frequency, by default 500.
     """

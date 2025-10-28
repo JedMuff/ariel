@@ -19,7 +19,7 @@ from ariel.ec.a001 import Individual
 
 def evaluate_individual(
     individual: Individual,
-    fitness_function: Callable[[Any, str | None], float],
+    fitness_function: Callable[[Individual, str | None], float],
     generation: int,
     log_dir_base: str | None = None,
 ) -> Individual:
@@ -29,8 +29,9 @@ def evaluate_individual(
     ----------
     individual : Individual
         The individual to evaluate.
-    fitness_function : Callable[[Any, str | None], float]
-        Function that takes (genome, log_dir) and returns fitness value.
+    fitness_function : Callable[[Individual, str | None], float]
+        Function that takes (individual, log_dir) and returns fitness value.
+        The Individual parameter provides access to genotype and tags (e.g., for weight inheritance).
     generation : int
         Current generation number.
     log_dir_base : str | None, optional
@@ -44,8 +45,8 @@ def evaluate_individual(
 
     Examples
     --------
-    >>> def my_fitness(genome, log_dir):
-    ...     return sum(genome)
+    >>> def my_fitness(individual, log_dir):
+    ...     return sum(individual.genotype)
     >>> ind = Individual(genotype=[1, 2, 3])
     >>> ind = evaluate_individual(ind, my_fitness, generation=0)
     >>> print(ind.fitness)
@@ -57,8 +58,8 @@ def evaluate_individual(
         indiv_log_dir = os.path.join(gen_dir, f"individual_{individual.id}")
         os.makedirs(indiv_log_dir, exist_ok=True)
 
-    # Evaluate fitness
-    fitness = fitness_function(individual.genotype, indiv_log_dir)
+    # Evaluate fitness - pass Individual object for access to genotype and tags
+    fitness = fitness_function(individual, indiv_log_dir)
     individual.fitness = float(fitness)
 
     # Update metadata in tags (preserve existing tags like parent IDs)
@@ -74,7 +75,7 @@ def evaluate_individual(
 
 def evaluate_population(
     population: list[Individual],
-    fitness_function: Callable[[Any, str | None], float],
+    fitness_function: Callable[[Individual, str | None], float],
     generation: int,
     log_dir_base: str | None = None,
     num_workers: int = 1,
@@ -85,8 +86,9 @@ def evaluate_population(
     ----------
     population : list[Individual]
         List of individuals to evaluate.
-    fitness_function : Callable[[Any, str | None], float]
-        Function that takes (genome, log_dir) and returns fitness value.
+    fitness_function : Callable[[Individual, str | None], float]
+        Function that takes (individual, log_dir) and returns fitness value.
+        The Individual parameter provides access to genotype and tags.
     generation : int
         Current generation number.
     log_dir_base : str | None, optional
@@ -102,8 +104,8 @@ def evaluate_population(
 
     Examples
     --------
-    >>> def my_fitness(genome, log_dir):
-    ...     return sum(genome)
+    >>> def my_fitness(individual, log_dir):
+    ...     return sum(individual.genotype)
     >>> population = [Individual(genotype=[i, i+1]) for i in range(10)]
     >>> population = evaluate_population(population, my_fitness, generation=0)
     """
@@ -121,7 +123,7 @@ def evaluate_population(
         # Parallel evaluation
         # Prepare arguments for worker function
         args_list = [
-            (ind.genotype, ind.id, generation, log_dir_base, fitness_function)
+            (ind, generation, log_dir_base, fitness_function)
             for ind in to_evaluate
         ]
 
@@ -130,11 +132,12 @@ def evaluate_population(
             results = pool.map(_evaluate_worker, args_list)
 
         # Assign results back to individuals
-        for individual, (fitness, log_dir) in zip(to_evaluate, results):
+        for individual, (fitness, log_dir, tags) in zip(to_evaluate, results):
             individual.fitness = fitness
-            # Update tags (preserve existing tags like parent IDs)
-            if individual.tags is None:
-                individual.tags = {}
+            # Apply tags returned from worker (contains weights for inheritance)
+            # This replaces all tags to ensure worker-populated data is preserved
+            individual.tags = tags
+            # Update with generation and log_dir
             individual.tags.update({
                 "generation": generation,
                 "log_dir": log_dir,
@@ -144,8 +147,8 @@ def evaluate_population(
 
 
 def _evaluate_worker(
-    args: tuple[Any, int | None, int, str | None, Callable[[Any, str | None], float]]
-) -> tuple[float, str | None]:
+    args: tuple[Individual, int, str | None, Callable[[Individual, str | None], float]]
+) -> tuple[float, str | None, dict]:
     """Worker function for parallel fitness evaluation.
 
     This is a module-level function required for multiprocessing.Pool.
@@ -153,32 +156,33 @@ def _evaluate_worker(
     Parameters
     ----------
     args : tuple
-        Tuple containing (genome, individual_id, generation, log_dir_base, fitness_function).
+        Tuple containing (individual, generation, log_dir_base, fitness_function).
 
     Returns
     -------
-    tuple[float, str | None]
-        Tuple containing (fitness_value, log_directory).
+    tuple[float, str | None, dict]
+        Tuple containing (fitness_value, log_directory, tags).
     """
-    genome, individual_id, generation, log_dir_base, fitness_function = args
+    individual, generation, log_dir_base, fitness_function = args
 
     # Create logging directory if requested
     indiv_log_dir = None
     if log_dir_base is not None:
         gen_dir = os.path.join(log_dir_base, f"generation_{generation:02d}")
-        indiv_log_dir = os.path.join(gen_dir, f"individual_{individual_id}")
+        indiv_log_dir = os.path.join(gen_dir, f"individual_{individual.id}")
         os.makedirs(indiv_log_dir, exist_ok=True)
 
-    # Evaluate fitness
-    fitness = fitness_function(genome, indiv_log_dir)
+    # Evaluate fitness - pass Individual object
+    fitness = fitness_function(individual, indiv_log_dir)
 
-    return float(fitness), indiv_log_dir
+    # Return tags populated during evaluation (contains weights for inheritance)
+    return float(fitness), indiv_log_dir, individual.tags
 
 
 def evaluate_and_commit(
     engine: Engine,
     population: list[Individual],
-    fitness_function: Callable[[Any, str | None], float],
+    fitness_function: Callable[[Individual, str | None], float],
     generation: int,
     log_dir_base: str | None = None,
     num_workers: int = 1,
@@ -193,8 +197,9 @@ def evaluate_and_commit(
         SQLAlchemy database engine.
     population : list[Individual]
         List of individuals to evaluate.
-    fitness_function : Callable[[Any, str | None], float]
-        Function that takes (genome, log_dir) and returns fitness value.
+    fitness_function : Callable[[Individual, str | None], float]
+        Function that takes (individual, log_dir) and returns fitness value.
+        The Individual parameter provides access to genotype and tags.
     generation : int
         Current generation number.
     log_dir_base : str | None, optional
@@ -211,6 +216,8 @@ def evaluate_and_commit(
     --------
     >>> from ariel.ec.a001 import init_database
     >>> engine = init_database()
+    >>> def my_fitness(individual, log_dir):
+    ...     return sum(individual.genotype)
     >>> population = [Individual(genotype=[i]) for i in range(10)]
     >>> population = evaluate_and_commit(
     ...     engine, population, my_fitness, generation=0

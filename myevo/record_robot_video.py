@@ -106,7 +106,9 @@ def record_robot_video(
     --------
     >>> # Record video of best individual during evolution
     >>> body = best_individual.genotype.tree
-    >>> weights = weight_manager.get_weights(id(body))
+    >>> # Load weights from saved file
+    >>> weights_path = f"__data__/generation_{gen:02d}/individual_{best_individual.id}/optimized_brain.npy"
+    >>> weights = np.load(weights_path)
     >>> record_robot_video(
     ...     body_graph=body,
     ...     brain_weights=weights,

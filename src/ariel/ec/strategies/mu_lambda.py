@@ -12,11 +12,13 @@ from typing import Any, Callable
 import numpy as np
 from sqlalchemy import Engine
 from sqlmodel import Session
+from tqdm import tqdm
 
 from ariel.ec.a001 import Individual
 from ariel.ec.evaluation import evaluate_population
 from ariel.ec.genotypes.base import Genotype
 from ariel.ec.selection import select_parents
+from ariel.ec.strategies.weight_inheritance import ParentWeightManager
 
 
 class MuLambdaStrategy:
@@ -58,6 +60,9 @@ class MuLambdaStrategy:
         selection_method: str = "tournament",
         maximize: bool = True,
         verbose: bool = True,
+        lamarckian_mode: bool = False,
+        weight_crossover_mode: str = "closest_parent",
+        weight_sigma: float = 1.0,
     ):
         """Initialize the Mu+Lambda or Mu,Lambda evolution strategy.
 
@@ -83,6 +88,16 @@ class MuLambdaStrategy:
             Whether to maximize fitness (True) or minimize (False), by default True.
         verbose : bool, optional
             Whether to print progress information, by default True.
+        lamarckian_mode : bool, optional
+            If True, offspring inherit optimized weights from parents (Lamarckian evolution).
+            If False, offspring inherit initial weights from parents (non-Lamarckian evolution).
+            By default False.
+        weight_crossover_mode : str, optional
+            How to combine parent weights for crossover offspring, by default "closest_parent".
+            Options: "average", "parent1", "random", "closest_parent".
+        weight_sigma : float, optional
+            Range for random weight initialization when adapting to morphology changes,
+            by default 1.0.
 
         Raises
         ------
@@ -112,6 +127,23 @@ class MuLambdaStrategy:
         self.selection_method = selection_method
         self.maximize = maximize
         self.verbose = verbose
+
+        # Weight inheritance parameters
+        self.lamarckian_mode = lamarckian_mode
+        self.weight_crossover_mode = weight_crossover_mode
+        self.weight_sigma = weight_sigma
+
+        # Weight managers for inheritance
+        # Initial weights manager: stores pre-optimization weights (for non-Lamarckian mode)
+        self._initial_weight_manager = ParentWeightManager(
+            crossover_mode=weight_crossover_mode,
+            sigma=weight_sigma,
+        )
+        # Optimized weights manager: stores post-optimization weights (for Lamarckian mode)
+        self._optimized_weight_manager = ParentWeightManager(
+            crossover_mode=weight_crossover_mode,
+            sigma=weight_sigma,
+        )
 
         # Evolution state
         self.current_generation = 0
@@ -167,7 +199,7 @@ class MuLambdaStrategy:
     def step(
         self,
         population: list[Individual],
-        fitness_function: Callable[[Any, str | None], float],
+        fitness_function: Callable[[Individual, str | None], float],
         generation: int,
         log_dir_base: str | None = None,
         num_workers: int = 1,
@@ -179,8 +211,8 @@ class MuLambdaStrategy:
         ----------
         population : list[Individual]
             Current population (μ individuals).
-        fitness_function : Callable[[Any, str | None], float]
-            Fitness evaluation function.
+        fitness_function : Callable[[Individual, str | None], float]
+            Fitness evaluation function taking (individual, log_dir) -> fitness.
         generation : int
             Current generation number.
         log_dir_base : str | None, optional
@@ -259,6 +291,10 @@ class MuLambdaStrategy:
                 child.id = next_id
                 next_id += 1
 
+        # Populate inherited weights for offspring before evaluation
+        # This enables weight inheritance from parents
+        self._populate_inherited_weights(offspring, population)
+
         # Evaluate offspring
         offspring = evaluate_population(
             offspring,
@@ -267,6 +303,10 @@ class MuLambdaStrategy:
             log_dir_base,
             num_workers,
         )
+
+        # Extract and store weights from evaluated offspring
+        # This captures both initial and optimized weights for future inheritance
+        self._extract_and_store_weights(offspring)
 
         # Handle reevaluation of parents (only for plus strategy)
         if reevaluate_parents and self.strategy_type == "plus":
@@ -295,9 +335,152 @@ class MuLambdaStrategy:
 
         return next_population
 
+    def _populate_inherited_weights(
+        self,
+        offspring: list[Individual],
+        population: list[Individual],
+    ) -> None:
+        """Populate inherited weights in offspring tags before evaluation.
+
+        This method looks up parent weights and stores them in offspring.tags
+        so that the fitness function can access them during evaluation.
+
+        Parameters
+        ----------
+        offspring : list[Individual]
+            Offspring to populate with inherited weights.
+        population : list[Individual]
+            Parent population (for tracking).
+        """
+        from ariel.ec import TreeGenotype
+
+        # Track all evaluated individuals in weight managers
+        for ind in population:
+            self._initial_weight_manager.add_evaluated_individual(ind)
+            self._optimized_weight_manager.add_evaluated_individual(ind)
+
+        # Choose weight manager based on Lamarckian mode
+        weight_manager = self._optimized_weight_manager if self.lamarckian_mode else self._initial_weight_manager
+
+        # Populate inherited weights for each offspring
+        for child in offspring:
+            # Extract offspring tree for distance calculation (needed for closest_parent mode)
+            offspring_tree = child.genotype.tree if isinstance(child.genotype, TreeGenotype) else child.genotype
+
+            # Determine which parent to inherit from
+            parent1_id = child.tags.get("parent1_id")
+            parent2_id = child.tags.get("parent2_id")
+
+            # Find parent individuals
+            parent1_ind = None
+            parent2_ind = None
+            for ind in population:
+                if ind.id == parent1_id:
+                    parent1_ind = ind
+                if parent2_id is not None and ind.id == parent2_id:
+                    parent2_ind = ind
+
+            # Verify parents were found (they should always be in the population)
+            if parent1_id is not None and parent1_ind is None:
+                raise RuntimeError(
+                    f"Parent with ID {parent1_id} not found in population for offspring {child.id}. "
+                    "This indicates a bug in the evolution strategy."
+                )
+            if parent2_id is not None and parent2_ind is None:
+                raise RuntimeError(
+                    f"Parent with ID {parent2_id} not found in population for offspring {child.id}. "
+                    "This indicates a bug in the evolution strategy."
+                )
+
+            # Get parent weights and layer sizes
+            parent_weights_and_sizes = None
+
+            if parent2_ind is not None:
+                # Crossover - combine parents based on crossover mode
+                parent1_data = weight_manager.learned_weights.get(parent1_ind.id) if parent1_ind else None
+                parent2_data = weight_manager.learned_weights.get(parent2_ind.id) if parent2_ind else None
+
+                if self.weight_crossover_mode == "closest_parent" and offspring_tree is not None:
+                    # Use closest parent
+                    if parent1_data and parent2_data:
+                        from ariel.ec.strategies.weight_inheritance import tree_distance
+                        parent1_tree = parent1_ind.genotype.tree if isinstance(parent1_ind.genotype, TreeGenotype) else parent1_ind.genotype
+                        parent2_tree = parent2_ind.genotype.tree if isinstance(parent2_ind.genotype, TreeGenotype) else parent2_ind.genotype
+                        dist1 = tree_distance(offspring_tree, parent1_tree)
+                        dist2 = tree_distance(offspring_tree, parent2_tree)
+                        parent_weights_and_sizes = parent1_data if dist1 <= dist2 else parent2_data
+                    elif parent1_data:
+                        parent_weights_and_sizes = parent1_data
+                    elif parent2_data:
+                        parent_weights_and_sizes = parent2_data
+                elif self.weight_crossover_mode == "parent1" and parent1_data:
+                    parent_weights_and_sizes = parent1_data
+                elif self.weight_crossover_mode == "random":
+                    if parent1_data and parent2_data:
+                        import random
+                        parent_weights_and_sizes = parent1_data if random.random() < 0.5 else parent2_data
+                    elif parent1_data:
+                        parent_weights_and_sizes = parent1_data
+                    elif parent2_data:
+                        parent_weights_and_sizes = parent2_data
+                else:  # average or default
+                    # For average, just pick one parent for now (fitness function will handle averaging)
+                    # This is a simplification - true averaging would need both parents' weights
+                    parent_weights_and_sizes = parent1_data or parent2_data
+            else:
+                # Mutation - inherit from single parent
+                if parent1_ind:
+                    parent_weights_and_sizes = weight_manager.learned_weights.get(parent1_ind.id)
+
+            # Store in tags for fitness function to access and adapt
+            if parent_weights_and_sizes is not None:
+                parent_weights, parent_layer_sizes = parent_weights_and_sizes
+                child.tags["inherited_weights"] = parent_weights
+                child.tags["inherited_layer_sizes"] = parent_layer_sizes
+
+    def _extract_and_store_weights(self, offspring: list[Individual]) -> None:
+        """Extract weights from evaluated offspring and store in weight managers.
+
+        After evaluation, the fitness function should have populated:
+        - tags["initial_weights"]: Pre-optimization weights
+        - tags["optimized_weights"]: Post-optimization weights
+        - tags["layer_sizes"]: Neural network architecture
+
+        This method extracts these and stores them for future inheritance.
+
+        Parameters
+        ----------
+        offspring : list[Individual]
+            Evaluated offspring with weight information in tags.
+        """
+        for child in offspring:
+            # Extract weights and layer sizes from tags
+            initial_weights = child.tags.get("initial_weights")
+            optimized_weights = child.tags.get("optimized_weights")
+            layer_sizes = child.tags.get("layer_sizes")
+
+            # Store in weight managers if available
+            if initial_weights is not None and layer_sizes is not None:
+                self._initial_weight_manager.store_weights(
+                    child.id,
+                    initial_weights,
+                    layer_sizes,
+                )
+
+            if optimized_weights is not None and layer_sizes is not None:
+                self._optimized_weight_manager.store_weights(
+                    child.id,
+                    optimized_weights,
+                    layer_sizes,
+                )
+
+            # Add to evaluated individuals list
+            self._initial_weight_manager.add_evaluated_individual(child)
+            self._optimized_weight_manager.add_evaluated_individual(child)
+
     def evolve(
         self,
-        fitness_function: Callable[[Any, str | None], float],
+        fitness_function: Callable[[Individual, str | None], float],
         num_generations: int,
         engine: Engine | None = None,
         initial_population: list[Any] | None = None,
@@ -309,8 +492,8 @@ class MuLambdaStrategy:
 
         Parameters
         ----------
-        fitness_function : Callable[[Any, str | None], float]
-            Fitness evaluation function taking (genome, log_dir) -> fitness.
+        fitness_function : Callable[[Individual, str | None], float]
+            Fitness evaluation function taking (individual, log_dir) -> fitness.
         num_generations : int
             Number of generations to evolve.
         engine : Engine | None, optional
@@ -341,14 +524,19 @@ class MuLambdaStrategy:
         ...     num_crossover=10,
         ...     strategy_type='comma',
         ... )
-        >>> def fitness_fn(genome, log_dir):
-        ...     return len(genome.nodes())
+        >>> def fitness_fn(individual, log_dir):
+        ...     return len(individual.genotype.nodes())
         >>> all_inds = strategy.evolve(fitness_fn, num_generations=50)
         """
         evo_start = time.time()
 
         # Initialize population
         population = self.initialize_population(engine, initial_population)
+
+        # Assign IDs to initial population before evaluation
+        for i, ind in enumerate(population):
+            if ind.id is None:
+                ind.id = i
 
         # Evaluate initial population
         population = evaluate_population(
@@ -358,6 +546,9 @@ class MuLambdaStrategy:
             log_dir_base=log_dir_base,
             num_workers=num_workers,
         )
+
+        # Extract and store weights from initial population
+        self._extract_and_store_weights(population)
 
         # Save initial population to database
         if engine is not None:
@@ -379,8 +570,9 @@ class MuLambdaStrategy:
                 flush=True,
             )
 
-        # Evolution loop
-        for generation in range(1, num_generations + 1):
+        # Evolution loop with progress bar
+        pbar = tqdm(range(1, num_generations + 1), disable=not self.verbose, desc="Evolution")
+        for generation in pbar:
             gen_start = time.time()
             self.current_generation = generation
 
@@ -403,20 +595,21 @@ class MuLambdaStrategy:
             # Track all individuals
             self.all_individuals.extend(population)
 
-            # Print progress
+            # Update progress bar with stats
             if self.verbose:
                 fitnesses = [ind.fitness or 0.0 for ind in population]
                 best_fitness = max(fitnesses) if self.maximize else min(fitnesses)
                 avg_fitness = np.mean(fitnesses)
-                print(
-                    f"G:{generation} Time:{np.round(time.time() - gen_start, 2)}, "
-                    f"BestF={best_fitness:.4f}, AvgF={avg_fitness:.4f}",
-                    flush=True,
-                )
+                gen_time = time.time() - gen_start
+                pbar.set_postfix({
+                    'BestF': f'{best_fitness:.4f}',
+                    'AvgF': f'{avg_fitness:.4f}',
+                    'GenTime': f'{gen_time:.2f}s'
+                })
 
         if self.verbose:
             total_time = time.time() - evo_start
-            print(f"Time taken to evolve: {total_time:.2f} seconds")
+            print(f"\nTime taken to evolve: {total_time:.2f} seconds")
 
         return self.all_individuals
 

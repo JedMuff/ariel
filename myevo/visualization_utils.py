@@ -104,7 +104,7 @@ def visualize_best_morphology(
     save_dir: Path | str,
     simulation_duration: float = 10.0,
     use_stored_weights: bool = False,
-    weight_manager: Any | None = None,
+    weight_manager: Any | None = None,  # Deprecated, kept for compatibility
 ) -> None:
     """Visualize the best evolved morphology.
 
@@ -133,9 +133,9 @@ def visualize_best_morphology(
     simulation_duration : float, optional
         Duration for simulation/video, by default 10.0 seconds.
     use_stored_weights : bool, optional
-        Whether to use stored learned weights, by default False.
+        Whether to use stored learned weights from saved files, by default False.
     weight_manager : Any | None, optional
-        ParentWeightManager instance (if using stored weights), by default None.
+        DEPRECATED: No longer used. Weights are loaded from saved files instead.
     """
     from ariel.ec import TreeGenotype
 
@@ -179,34 +179,46 @@ def visualize_best_morphology(
     )
 
     # Get controller weights
-    if use_stored_weights and weight_manager is not None and weight_manager.has_weights(id(best_tree)):
-        console.print("[cyan]Using learned weights from evolution...[/cyan]")
-        weights_data = weight_manager.get_weights(id(best_tree))
-        if weights_data is not None:
-            weights, _ = weights_data  # Unpack (weights, layer_sizes) tuple
-            controller.set_weights(weights)
-    elif controller_params.get("use_cmaes", False):
-        console.print("[cyan]Optimizing controller with CMA-ES for visualization...[/cyan]")
-        from controller_optimizer import optimize_controller_cmaes
+    weights_loaded = False
 
-        weights, _, _ = optimize_controller_cmaes(
-            model=model,
-            world_spec=world_spec,
-            hidden_layers=controller_params["hidden_layers"],
-            activation=controller_params["activation"],
-            simulation_duration=simulation_duration,
-            cmaes_budget=controller_params["cmaes_budget"],
-            cmaes_population_size=controller_params["cmaes_population_size"],
-            sigma_init=controller_params["sigma_init"],
-            seed=controller_params["seed"],
-        )
-        controller.set_weights(weights)
-    else:
-        # Use random weights
-        rng = np.random.default_rng(controller_params["seed"])
-        num_weights = controller.get_num_weights()
-        weights = rng.uniform(-controller_params["sigma_init"], controller_params["sigma_init"], num_weights)
-        controller.set_weights(weights)
+    if use_stored_weights and best_individual.id is not None:
+        # Try to load weights from saved file
+        # Look for the individual's directory in the most recent generation
+        generation = best_individual.time_of_birth
+        weights_path = save_dir / f"generation_{generation:02d}" / f"individual_{best_individual.id}" / "optimized_brain.npy"
+
+        if weights_path.exists():
+            console.print(f"[cyan]Loading learned weights from: {weights_path}[/cyan]")
+            weights = np.load(weights_path)
+            controller.set_weights(weights)
+            weights_loaded = True
+        else:
+            console.print(f"[yellow]Warning: Weights file not found at {weights_path}[/yellow]")
+
+    if not weights_loaded:
+        if controller_params.get("use_cmaes", False):
+            console.print("[cyan]Optimizing controller with CMA-ES for visualization...[/cyan]")
+            from controller_optimizer import optimize_controller_cmaes
+
+            weights, _, _ = optimize_controller_cmaes(
+                model=model,
+                world_spec=world_spec,
+                hidden_layers=controller_params["hidden_layers"],
+                activation=controller_params["activation"],
+                simulation_duration=simulation_duration,
+                cmaes_budget=controller_params["cmaes_budget"],
+                cmaes_population_size=controller_params["cmaes_population_size"],
+                sigma_init=controller_params["sigma_init"],
+                seed=controller_params["seed"],
+            )
+            controller.set_weights(weights)
+        else:
+            # Use random weights
+            console.print("[cyan]Using random controller weights...[/cyan]")
+            rng = np.random.default_rng(controller_params["seed"])
+            num_weights = controller.get_num_weights()
+            weights = rng.uniform(-controller_params["sigma_init"], controller_params["sigma_init"], num_weights)
+            controller.set_weights(weights)
 
     # Reset simulation
     mj.mj_resetData(model, data)

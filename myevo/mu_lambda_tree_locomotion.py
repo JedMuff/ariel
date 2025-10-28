@@ -59,7 +59,6 @@ from neural_network_controller import FlexibleNeuralNetworkController
 from novelty import KDTreeArchive, extract_morphological_vector
 from morphological_measures import Body, MorphologicalMeasures
 from controller_optimizer import optimize_controller_cmaes
-from lamarckian_utils import ParentWeightManager
 from simulation_utils import (
     create_robot_model,
     create_controller,
@@ -122,9 +121,7 @@ class TreeLocomotionEvolution:
         cmaes_population_size: int = 10,
         # Novelty search parameters
         use_novelty: bool = False,
-        novelty_min_distance: float = 3.0,
         novelty_k_neighbors: int = 5,
-        novelty_adaptive: bool = False,
         # Lamarckian evolution parameters
         enable_lamarckian: bool = False,
         lamarckian_crossover_mode: str = "average",
@@ -239,25 +236,9 @@ class TreeLocomotionEvolution:
         self.use_novelty = use_novelty
         self.novelty_k_neighbors = novelty_k_neighbors
 
-        # Lamarckian evolution parameters
+        # Lamarckian evolution parameters (will be passed to strategy)
         self.enable_lamarckian = enable_lamarckian
         self.lamarckian_crossover_mode = lamarckian_crossover_mode
-        if self.enable_lamarckian:
-            self.weight_manager = ParentWeightManager(
-                crossover_mode=lamarckian_crossover_mode,
-                sigma=sigma_init,
-            )
-        else:
-            self.weight_manager = None
-
-        # Non-Lamarckian initial weight inheritance manager
-        # Stores initial (pre-optimization) weights for inheritance across generations
-        self._initial_weight_manager = ParentWeightManager(
-            crossover_mode=lamarckian_crossover_mode,
-            sigma=sigma_init,
-        )
-
-        self._current_generation_map: dict = {}  # Temporary genotype → Individual mapping
 
         # Video recording parameters
         self.enable_video_recording = enable_video_recording
@@ -268,9 +249,6 @@ class TreeLocomotionEvolution:
         # These are no longer needed since we save directly during evaluation
         self.learning_curves: dict[int, list[float]] = {}  # For backward compatibility
         self.individual_weights: dict[int, dict[str, np.ndarray]] = {}  # For backward compatibility
-
-        # ID counter for assigning unique IDs to individuals (since not using database)
-        self._next_id = 1
 
         # Set random seeds
         random.seed(seed)
@@ -291,7 +269,7 @@ class TreeLocomotionEvolution:
         num_mutate = int(lambda_ * mutation_rate)
         num_crossover = lambda_ - num_mutate
 
-        # Initialize evolution strategy
+        # Initialize evolution strategy with weight inheritance
         self.strategy = MuLambdaStrategy(
             genotype=self.tree_genotype,
             population_size=mu,
@@ -302,7 +280,10 @@ class TreeLocomotionEvolution:
             strategy_type=strategy_type,
             selection_method=selection_method,
             maximize=maximize,
-            verbose=False,
+            verbose=True,
+            lamarckian_mode=enable_lamarckian,
+            weight_crossover_mode=lamarckian_crossover_mode,
+            weight_sigma=sigma_init,
         )
 
         # Initialize novelty archive if enabled
@@ -396,9 +377,8 @@ class TreeLocomotionEvolution:
 
     def fitness_function(
         self,
-        genome: DiGraph,
+        individual: Individual,
         log_dir: str | None = None,
-        individual: Individual | None = None,
     ) -> float:
         """Evaluate a tree genotype via simulation.
 
@@ -413,12 +393,11 @@ class TreeLocomotionEvolution:
 
         Parameters
         ----------
-        genome : DiGraph or TreeGenotype
-            The tree genome to evaluate.
+        individual : Individual
+            The Individual object being evaluated (provides access to genotype and tags).
         log_dir : str | None, optional
             Logging directory provided by evaluate_population.
-        individual : Individual | None, optional
-            The Individual object being evaluated (for Lamarckian evolution).
+            Format: "...base_dir/generation_XX/individual_YY"
 
         Returns
         -------
@@ -427,7 +406,8 @@ class TreeLocomotionEvolution:
         """
         from ariel.ec import TreeGenotype
 
-        # Extract tree from TreeGenotype if needed
+        # Extract tree from genotype
+        genome = individual.genotype
         tree = genome.tree if isinstance(genome, TreeGenotype) else genome
 
         # Use log_dir for saving if provided
@@ -444,14 +424,43 @@ class TreeLocomotionEvolution:
 
         # Skip evaluation if fewer than 4 actuators (not viable for locomotion)
         if model.nu < 4:
-            # Save dummy brain files for consistency (empty weights)
+            # Still create controller and generate random weights for inheritance
+            # This ensures offspring can inherit something even if parent wasn't evaluated
+            controller = create_controller(
+                model=model,
+                hidden_layers=self.controller_hidden_layers,
+                activation=self.controller_activation,
+                seed=SEED,
+            )
+            num_weights = controller.get_num_weights()
+            random_weights = self.rng.uniform(-self.sigma_init, self.sigma_init, num_weights)
+
+            # Store weights in tags for inheritance (even though we didn't evaluate)
+            if individual is not None:
+                individual.tags["initial_weights"] = random_weights
+                individual.tags["optimized_weights"] = random_weights  # Same as initial (no optimization)
+                individual.tags["layer_sizes"] = controller.layer_sizes
+
+            # Save brain files for consistency
             if save_dir is not None:
                 import csv
+                import json
                 save_path = Path(save_dir)
-                # Save empty weight arrays
-                dummy_weights = np.array([])
-                np.save(save_path / "initial_brain.npy", dummy_weights)
-                np.save(save_path / "optimized_brain.npy", dummy_weights)
+                np.save(save_path / "initial_brain.npy", random_weights)
+                np.save(save_path / "optimized_brain.npy", random_weights)
+
+                # Save metadata
+                metadata = {
+                    "controller_hidden_layers": self.controller_hidden_layers,
+                    "controller_activation": self.controller_activation,
+                    "layer_sizes": controller.layer_sizes,
+                    "num_actuators": model.nu,
+                    "num_weights": len(random_weights),
+                    "input_size": model.nq + model.nv,
+                    "note": "Robot has < 4 actuators, not evaluated for locomotion",
+                }
+                with open(save_path / "metadata.json", 'w') as f:
+                    json.dump(metadata, f, indent=2)
 
                 # Save empty learning curve
                 with open(save_path / "learning_curve.csv", 'w', newline='') as f:
@@ -469,35 +478,33 @@ class TreeLocomotionEvolution:
         )
         num_weights = controller.get_num_weights()
 
-        # Determine initial weights based on evolution mode
+        # Get initial weights - either inherited from parent (via strategy) or random
+        # The strategy populates individual.tags["inherited_weights"] before evaluation
         initial_weights = None
 
-        if self.enable_lamarckian and individual is not None and self.weight_manager is not None:
-            # Lamarckian: inherit optimized weights from parent (adapted to offspring morphology)
-            parent_weights = self.weight_manager.get_parent_weights(
-                individual,
-                offspring_tree=tree,
-                offspring_layer_sizes=controller.layer_sizes,
-            )
-            if parent_weights is not None:
-                initial_weights = parent_weights
-        elif individual is not None and self._initial_weight_manager is not None:
-            # Non-Lamarckian: inherit initial weights from parent (adapted to offspring morphology)
-            parent_initial_weights = self._initial_weight_manager.get_parent_weights(
-                individual,
-                offspring_tree=tree,
-                offspring_layer_sizes=controller.layer_sizes,
-            )
-            if parent_initial_weights is not None:
-                initial_weights = parent_initial_weights
+        if individual is not None:
+            inherited_weights = individual.tags.get("inherited_weights")
+            inherited_layer_sizes = individual.tags.get("inherited_layer_sizes")
 
-        # If no inherited weights (generation 0 or missing parent), use random initialization
+            if inherited_weights is not None and inherited_layer_sizes is not None:
+                # Strategy provided inherited weights - adapt to offspring morphology if needed
+                if inherited_layer_sizes != controller.layer_sizes:
+                    # Morphology changed - adapt weights
+                    from ariel.ec.strategies.weight_inheritance import adapt_weights_to_morphology
+                    initial_weights = adapt_weights_to_morphology(
+                        parent_weights=inherited_weights,
+                        parent_layer_sizes=inherited_layer_sizes,
+                        offspring_layer_sizes=controller.layer_sizes,
+                        rng=self.rng,
+                        sigma=self.sigma_init,
+                    )
+                else:
+                    # Same morphology - use weights directly
+                    initial_weights = inherited_weights
+
+        # Fallback to random initialization if no inherited weights
         if initial_weights is None:
             initial_weights = self.rng.uniform(-self.sigma_init, self.sigma_init, num_weights)
-
-        # Store initial weights for non-Lamarckian inheritance by offspring
-        if self._initial_weight_manager is not None:
-            self._initial_weight_manager.store_weights(id(tree), initial_weights, controller.layer_sizes)
 
         # Get controller weights - either via CMA-ES or direct use
         if self.use_cmaes:
@@ -507,9 +514,11 @@ class TreeLocomotionEvolution:
                 model, world_spec, initial_weights=initial_weights
             )
 
-            # Store learned weights for potential inheritance by offspring
-            if self.weight_manager is not None:
-                self.weight_manager.store_weights(id(tree), optimized_weights, controller.layer_sizes)
+            # Store weights in individual tags for strategy to extract
+            if individual is not None:
+                individual.tags["initial_weights"] = initial_weights
+                individual.tags["optimized_weights"] = optimized_weights
+                individual.tags["layer_sizes"] = controller.layer_sizes
 
             # Save brain files directly if save_dir is available
             if save_dir is not None:
@@ -538,8 +547,8 @@ class TreeLocomotionEvolution:
                     for i, fitness in enumerate(learning_curve):
                         writer.writerow([i, fitness])
 
-            # Return the fitness from CMA-ES optimization
-            return cmaes_fitness
+            # Use the fitness from CMA-ES
+            base_fitness = cmaes_fitness
         else:
             # No CMA-ES optimization - use initial weights directly
             # (initial_weights already determined above based on inheritance mode)
@@ -587,10 +596,12 @@ class TreeLocomotionEvolution:
                 spawn_height=spawn_height
             )
 
-            # Store learned weights for Lamarckian inheritance (optimized weights)
-            # In non-CMA-ES case, weights don't change, but we still store for Lamarckian mode
-            if self.weight_manager is not None:
-                self.weight_manager.store_weights(id(tree), initial_weights, controller.layer_sizes)
+            # Store weights in individual tags for strategy to extract
+            # In non-CMA-ES case, initial weights = optimized weights (no optimization)
+            if individual is not None:
+                individual.tags["initial_weights"] = initial_weights
+                individual.tags["optimized_weights"] = initial_weights  # Same as initial
+                individual.tags["layer_sizes"] = controller.layer_sizes
 
             # Save brain files directly if save_dir is available
             # No optimization in this case, so initial = optimized
@@ -619,142 +630,69 @@ class TreeLocomotionEvolution:
                     writer.writerow(['iteration', 'fitness'])
                     # Empty - no iterations
 
-            # Handle novelty if enabled
-            if self.use_novelty and self.novelty_archive is not None:
-                # Create wrapper for archive (needs .tree attribute)
-                class TreeWrapper:
-                    def __init__(self, tree):
-                        self.tree = tree
+            # Use displacement as base fitness
+            base_fitness = x_displacement
 
-                wrapper = TreeWrapper(tree)
+        # Apply novelty adjustment if enabled (works for both CMA-ES and non-CMA-ES)
+        if self.use_novelty and self.novelty_archive is not None:
+            # Create wrapper for archive (needs .tree attribute)
+            class TreeWrapper:
+                def __init__(self, tree):
+                    self.tree = tree
 
-                # Calculate novelty score
-                novelty_score = self.novelty_archive.novelty(wrapper, k=self.novelty_k_neighbors)
+            wrapper = TreeWrapper(tree)
 
-                # Add to archive
-                self.novelty_archive.add(wrapper)
+            # Calculate novelty score
+            novelty_score = self.novelty_archive.novelty(wrapper, k=self.novelty_k_neighbors)
 
-                # Combine fitness: distance * novelty
-                if novelty_score == float('inf'):
-                    # First individual - just use distance
-                    return float(x_displacement)
-                else:
-                    # Multiply distance by novelty
-                    return float(x_displacement * novelty_score)
+            # Add to archive
+            self.novelty_archive.add(wrapper)
 
-            # Return displacement (can be negative if robot moves backward)
-            return float(x_displacement)
+            # Combine fitness: base_fitness * novelty
+            if novelty_score == float('inf'):
+                # First individual - just use base fitness
+                return float(base_fitness)
+            else:
+                # Multiply base fitness by novelty
+                return float(base_fitness * novelty_score)
 
-    def _fitness_function_wrapper(self, genome: DiGraph, log_dir: str | None = None) -> float:
-        """Wrapper for fitness_function that looks up Individual object.
+        # Return base fitness (can be negative if robot moves backward)
+        return float(base_fitness)
 
-        This wrapper enables Lamarckian evolution by providing access to the
-        Individual object, which contains parent information needed for weight inheritance.
-
-        Parameters
-        ----------
-        genome : DiGraph
-            The tree genome to evaluate.
-        log_dir : str | None, optional
-            Logging directory (unused, for compatibility).
-
-        Returns
-        -------
-        float
-            Fitness value.
-        """
-        # Look up Individual from current generation mapping (may be None in workers)
-        individual = self._current_generation_map.get(id(genome))
-
-        # Call actual fitness function with Individual object
-        return self.fitness_function(genome, log_dir, individual)
-
-    def _assign_ids(self, population: list[Individual]) -> None:
-        """Assign unique IDs to individuals that don't have them.
-
-        Parameters
-        ----------
-        population : list[Individual]
-            Population to assign IDs to.
-        """
-        for ind in population:
-            if ind.id is None:
-                ind.id = self._next_id
-                self._next_id += 1
-
-
-    def initialize_diverse_population(self) -> list[Individual]:
+    def initialize_diverse_population(self) -> list[DiGraph]:
         """Initialize population with diverse tree depths.
 
-        Creates 30 individuals:
-        - 10 small trees (depth=2)
-        - 10 medium trees (depth=3)
-        - 10 large trees (depth=4)
+        Creates 30 trees:
+        - 10 small trees (depth=1)
+        - 10 medium trees (depth=2)
+        - 10 large trees (depth=3)
 
         Returns
         -------
-        list[Individual]
-            Initial population with diverse morphologies.
+        list[DiGraph]
+            Initial population of tree genomes with diverse morphologies.
         """
-        from ariel.ec import TreeGenotype
-
         population = []
 
         # Create 10 small trees (depth=1)
         for _ in range(10):
             tree = self.tree_genotype.random_tree(depth=1)
-            ind = Individual(time_of_birth=0)
-            ind.genotype = tree
-            population.append(ind)
+            population.append(tree)
 
         # Create 10 medium trees (depth=2)
         for _ in range(10):
             tree = self.tree_genotype.random_tree(depth=2)
-            ind = Individual(time_of_birth=0)
-            ind.genotype = tree
-            population.append(ind)
+            population.append(tree)
 
         # Create 10 large trees (depth=3)
         for _ in range(10):
             tree = self.tree_genotype.random_tree(depth=3)
-            ind = Individual(time_of_birth=0)
-            ind.genotype = tree
-            population.append(ind)
-
-        # Assign IDs to all individuals
-        self._assign_ids(population)
+            population.append(tree)
 
         return population
 
-    def _populate_genotype_mapping(
-        self,
-        population: list[Individual],
-        generation: int,
-    ) -> None:
-        """Populate mapping from genotype ID to Individual object.
-
-        This mapping is used by the fitness function wrapper to access Individual
-        objects during evaluation, enabling Lamarckian weight inheritance.
-
-        Parameters
-        ----------
-        population : list[Individual]
-            The population to create mapping for.
-        generation : int
-            Current generation number.
-        """
-        from ariel.ec import TreeGenotype
-
-        self._current_generation_map.clear()
-
-        for ind in population:
-            tree = ind.genotype.tree if isinstance(ind.genotype, TreeGenotype) else ind.genotype
-            tree_id = id(tree)
-            self._current_generation_map[tree_id] = ind
-
-
     def run(self, num_generations: int) -> list[Individual]:
-        """Run the evolutionary algorithm.
+        """Run the evolutionary algorithm using MuLambdaStrategy.
 
         Parameters
         ----------
@@ -766,8 +704,6 @@ class TreeLocomotionEvolution:
         list[Individual]
             All individuals from all generations.
         """
-        from ariel.ec.evaluation import evaluate_population
-
         if self.verbose:
             console.print(
                 f"\n[bold cyan]Starting Evolution[/bold cyan]\n"
@@ -775,206 +711,24 @@ class TreeLocomotionEvolution:
                 f"Fitness: {'Locomotion' + (' * Novelty' if self.use_novelty else '')}\n"
             )
 
-        # Initialize population with diverse tree depths (IDs assigned in method)
-        population = self.initialize_diverse_population()
+        # Initialize diverse population (returns list of genomes, not Individuals)
+        initial_genomes = self.initialize_diverse_population()
 
-        # Evaluate initial population
-        console.print("[cyan]Evaluating initial population...[/cyan]")
-
-        # Populate mappings (needed for Lamarckian evolution)
-        self._populate_genotype_mapping(population, generation=0)
-        fitness_func = self._fitness_function_wrapper
-
-        population = evaluate_population(
-            population,
-            fitness_func,
-            generation=0,
+        # Run evolution using MuLambdaStrategy.evolve()
+        # This handles ID assignment, weight inheritance, and evaluation automatically
+        all_individuals = self.strategy.evolve(
+            fitness_function=self.fitness_function,
+            num_generations=num_generations,
+            engine=None,  # No database engine
+            initial_population=initial_genomes,
             log_dir_base=str(DATA),
             num_workers=self.num_workers,
+            reevaluate_parents=False,
         )
 
-        # Track evaluated individuals for Lamarckian evolution
-        if self.enable_lamarckian and self.weight_manager is not None:
-            for ind in population:
-                self.weight_manager.add_evaluated_individual(ind)
-
-        # Track evaluated individuals for non-Lamarckian initial weight inheritance
-        if self._initial_weight_manager is not None:
-            for ind in population:
-                self._initial_weight_manager.add_evaluated_individual(ind)
-
-        # Track all individuals
-        all_individuals = population.copy()
-
-        # Print initial stats
+        # Save final database
         if self.verbose:
-
-            fitnesses = [ind.fitness for ind in population]
-            best_fitness = max(fitnesses) if self.maximize else min(fitnesses)
-            avg_fitness = np.mean(fitnesses)
-
-            console.print(
-                f"G:0 | BestF={best_fitness:.4f}, AvgF={avg_fitness:.4f}\n"
-            )
-
-        # Save database after initial generation
-        save_final_database(
-            all_individuals=all_individuals,
-            save_dir=DATA,
-            learning_curves=None,
-        )
-
-        # Evolution loop
-        start_time = time.time()
-
-        for generation in track(
-            range(1, num_generations + 1),
-            description="Evolving morphologies",
-            disable=not self.verbose,
-        ):
-            gen_start = time.time()
-
-            # Populate mappings before evaluation
-            self._populate_genotype_mapping(population, generation=generation)
-
-            # Perform one generation
-            population = self.strategy.step(
-                population,
-                fitness_func,
-                generation,
-                log_dir_base=str(DATA),
-                num_workers=self.num_workers,
-            )
-
-            # Track evaluated individuals for Lamarckian evolution
-            if self.enable_lamarckian and self.weight_manager is not None:
-                # Add new offspring to evaluated individuals list
-                for ind in population:
-                    self.weight_manager.add_evaluated_individual(ind)
-
-            # Track evaluated individuals for non-Lamarckian initial weight inheritance
-            if self._initial_weight_manager is not None:
-                for ind in population:
-                    self._initial_weight_manager.add_evaluated_individual(ind)
-
-            # Track all individuals
-            all_individuals.extend(population)
-
-            # Print progress
-            if self.verbose and (generation % 1 == 0 or generation == num_generations):
-                fitnesses = [ind.fitness
-                            for ind in population]
-                best_fitness = max(fitnesses) if self.maximize else min(fitnesses)
-                avg_fitness = np.mean(fitnesses)
-                gen_time = time.time() - gen_start
-
-                console.print(
-                    f"G:{generation} | Time={gen_time:.2f}s, "
-                    f"BestF={best_fitness:.4f}, AvgF={avg_fitness:.4f}"
-                )
-
-            # Record video of best individual if enabled
-            if self.enable_video_recording and generation % self.video_interval == 0:
-                if self.verbose:
-                    console.print(f"[cyan]Recording video for generation {generation}...[/cyan]")
-
-                from ariel.ec import TreeGenotype
-
-                # Find best individual
-                if self.maximize:
-                    best_ind = max(population, key=lambda ind: ind.fitness or float('-inf'))
-                else:
-                    best_ind = min(population, key=lambda ind: ind.fitness or float('inf'))
-
-                if self.verbose:
-                    console.print(f"[cyan]Best fitness: {best_ind.fitness:.4f}[/cyan]")
-
-                # Extract tree
-                best_tree = best_ind.genotype.tree if isinstance(best_ind.genotype, TreeGenotype) else best_ind.genotype
-
-                # Get brain weights
-                weights = None
-
-                # Debug: check weight_manager status
-                if self.verbose:
-                    if self.weight_manager is not None:
-                        console.print(f"[cyan]weight_manager exists, has_weights={self.weight_manager.has_weights(id(best_tree))}[/cyan]")
-                    else:
-                        console.print(f"[cyan]weight_manager is None[/cyan]")
-
-                # Try 1: Get from weight_manager
-                if self.weight_manager is not None and self.weight_manager.has_weights(id(best_tree)):
-                    weights_data = self.weight_manager.get_weights(id(best_tree))
-                    if weights_data is not None:
-                        weights, _ = weights_data  # Unpack (weights, layer_sizes) tuple
-                        if self.verbose:
-                            console.print(f"[cyan]Got weights from weight_manager ({len(weights)} params)[/cyan]")
-
-                # Try 2: Load from saved file (most reliable)
-                if weights is None and best_ind.id is not None:
-                    # Use new directory structure: generation_XX/individual_Y/optimized_brain.npy
-                    weights_path = DATA / f"generation_{generation:02d}" / f"individual_{best_ind.id}" / "optimized_brain.npy"
-                    if self.verbose:
-                        console.print(f"[cyan]Looking for weights at: {weights_path}[/cyan]")
-                        console.print(f"[cyan]File exists: {weights_path.exists()}[/cyan]")
-                    if weights_path.exists():
-                        weights = np.load(weights_path)
-                        if self.verbose:
-                            console.print(f"[cyan]Loaded weights from file ({len(weights)} params)[/cyan]")
-                    else:
-                        if self.verbose:
-                            console.print(f"[yellow]Weights file not found: {weights_path}[/yellow]")
-                            # List what files DO exist in that directory
-                            individual_dir = weights_path.parent
-                            if individual_dir.exists():
-                                files = list(individual_dir.glob("*"))
-                                console.print(f"[cyan]Files in directory: {[f.name for f in files]}[/cyan]")
-
-                # Record video if we have valid weights
-                if weights is not None and len(weights) > 0:
-                    video_dir = DATA / "generation_videos" / f"generation_{generation:04d}"
-                    try:
-                        if self.verbose:
-                            console.print(f"[cyan]Starting video recording...[/cyan]")
-                        record_robot_video(
-                            body_graph=best_tree,
-                            brain_weights=weights,
-                            output_path=video_dir,
-                            duration=self.video_duration,
-                            settling_duration=5.0,  # Same as fitness evaluation
-                            controller_hidden_layers=self.controller_hidden_layers,
-                            controller_activation=self.controller_activation,
-                            platform=self.video_platform,
-                            verbose=self.verbose,  # Show video recording progress
-                        )
-                        if self.verbose:
-                            console.print(f"[bold green]✓ Video saved:[/bold green] {video_dir}")
-                    except Exception as e:
-                        console.print(f"[bold red]✗ Failed to record video:[/bold red] {e}")
-                        import traceback
-                        console.print(traceback.format_exc())
-                else:
-                    if self.verbose:
-                        console.print(f"[yellow]Skipping video: No valid weights found[/yellow]")
-
-            # Save database after each generation
-            save_final_database(
-                all_individuals=all_individuals,
-                save_dir=DATA,
-                learning_curves=None,
-            )
-
-        total_time = time.time() - start_time
-
-        if self.verbose:
-            console.print(
-                f"\n[bold green]Evolution Complete![/bold green]\n"
-                f"Total time: {total_time:.2f}s\n"
-                f"Avg time/generation: {total_time/num_generations:.2f}s"
-            )
-
-        # Final database save (already saved after each generation)
-        console.print("\n[cyan]Saving final database...[/cyan]")
+            console.print("\n[cyan]Saving final database...[/cyan]")
         save_final_database(
             all_individuals=all_individuals,
             save_dir=DATA,
@@ -1031,7 +785,7 @@ class TreeLocomotionEvolution:
             save_dir=DATA,
             simulation_duration=duration,
             use_stored_weights=self.enable_lamarckian,
-            weight_manager=self.weight_manager,
+            weight_manager=None,  # Weights are loaded from files, not from weight manager
         )
 
 
@@ -1057,8 +811,8 @@ def parse_args():
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=30,
-        help="Number of parallel workers for evaluation (default: 30)"
+        default=4,
+        help="Number of parallel workers for evaluation (default: 4)"
     )
     parser.add_argument(
         "--seed",
@@ -1077,6 +831,18 @@ def parse_args():
         type=str,
         default=None,
         help="Name prefix for experiment directory (default: auto-generated from timestamp)"
+    )
+    parser.add_argument(
+        "--cmaes-budget",
+        type=int,
+        default=2000,
+        help="CMA-ES evaluations per morphology (default: 2000)"
+    )
+    parser.add_argument(
+        "--cmaes-population-size",
+        type=int,
+        default=20,
+        help="CMA-ES population size (default: 20)"
     )
 
     return parser.parse_args()
@@ -1114,7 +880,7 @@ def main() -> None:
         mutation_rate=0.8,               # 80% mutation, 20% crossover
         crossover_rate=0.2,
         mutate_after_crossover=True,     # Mutate after crossover
-        strategy_type="comma",           # (μ,λ) - offspring only
+        strategy_type="plus",            # (μ+λ) - parents + offspring
         selection_method="tournament",   # Tournament selection
         maximize=True,                   # Maximize fitness (displacement)
 
@@ -1135,14 +901,12 @@ def main() -> None:
 
         # CMA-ES inner loop parameters
         use_cmaes=True,                  # Enable CMA-ES controller optimization
-        cmaes_budget=2000,                 # CMA-ES evaluations per morphology
-        cmaes_population_size=20,        # CMA-ES population size
+        cmaes_budget=args.cmaes_budget,  # CMA-ES evaluations per morphology (from command line)
+        cmaes_population_size=args.cmaes_population_size,  # CMA-ES population size (from command line)
 
         # Novelty search parameters
         use_novelty=args.use_novelty,    # Enable novelty search (from command line)
-        novelty_min_distance=3.0,        # Archive min distance
         novelty_k_neighbors=1,           # K-nearest neighbors
-        novelty_adaptive=False,          # Adaptive archive
 
         # Lamarckian evolution parameters
         enable_lamarckian=args.enable_lamarckian,  # Enable Lamarckian weight inheritance (from command line)
