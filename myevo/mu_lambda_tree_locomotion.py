@@ -292,6 +292,7 @@ class TreeLocomotionEvolution:
             weight_crossover_mode=lamarckian_crossover_mode,
             weight_sigma=sigma_init,
             post_evaluation_callback=self.recalculate_novelty_for_generation if use_novelty else None,
+            save_database_per_generation=True,  # Enable per-generation database saving
         )
 
         # Initialize novelty archive if enabled

@@ -64,6 +64,7 @@ class MuLambdaStrategy:
         weight_crossover_mode: str = "closest_parent",
         weight_sigma: float = 1.0,
         post_evaluation_callback: Callable[[list[Individual]], None] | None = None,
+        save_database_per_generation: bool = False,
     ):
         """Initialize the Mu+Lambda or Mu,Lambda evolution strategy.
 
@@ -103,6 +104,9 @@ class MuLambdaStrategy:
             Optional callback function to be called after population evaluation.
             Receives the evaluated population as argument. Useful for custom
             post-processing like novelty recalculation. By default None.
+        save_database_per_generation : bool, optional
+            If True, saves database.csv and database.json after each generation.
+            Only works when log_dir_base is provided in evolve(). By default False.
 
         Raises
         ------
@@ -140,6 +144,9 @@ class MuLambdaStrategy:
 
         # Post-evaluation callback
         self.post_evaluation_callback = post_evaluation_callback
+
+        # Database saving per generation
+        self.save_database_per_generation = save_database_per_generation
 
         # Weight managers for inheritance
         # Initial weights manager: stores pre-optimization weights (for non-Lamarckian mode)
@@ -611,6 +618,10 @@ class MuLambdaStrategy:
             # Track all individuals
             self.all_individuals.extend(population)
 
+            # Save database to CSV/JSON after each generation if enabled
+            if self.save_database_per_generation and log_dir_base is not None:
+                self._save_database_snapshot(log_dir_base)
+
             # Update progress bar with stats
             if self.verbose:
                 fitnesses = [ind.fitness or 0.0 for ind in population]
@@ -628,6 +639,90 @@ class MuLambdaStrategy:
             print(f"\nTime taken to evolve: {total_time:.2f} seconds")
 
         return self.all_individuals
+
+    def _save_database_snapshot(self, log_dir_base: str) -> None:
+        """Save database snapshot to CSV/JSON.
+
+        This method saves the database of all individuals seen so far
+        to database.csv and database.json in the log_dir_base directory.
+
+        Parameters
+        ----------
+        log_dir_base : str
+            Base directory for logging (where generation folders are stored).
+        """
+        import csv
+        import json
+        from pathlib import Path
+
+        save_dir = Path(log_dir_base)
+
+        # Prepare data records
+        records = []
+
+        # Group individuals by generation for indexing
+        gen_individuals: dict[int, list[Individual]] = {}
+        for ind in self.all_individuals:
+            gen = ind.time_of_birth
+            if gen not in gen_individuals:
+                gen_individuals[gen] = []
+            gen_individuals[gen].append(ind)
+
+        # Create index mapping for each generation
+        gen_indices: dict[int, dict[int, int]] = {}
+        for gen, inds in gen_individuals.items():
+            gen_indices[gen] = {ind.id: idx for idx, ind in enumerate(inds)}
+
+        # Build records
+        for ind in self.all_individuals:
+            gen = ind.time_of_birth
+            ind_idx = gen_indices[gen][ind.id]
+
+            # Get tree for counting parts/actuators
+            from ariel.ec import TreeGenotype
+            tree = ind.genotype.tree if isinstance(ind.genotype, TreeGenotype) else ind.genotype
+
+            # Get parent IDs from tags
+            parent1_id = ind.tags.get("parent1_id", None) if ind.tags else None
+            parent2_id = ind.tags.get("parent2_id", None) if ind.tags else None
+
+            # Get directory path from tags (set during evaluation)
+            directory = ind.tags.get("log_dir", "") if ind.tags else ""
+
+            # Count parts and actuators
+            num_parts = len(tree.nodes)
+            num_actuators = sum(1 for _, data in tree.nodes(data=True) if data.get("type") == "HINGE")
+
+            # Extract fitness components from tags if available
+            locomotion_fitness = ind.tags.get("locomotion_fitness") if ind.tags else None
+            novelty_score = ind.tags.get("novelty_score") if ind.tags else None
+
+            record = {
+                "individual_id": ind.id,
+                "generation": gen,
+                "fitness": ind.fitness if ind.fitness is not None else None,
+                "locomotion_fitness": locomotion_fitness,
+                "novelty_score": novelty_score,
+                "parent1_id": parent1_id,
+                "parent2_id": parent2_id,
+                "directory": directory,
+                "num_parts": num_parts,
+                "num_actuators": num_actuators,
+            }
+            records.append(record)
+
+        # Save as CSV
+        csv_path = save_dir / "database.csv"
+        if records:
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=records[0].keys())
+                writer.writeheader()
+                writer.writerows(records)
+
+        # Save as JSON
+        json_path = save_dir / "database.json"
+        with open(json_path, 'w') as f:
+            json.dump(records, f, indent=2)
 
     def get_best_individual(self, population: list[Individual]) -> Individual:
         """Get the best individual from a population.
