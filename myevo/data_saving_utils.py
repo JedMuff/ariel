@@ -212,10 +212,16 @@ def save_final_database(
         num_parts = len(tree.nodes)
         num_actuators = sum(1 for _, data in tree.nodes(data=True) if data.get("type") == "HINGE")
 
+        # Extract fitness components from tags if available
+        locomotion_fitness = ind.tags.get("locomotion_fitness") if ind.tags else None
+        novelty_score = ind.tags.get("novelty_score") if ind.tags else None
+
         record = {
             "individual_id": ind.id,
             "generation": gen,
             "fitness": ind.fitness if ind.fitness is not None else None,
+            "locomotion_fitness": locomotion_fitness,
+            "novelty_score": novelty_score,
             "parent1_id": parent1_id,
             "parent2_id": parent2_id,
             "directory": directory,

@@ -63,6 +63,7 @@ class MuLambdaStrategy:
         lamarckian_mode: bool = False,
         weight_crossover_mode: str = "closest_parent",
         weight_sigma: float = 1.0,
+        post_evaluation_callback: Callable[[list[Individual]], None] | None = None,
     ):
         """Initialize the Mu+Lambda or Mu,Lambda evolution strategy.
 
@@ -98,6 +99,10 @@ class MuLambdaStrategy:
         weight_sigma : float, optional
             Range for random weight initialization when adapting to morphology changes,
             by default 1.0.
+        post_evaluation_callback : Callable[[list[Individual]], None] | None, optional
+            Optional callback function to be called after population evaluation.
+            Receives the evaluated population as argument. Useful for custom
+            post-processing like novelty recalculation. By default None.
 
         Raises
         ------
@@ -132,6 +137,9 @@ class MuLambdaStrategy:
         self.lamarckian_mode = lamarckian_mode
         self.weight_crossover_mode = weight_crossover_mode
         self.weight_sigma = weight_sigma
+
+        # Post-evaluation callback
+        self.post_evaluation_callback = post_evaluation_callback
 
         # Weight managers for inheritance
         # Initial weights manager: stores pre-optimization weights (for non-Lamarckian mode)
@@ -303,6 +311,10 @@ class MuLambdaStrategy:
             log_dir_base,
             num_workers,
         )
+
+        # Call post-evaluation callback if provided (e.g., for novelty recalculation)
+        if self.post_evaluation_callback is not None:
+            self.post_evaluation_callback(offspring)
 
         # Extract and store weights from evaluated offspring
         # This captures both initial and optimized weights for future inheritance
@@ -546,6 +558,10 @@ class MuLambdaStrategy:
             log_dir_base=log_dir_base,
             num_workers=num_workers,
         )
+
+        # Call post-evaluation callback if provided (e.g., for novelty recalculation)
+        if self.post_evaluation_callback is not None:
+            self.post_evaluation_callback(population)
 
         # Extract and store weights from initial population
         self._extract_and_store_weights(population)

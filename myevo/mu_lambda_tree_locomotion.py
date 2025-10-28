@@ -83,6 +83,13 @@ RNG = np.random.default_rng(SEED)
 random.seed(SEED)
 
 
+# Helper class for novelty archive (must be at module level for pickling)
+class TreeWrapper:
+    """Wrapper for tree genotypes to work with novelty archive."""
+    def __init__(self, tree):
+        self.tree = tree
+
+
 class TreeLocomotionEvolution:
     """Evolutionary system for optimizing robot morphologies for locomotion.
 
@@ -284,6 +291,7 @@ class TreeLocomotionEvolution:
             lamarckian_mode=enable_lamarckian,
             weight_crossover_mode=lamarckian_crossover_mode,
             weight_sigma=sigma_init,
+            post_evaluation_callback=self.recalculate_novelty_for_generation if use_novelty else None,
         )
 
         # Initialize novelty archive if enabled
@@ -337,6 +345,108 @@ class TreeLocomotionEvolution:
         return extract_morphological_vector(
             MorphologicalMeasures(Body(ind.tree, max_part_limit=self.max_part_limit))
         )
+
+    def recalculate_novelty_for_generation(self, population: list[Individual]) -> None:
+        """Recalculate novelty for all individuals in a generation.
+
+        This method:
+        1. Adds all individuals in the population to the novelty archive
+        2. Calculates novelty scores for all individuals based on the updated archive
+        3. Updates both the novelty_score tag and the combined fitness value used for selection
+
+        Parameters
+        ----------
+        population : list[Individual]
+            Population of individuals to recalculate novelty for.
+        """
+        if not self.use_novelty or self.novelty_archive is None:
+            return
+
+        from ariel.ec import TreeGenotype
+
+        # STEP 1: Add all UNIQUE individuals in the current population to the archive
+        # Skip individuals that are already in the archive (for μ+λ where parents carry over)
+        for ind in population:
+            # Extract tree from genotype
+            tree = ind.genotype.tree if isinstance(ind.genotype, TreeGenotype) else ind.genotype
+            wrapper = TreeWrapper(tree)
+
+            # Check if this individual is already in the archive by checking nearest neighbor distance
+            if len(self.novelty_archive) > 0:
+                feature_vec = self.novelty_archive.feature_extractor(wrapper)
+                distances, _ = self.novelty_archive.kdtree.query(feature_vec, k=1)
+                nearest_distance = distances if np.isscalar(distances) else distances[0]
+
+                # If nearest neighbor has distance 0, this individual is already in archive
+                if nearest_distance < 1e-10:
+                    continue  # Skip adding duplicate
+
+            # Add to archive (individual is unique)
+            self.novelty_archive.add(wrapper)
+
+        # STEP 2: Calculate novelty for all individuals based on the updated archive
+        # Filter out self-matches (distance ~0) when calculating novelty
+        for ind in population:
+            # Extract tree from genotype
+            tree = ind.genotype.tree if isinstance(ind.genotype, TreeGenotype) else ind.genotype
+            wrapper = TreeWrapper(tree)
+
+            # Calculate novelty, filtering out self-matches
+            if len(self.novelty_archive) == 0:
+                novelty_score = float('inf')
+            else:
+                # Get feature vector for this individual
+                feature_vec = self.novelty_archive.feature_extractor(wrapper)
+
+                # Query more neighbors just in case some are duplicates (self-matches)
+                k_query = min(self.novelty_k_neighbors + 5, len(self.novelty_archive))
+                distances, _ = self.novelty_archive.kdtree.query(feature_vec, k=k_query)
+
+                # Ensure distances is array-like
+                if np.isscalar(distances):
+                    distances = np.array([distances])
+                else:
+                    distances = np.array(distances)
+
+                # Filter out exact matches (distance ~0)
+                eps = 1e-10
+                mask = distances > eps
+                filtered_distances = distances[mask]
+
+                # Calculate novelty from filtered distances
+                if len(filtered_distances) == 0:
+                    # Only self-matches found - use novelty of 1.0
+                    novelty_score = 1.0
+                else:
+                    # Take mean of k nearest non-duplicate neighbors
+                    k_actual = min(self.novelty_k_neighbors, len(filtered_distances))
+                    novelty_score = float(np.mean(filtered_distances[:k_actual]))
+
+            # Get locomotion fitness from tags
+            locomotion_fitness = ind.tags.get("locomotion_fitness", ind.fitness or 0.0)
+
+            # Store novelty score in tags
+            if novelty_score == float('inf'):
+                # Archive is empty - use novelty score of 1.0 (neutral multiplier)
+                ind.tags["novelty_score"] = 1.0
+                ind.fitness = locomotion_fitness
+            else:
+                # Store novelty and combine with locomotion fitness
+                ind.tags["novelty_score"] = float(novelty_score)
+                ind.fitness = locomotion_fitness * novelty_score
+
+            # Update fitness_components.json if individual has log_dir
+            log_dir = ind.tags.get("log_dir")
+            if log_dir is not None:
+                import json
+                fitness_components_path = Path(log_dir) / "fitness_components.json"
+                if fitness_components_path.exists():
+                    # Update existing file with novelty score
+                    with open(fitness_components_path, 'r') as f:
+                        data = json.load(f)
+                    data["novelty_score"] = ind.tags.get("novelty_score")
+                    with open(fitness_components_path, 'w') as f:
+                        json.dump(data, f, indent=2)
 
     def optimize_controller_cmaes_wrapper(
         self,
@@ -440,6 +550,7 @@ class TreeLocomotionEvolution:
                 individual.tags["initial_weights"] = random_weights
                 individual.tags["optimized_weights"] = random_weights  # Same as initial (no optimization)
                 individual.tags["layer_sizes"] = controller.layer_sizes
+                individual.tags["locomotion_fitness"] = 0.0  # Store fitness of 0.0
 
             # Save brain files for consistency
             if save_dir is not None:
@@ -633,30 +744,25 @@ class TreeLocomotionEvolution:
             # Use displacement as base fitness
             base_fitness = x_displacement
 
-        # Apply novelty adjustment if enabled (works for both CMA-ES and non-CMA-ES)
-        if self.use_novelty and self.novelty_archive is not None:
-            # Create wrapper for archive (needs .tree attribute)
-            class TreeWrapper:
-                def __init__(self, tree):
-                    self.tree = tree
+        # Store locomotion fitness in tags for separate tracking
+        if individual is not None:
+            individual.tags["locomotion_fitness"] = float(base_fitness)
 
-            wrapper = TreeWrapper(tree)
+        # NOTE: Do NOT add to archive during evaluation
+        # Archive addition happens in recalculate_novelty_for_generation() after all evaluations
 
-            # Calculate novelty score
-            novelty_score = self.novelty_archive.novelty(wrapper, k=self.novelty_k_neighbors)
+        # Save fitness components to individual directory if available
+        if save_dir is not None:
+            import json
+            save_path = Path(save_dir)
+            fitness_components = {
+                "locomotion_fitness": float(base_fitness),
+                "novelty_score": None,  # Will be calculated per-generation
+            }
+            with open(save_path / "fitness_components.json", 'w') as f:
+                json.dump(fitness_components, f, indent=2)
 
-            # Add to archive
-            self.novelty_archive.add(wrapper)
-
-            # Combine fitness: base_fitness * novelty
-            if novelty_score == float('inf'):
-                # First individual - just use base fitness
-                return float(base_fitness)
-            else:
-                # Multiply base fitness by novelty
-                return float(base_fitness * novelty_score)
-
-        # Return base fitness (can be negative if robot moves backward)
+        # Return locomotion fitness only (novelty will be applied per-generation)
         return float(base_fitness)
 
     def initialize_diverse_population(self) -> list[DiGraph]:
