@@ -45,7 +45,10 @@ python3 --version
 
 REPETITION=$((SLURM_ARRAY_TASK_ID / 4))
 EXPERIMENT_ID=$((SLURM_ARRAY_TASK_ID % 4))
-SEED=$((42 + REPETITION))
+# Make seed unique for each experiment AND repetition
+# Formula: base_seed + (repetition * 10) + experiment_id
+# This ensures each experiment has a unique seed
+SEED=$((17 + (REPETITION * 10) + EXPERIMENT_ID))
 
 echo "Experiment ID: $EXPERIMENT_ID"
 echo "Repetition: $REPETITION"
