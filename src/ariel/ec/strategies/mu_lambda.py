@@ -105,8 +105,16 @@ class MuLambdaStrategy:
             Receives the evaluated population as argument. Useful for custom
             post-processing like novelty recalculation. By default None.
         save_database_per_generation : bool, optional
-            If True, saves database.csv and database.json after each generation.
+            If True, saves database.csv and database.json after each generation,
+            including all evaluated individuals (both selected and non-selected).
             Only works when log_dir_base is provided in evolve(). By default False.
+
+            Note on folder saves: By default, only offspring (λ individuals) are
+            evaluated per generation and get log folders created. For (μ+λ) strategies,
+            parents don't get new folders unless reevaluate_parents=True is set.
+            This means the database will contain all μ+λ records per generation, but
+            only λ will have folders from the current generation (parents have folders
+            from when they were originally evaluated in previous generations).
 
         Raises
         ------
@@ -236,6 +244,9 @@ class MuLambdaStrategy:
             Number of parallel workers for evaluation, by default 1.
         reevaluate_parents : bool, optional
             Whether to reevaluate parents each generation (only for 'plus'), by default False.
+            Set to True if you want all μ+λ individuals to have log folders created in each
+            generation. When False, only offspring get new folders (parents retain folders
+            from when they were originally evaluated).
 
         Returns
         -------
@@ -351,6 +362,10 @@ class MuLambdaStrategy:
             reverse=self.maximize,
         )
         next_population = combined[: self.population_size]
+
+        # Store combined population for database saving (includes both selected and non-selected)
+        self._last_combined_population = combined
+        self._last_selected_population = next_population
 
         return next_population
 
@@ -525,6 +540,9 @@ class MuLambdaStrategy:
             Number of parallel workers for evaluation, by default 1.
         reevaluate_parents : bool, optional
             Whether to reevaluate parents each generation, by default False.
+            Set to True if you want all μ+λ individuals to have log folders created in each
+            generation. When False, only offspring get new folders (parents retain folders
+            from when they were originally evaluated).
 
         Returns
         -------
@@ -582,6 +600,11 @@ class MuLambdaStrategy:
         # Track all individuals
         self.all_individuals = population.copy()
 
+        # Save initial population to database snapshot if enabled
+        if self.save_database_per_generation and log_dir_base is not None:
+            # For initial generation, all individuals are "selected"
+            self._save_database_snapshot(log_dir_base, population, population, 0)
+
         # Print initial stats
         if self.verbose:
             fitnesses = [ind.fitness or 0.0 for ind in population]
@@ -620,7 +643,13 @@ class MuLambdaStrategy:
 
             # Save database to CSV/JSON after each generation if enabled
             if self.save_database_per_generation and log_dir_base is not None:
-                self._save_database_snapshot(log_dir_base)
+                # Save all evaluated individuals (combined) with selection status
+                self._save_database_snapshot(
+                    log_dir_base,
+                    self._last_combined_population,
+                    self._last_selected_population,
+                    generation
+                )
 
             # Update progress bar with stats
             if self.verbose:
@@ -640,44 +669,45 @@ class MuLambdaStrategy:
 
         return self.all_individuals
 
-    def _save_database_snapshot(self, log_dir_base: str) -> None:
-        """Save database snapshot to CSV/JSON.
+    def _save_database_snapshot(
+        self,
+        log_dir_base: str,
+        all_individuals: list[Individual],
+        selected_individuals: list[Individual],
+        current_generation: int,
+    ) -> None:
+        """Save database snapshot to CSV/JSON, appending current generation records.
 
-        This method saves the database of all individuals seen so far
-        to database.csv and database.json in the log_dir_base directory.
+        This method appends all evaluated individuals to database.csv, including
+        both selected and non-selected individuals. For μ+λ strategies, this includes
+        both parents and offspring evaluated in the generation.
 
         Parameters
         ----------
         log_dir_base : str
             Base directory for logging (where generation folders are stored).
+        all_individuals : list[Individual]
+            All individuals evaluated in this generation (parents + offspring for plus,
+            offspring only for comma).
+        selected_individuals : list[Individual]
+            The individuals that were selected to survive to the next generation.
+        current_generation : int
+            The current generation number.
         """
         import csv
         import json
         from pathlib import Path
 
         save_dir = Path(log_dir_base)
+        csv_path = save_dir / "database.csv"
+        json_path = save_dir / "database.json"
 
-        # Prepare data records
+        # Create set of selected individual IDs for quick lookup
+        selected_ids = {ind.id for ind in selected_individuals}
+
+        # Prepare records for all evaluated individuals in this generation
         records = []
-
-        # Group individuals by generation for indexing
-        gen_individuals: dict[int, list[Individual]] = {}
-        for ind in self.all_individuals:
-            gen = ind.time_of_birth
-            if gen not in gen_individuals:
-                gen_individuals[gen] = []
-            gen_individuals[gen].append(ind)
-
-        # Create index mapping for each generation
-        gen_indices: dict[int, dict[int, int]] = {}
-        for gen, inds in gen_individuals.items():
-            gen_indices[gen] = {ind.id: idx for idx, ind in enumerate(inds)}
-
-        # Build records
-        for ind in self.all_individuals:
-            gen = ind.time_of_birth
-            ind_idx = gen_indices[gen][ind.id]
-
+        for ind in all_individuals:
             # Get tree for counting parts/actuators
             from ariel.ec import TreeGenotype
             tree = ind.genotype.tree if isinstance(ind.genotype, TreeGenotype) else ind.genotype
@@ -699,7 +729,9 @@ class MuLambdaStrategy:
 
             record = {
                 "individual_id": ind.id,
-                "generation": gen,
+                "birth_generation": ind.time_of_birth,
+                "current_generation": current_generation,
+                "selected": ind.id in selected_ids,
                 "fitness": ind.fitness if ind.fitness is not None else None,
                 "locomotion_fitness": locomotion_fitness,
                 "novelty_score": novelty_score,
@@ -711,18 +743,24 @@ class MuLambdaStrategy:
             }
             records.append(record)
 
-        # Save as CSV
-        csv_path = save_dir / "database.csv"
+        # Append to CSV (create with header if doesn't exist)
         if records:
-            with open(csv_path, 'w', newline='') as f:
+            file_exists = csv_path.exists()
+            with open(csv_path, 'a', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=records[0].keys())
-                writer.writeheader()
+                if not file_exists:
+                    writer.writeheader()
                 writer.writerows(records)
 
-        # Save as JSON
-        json_path = save_dir / "database.json"
+        # For JSON, read existing data, append, and save
+        # (JSON is less efficient for incremental updates but maintained for compatibility)
+        all_records = []
+        if json_path.exists():
+            with open(json_path, 'r') as f:
+                all_records = json.load(f)
+        all_records.extend(records)
         with open(json_path, 'w') as f:
-            json.dump(records, f, indent=2)
+            json.dump(all_records, f, indent=2)
 
     def get_best_individual(self, population: list[Individual]) -> Individual:
         """Get the best individual from a population.
