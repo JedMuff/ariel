@@ -68,7 +68,6 @@ from simulation_utils import (
     simulate_with_settling_phase,
 )
 from visualization_utils import plot_fitness_history, visualize_best_morphology
-from data_saving_utils import save_final_database
 from record_robot_video import record_robot_video
 
 # Global constants
@@ -833,14 +832,8 @@ class TreeLocomotionEvolution:
             reevaluate_parents=False,
         )
 
-        # Save final database
-        if self.verbose:
-            console.print("\n[cyan]Saving final database...[/cyan]")
-        save_final_database(
-            all_individuals=all_individuals,
-            save_dir=DATA,
-            learning_curves=None,
-        )
+        # Note: Database is already saved per-generation by the strategy
+        # (see save_database_per_generation=True in __init__)
 
         return all_individuals
 
