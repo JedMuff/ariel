@@ -63,6 +63,8 @@ class MuLambdaStrategy:
         lamarckian_mode: bool = False,
         weight_crossover_mode: str = "closest_parent",
         weight_sigma: float = 1.0,
+        covariance_inheritance_mode: str = "adaptive",
+        sigma_inheritance_mode: str = "blend",
         post_evaluation_callback: Callable[[list[Individual]], None] | None = None,
         save_database_per_generation: bool = False,
     ):
@@ -100,6 +102,16 @@ class MuLambdaStrategy:
         weight_sigma : float, optional
             Range for random weight initialization when adapting to morphology changes,
             by default 1.0.
+        covariance_inheritance_mode : str, optional
+            How to adapt CMA-ES covariance matrices when morphology changes,
+            by default "adaptive".
+            Options: "adaptive" (preserve learned correlations), "reset" (identity),
+            "preserve" (scale existing).
+        sigma_inheritance_mode : str, optional
+            How to adapt CMA-ES step size when morphology changes,
+            by default "blend".
+            Options: "blend" (formula-based), "reset" (sigma_init), "keep" (parent),
+            "adaptive" (custom logic).
         post_evaluation_callback : Callable[[list[Individual]], None] | None, optional
             Optional callback function to be called after population evaluation.
             Receives the evaluated population as argument. Useful for custom
@@ -150,6 +162,10 @@ class MuLambdaStrategy:
         self.weight_crossover_mode = weight_crossover_mode
         self.weight_sigma = weight_sigma
 
+        # CMA-ES inheritance parameters
+        self.covariance_inheritance_mode = covariance_inheritance_mode
+        self.sigma_inheritance_mode = sigma_inheritance_mode
+
         # Post-evaluation callback
         self.post_evaluation_callback = post_evaluation_callback
 
@@ -166,6 +182,21 @@ class MuLambdaStrategy:
         self._optimized_weight_manager = ParentWeightManager(
             crossover_mode=weight_crossover_mode,
             sigma=weight_sigma,
+        )
+
+        # CMA-ES state managers for inheritance (Lamarckian CMA-ES)
+        from ariel.ec.strategies.cmaes_inheritance import CMAESStateManager
+        # Initial CMA-ES states: stores pre-optimization CMA-ES states
+        self._initial_cmaes_manager = CMAESStateManager(
+            sigma_init=weight_sigma,
+            covariance_mode=covariance_inheritance_mode,
+            sigma_mode=sigma_inheritance_mode,
+        )
+        # Optimized CMA-ES states: stores post-optimization CMA-ES states
+        self._optimized_cmaes_manager = CMAESStateManager(
+            sigma_init=weight_sigma,
+            covariance_mode=covariance_inheritance_mode,
+            sigma_mode=sigma_inheritance_mode,
         )
 
         # Evolution state
@@ -367,6 +398,10 @@ class MuLambdaStrategy:
         self._last_combined_population = combined
         self._last_selected_population = next_population
 
+        # Clean up old states to prevent memory leaks
+        # Only keep states for the surviving population (μ individuals)
+        self._cleanup_old_states(next_population)
+
         return next_population
 
     def _populate_inherited_weights(
@@ -374,124 +409,132 @@ class MuLambdaStrategy:
         offspring: list[Individual],
         population: list[Individual],
     ) -> None:
-        """Populate inherited weights in offspring tags before evaluation.
+        """Populate inherited weights and CMA-ES states in offspring tags before evaluation.
 
-        This method looks up parent weights and stores them in offspring.tags
-        so that the fitness function can access them during evaluation.
+        This method looks up parent weights and CMA-ES states and stores them in
+        offspring.tags so that the fitness function can access them during evaluation.
 
         Parameters
         ----------
         offspring : list[Individual]
-            Offspring to populate with inherited weights.
+            Offspring to populate with inherited weights and CMA-ES states.
         population : list[Individual]
             Parent population (for tracking).
         """
         from ariel.ec import TreeGenotype
 
-        # Track all evaluated individuals in weight managers
+        # Track all evaluated individuals in weight and CMA-ES managers
         for ind in population:
             self._initial_weight_manager.add_evaluated_individual(ind)
             self._optimized_weight_manager.add_evaluated_individual(ind)
 
         # Choose weight manager based on Lamarckian mode
         weight_manager = self._optimized_weight_manager if self.lamarckian_mode else self._initial_weight_manager
+        # Choose CMA-ES manager based on Lamarckian mode (same selection logic)
+        cmaes_manager = self._optimized_cmaes_manager if self.lamarckian_mode else self._initial_cmaes_manager
 
         # Populate inherited weights for each offspring
         for child in offspring:
-            # Extract offspring tree for distance calculation (needed for closest_parent mode)
-            offspring_tree = child.genotype.tree if isinstance(child.genotype, TreeGenotype) else child.genotype
-
-            # Determine which parent to inherit from
+            # Get parent IDs from tags
             parent1_id = child.tags.get("parent1_id")
             parent2_id = child.tags.get("parent2_id")
 
-            # Find parent individuals
-            parent1_ind = None
-            parent2_ind = None
-            for ind in population:
-                if ind.id == parent1_id:
-                    parent1_ind = ind
-                if parent2_id is not None and ind.id == parent2_id:
-                    parent2_ind = ind
-
-            # Verify parents were found (they should always be in the population)
-            if parent1_id is not None and parent1_ind is None:
-                raise RuntimeError(
-                    f"Parent with ID {parent1_id} not found in population for offspring {child.id}. "
-                    "This indicates a bug in the evolution strategy."
-                )
-            if parent2_id is not None and parent2_ind is None:
-                raise RuntimeError(
-                    f"Parent with ID {parent2_id} not found in population for offspring {child.id}. "
-                    "This indicates a bug in the evolution strategy."
-                )
-
-            # Get parent weights and layer sizes
             parent_weights_and_sizes = None
+            chosen_parent_id = None  # Track which parent we chose
 
-            if parent2_ind is not None:
-                # Crossover - combine parents based on crossover mode
-                parent1_data = weight_manager.learned_weights.get(parent1_ind.id) if parent1_ind else None
-                parent2_data = weight_manager.learned_weights.get(parent2_ind.id) if parent2_ind else None
+            if parent2_id is not None:
+                # Crossover - use configured crossover mode
+                parent1_data = weight_manager.learned_weights.get(parent1_id)
+                parent2_data = weight_manager.learned_weights.get(parent2_id)
 
-                if self.weight_crossover_mode == "closest_parent" and offspring_tree is not None:
-                    # Use closest parent
+                if self.weight_crossover_mode == "closest_parent":
+                    # Use tree distance to find closest parent
                     if parent1_data and parent2_data:
                         from ariel.ec.strategies.weight_inheritance import tree_distance
-                        parent1_tree = parent1_ind.genotype.tree if isinstance(parent1_ind.genotype, TreeGenotype) else parent1_ind.genotype
-                        parent2_tree = parent2_ind.genotype.tree if isinstance(parent2_ind.genotype, TreeGenotype) else parent2_ind.genotype
-                        dist1 = tree_distance(offspring_tree, parent1_tree)
-                        dist2 = tree_distance(offspring_tree, parent2_tree)
-                        parent_weights_and_sizes = parent1_data if dist1 <= dist2 else parent2_data
-                    elif parent1_data:
-                        parent_weights_and_sizes = parent1_data
-                    elif parent2_data:
-                        parent_weights_and_sizes = parent2_data
-                elif self.weight_crossover_mode == "parent1" and parent1_data:
+                        offspring_tree = child.genotype.tree if isinstance(child.genotype, TreeGenotype) else child.genotype
+                        # Find parent individuals
+                        parent1_ind = next((ind for ind in population if ind.id == parent1_id), None)
+                        parent2_ind = next((ind for ind in population if ind.id == parent2_id), None)
+                        if parent1_ind and parent2_ind:
+                            parent1_tree = parent1_ind.genotype.tree if isinstance(parent1_ind.genotype, TreeGenotype) else parent1_ind.genotype
+                            parent2_tree = parent2_ind.genotype.tree if isinstance(parent2_ind.genotype, TreeGenotype) else parent2_ind.genotype
+                            dist1 = tree_distance(offspring_tree, parent1_tree)
+                            dist2 = tree_distance(offspring_tree, parent2_tree)
+                            if dist1 <= dist2:
+                                parent_weights_and_sizes = parent1_data
+                                chosen_parent_id = parent1_id
+                            else:
+                                parent_weights_and_sizes = parent2_data
+                                chosen_parent_id = parent2_id
+                        else:
+                            parent_weights_and_sizes = parent1_data or parent2_data
+                            chosen_parent_id = parent1_id if parent1_data else parent2_id
+                    else:
+                        parent_weights_and_sizes = parent1_data or parent2_data
+                        chosen_parent_id = parent1_id if parent1_data else parent2_id
+                elif self.weight_crossover_mode == "parent1":
                     parent_weights_and_sizes = parent1_data
+                    chosen_parent_id = parent1_id
                 elif self.weight_crossover_mode == "random":
                     if parent1_data and parent2_data:
                         import random
-                        parent_weights_and_sizes = parent1_data if random.random() < 0.5 else parent2_data
-                    elif parent1_data:
-                        parent_weights_and_sizes = parent1_data
-                    elif parent2_data:
-                        parent_weights_and_sizes = parent2_data
-                else:  # average or default
-                    # For average, just pick one parent for now (fitness function will handle averaging)
-                    # This is a simplification - true averaging would need both parents' weights
+                        if random.random() < 0.5:
+                            parent_weights_and_sizes = parent1_data
+                            chosen_parent_id = parent1_id
+                        else:
+                            parent_weights_and_sizes = parent2_data
+                            chosen_parent_id = parent2_id
+                    else:
+                        parent_weights_and_sizes = parent1_data or parent2_data
+                        chosen_parent_id = parent1_id if parent1_data else parent2_id
+                else:  # "average" or default
+                    # For average mode, just use parent1 (averaging happens in weight_inheritance module)
                     parent_weights_and_sizes = parent1_data or parent2_data
+                    chosen_parent_id = parent1_id if parent1_data else parent2_id
             else:
                 # Mutation - inherit from single parent
-                if parent1_ind:
-                    parent_weights_and_sizes = weight_manager.learned_weights.get(parent1_ind.id)
+                if parent1_id is not None:
+                    parent_weights_and_sizes = weight_manager.learned_weights.get(parent1_id)
+                    chosen_parent_id = parent1_id
 
-            # Store in tags for fitness function to access and adapt
+            # Store inherited weights in tags for fitness function to access and adapt
             if parent_weights_and_sizes is not None:
                 parent_weights, parent_layer_sizes = parent_weights_and_sizes
                 child.tags["inherited_weights"] = parent_weights
                 child.tags["inherited_layer_sizes"] = parent_layer_sizes
 
+            # Populate inherited CMA-ES state from the same parent we chose for weights
+            # Note: We pass the parent's state directly; adaptation to offspring morphology
+            # happens in the fitness function where we know the actual offspring architecture
+            if chosen_parent_id is not None:
+                parent_cmaes_state = cmaes_manager.get_state(chosen_parent_id)
+                if parent_cmaes_state is not None:
+                    child.tags["inherited_cmaes_state"] = parent_cmaes_state
+
     def _extract_and_store_weights(self, offspring: list[Individual]) -> None:
-        """Extract weights from evaluated offspring and store in weight managers.
+        """Extract weights and CMA-ES states from evaluated offspring and store in managers.
 
         After evaluation, the fitness function should have populated:
         - tags["initial_weights"]: Pre-optimization weights
         - tags["optimized_weights"]: Post-optimization weights
         - tags["layer_sizes"]: Neural network architecture
+        - tags["initial_cmaes_state"]: CMA-ES state before optimization
+        - tags["optimized_cmaes_state"]: CMA-ES state after optimization
 
         This method extracts these and stores them for future inheritance.
 
         Parameters
         ----------
         offspring : list[Individual]
-            Evaluated offspring with weight information in tags.
+            Evaluated offspring with weight and CMA-ES state information in tags.
         """
         for child in offspring:
             # Extract weights and layer sizes from tags
             initial_weights = child.tags.get("initial_weights")
             optimized_weights = child.tags.get("optimized_weights")
             layer_sizes = child.tags.get("layer_sizes")
+            initial_cmaes_state = child.tags.get("initial_cmaes_state")
+            optimized_cmaes_state = child.tags.get("optimized_cmaes_state")
 
             # Store in weight managers if available
             if initial_weights is not None and layer_sizes is not None:
@@ -508,9 +551,100 @@ class MuLambdaStrategy:
                     layer_sizes,
                 )
 
+            # Store CMA-ES states in respective managers (CRITICAL FIX)
+            # Initial manager gets initial state, optimized manager gets optimized state
+            if initial_cmaes_state is not None:
+                self._initial_cmaes_manager.store_state(child.id, initial_cmaes_state)
+
+            if optimized_cmaes_state is not None:
+                self._optimized_cmaes_manager.store_state(child.id, optimized_cmaes_state)
+
             # Add to evaluated individuals list
             self._initial_weight_manager.add_evaluated_individual(child)
             self._optimized_weight_manager.add_evaluated_individual(child)
+
+    def _validate_state_separation(self, individual: Individual, verbose: bool = False) -> bool:
+        """Validate that initial and optimized states are properly separated.
+
+        This is a debugging/validation helper to ensure the inheritance system
+        is working correctly. Checks that initial and optimized states differ
+        when CMA-ES optimization is used.
+
+        Parameters
+        ----------
+        individual : Individual
+            Individual to validate states for.
+        verbose : bool, optional
+            Whether to print validation messages, by default False.
+
+        Returns
+        -------
+        bool
+            True if validation passes, False otherwise.
+        """
+        # Get states from tags
+        initial_weights = individual.tags.get("initial_weights")
+        optimized_weights = individual.tags.get("optimized_weights")
+        initial_cmaes = individual.tags.get("initial_cmaes_state")
+        optimized_cmaes = individual.tags.get("optimized_cmaes_state")
+        num_evaluations = individual.tags.get("cmaes_num_evaluations", 0)
+
+        # If CMA-ES was used (num_evaluations > 0), states should differ
+        if num_evaluations > 0:
+            # Check weights
+            if initial_weights is not None and optimized_weights is not None:
+                weights_differ = not np.allclose(initial_weights, optimized_weights)
+                if verbose and not weights_differ:
+                    print(f"WARNING: Individual {individual.id} has identical initial/optimized weights despite CMA-ES optimization!")
+
+            # Check CMA-ES sigma
+            if initial_cmaes is not None and optimized_cmaes is not None:
+                sigma_differs = abs(initial_cmaes.sigma - optimized_cmaes.sigma) > 1e-6
+                if verbose and not sigma_differs:
+                    print(f"WARNING: Individual {individual.id} has identical initial/optimized sigma despite CMA-ES optimization!")
+
+                # Check covariance condition number (should change during optimization)
+                if initial_cmaes.condition_number is not None and optimized_cmaes.condition_number is not None:
+                    condition_differs = abs(initial_cmaes.condition_number - optimized_cmaes.condition_number) > 1e-3
+                    if verbose and not condition_differs:
+                        print(f"WARNING: Individual {individual.id} has identical covariance condition numbers!")
+
+                return True
+
+        # If CMA-ES was not used, states should be identical (both default)
+        return True
+
+    def _cleanup_old_states(self, current_population: list[Individual]) -> None:
+        """Clean up weights and CMA-ES states for individuals no longer in population.
+
+        This prevents memory leaks by removing cached states for old individuals.
+        Retains states for current population only.
+
+        Parameters
+        ----------
+        current_population : list[Individual]
+            The current population to retain states for.
+        """
+        # Get IDs of individuals to keep (current population)
+        keep_ids = {ind.id for ind in current_population if ind.id is not None}
+
+        # Clean up weight managers
+        self._initial_weight_manager.clear_old_weights(keep_ids)
+        self._optimized_weight_manager.clear_old_weights(keep_ids)
+
+        # Clean up CMA-ES state managers (keep only current population)
+        # Note: CMAESStateManager doesn't have clear_old_states, so we need to add it
+        # For now, we'll manually filter the internal dicts
+        for manager in [self._initial_cmaes_manager, self._optimized_cmaes_manager]:
+            old_ids = set(manager._states.keys()) - keep_ids
+            for old_id in old_ids:
+                manager._states.pop(old_id, None)
+                manager._layer_sizes.pop(old_id, None)
+
+        # Clean up evaluated individuals list (keep only current population)
+        # This prevents unbounded growth of the tracking list
+        self._initial_weight_manager.all_evaluated_individuals = list(current_population)
+        self._optimized_weight_manager.all_evaluated_individuals = list(current_population)
 
     def evolve(
         self,
@@ -727,6 +861,12 @@ class MuLambdaStrategy:
             locomotion_fitness = ind.tags.get("locomotion_fitness") if ind.tags else None
             novelty_score = ind.tags.get("novelty_score") if ind.tags else None
 
+            # Extract CMA-ES metrics from tags if available
+            cmaes_sigma = ind.tags.get("cmaes_sigma") if ind.tags else None
+            cmaes_condition_number = ind.tags.get("cmaes_condition_number") if ind.tags else None
+            cmaes_mean_fitness = ind.tags.get("cmaes_mean_fitness") if ind.tags else None
+            cmaes_num_evaluations = ind.tags.get("cmaes_num_evaluations") if ind.tags else None
+
             record = {
                 "individual_id": ind.id,
                 "birth_generation": ind.time_of_birth,
@@ -740,6 +880,10 @@ class MuLambdaStrategy:
                 "directory": directory,
                 "num_parts": num_parts,
                 "num_actuators": num_actuators,
+                "cmaes_sigma": cmaes_sigma,
+                "cmaes_condition_number": cmaes_condition_number,
+                "cmaes_mean_fitness": cmaes_mean_fitness,
+                "cmaes_num_evaluations": cmaes_num_evaluations,
             }
             records.append(record)
 

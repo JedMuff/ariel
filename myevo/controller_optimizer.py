@@ -14,6 +14,7 @@ import nevergrad as ng
 import numpy as np
 
 from simulation_utils import (
+    calculate_displacement_fitness,
     create_controller,
     create_robot_model,
     setup_tracker,
@@ -65,10 +66,11 @@ def optimize_controller_cmaes(
     cmaes_population_size: int,
     sigma_init: float = 1.0,
     initial_weights: np.ndarray | None = None,
+    initial_cmaes_state: Any | None = None,
     maximize: bool = True,
     baseline_time: float = 5.0,
     seed: int = 42,
-) -> tuple[np.ndarray, float, list[float]]:
+) -> tuple[np.ndarray, float, list[float], dict[str, Any] | None, dict[str, Any]]:
     """Optimize controller weights using CMA-ES for a given morphology.
 
     This function runs an inner optimization loop to find the best controller
@@ -96,6 +98,9 @@ def optimize_controller_cmaes(
     initial_weights : np.ndarray | None, optional
         Initial weights to start optimization from (for Lamarckian evolution),
         by default None.
+    initial_cmaes_state : CMAESState | None, optional
+        Initial CMA-ES state (covariance, sigma) to inherit from parent,
+        by default None.
     maximize : bool, optional
         Whether to maximize (True) or minimize (False) fitness, by default True.
     baseline_time : float, optional
@@ -105,10 +110,12 @@ def optimize_controller_cmaes(
 
     Returns
     -------
-    tuple[np.ndarray, float, list[float]]
+    tuple[np.ndarray, float, list[float], dict | None, dict]
         - Best weights found
         - Best fitness value achieved
         - Learning curve (fitness at each iteration)
+        - Nevergrad optimizer state dict (for complete restoration)
+        - Metrics dict (iterations, budget, initial_fitness, final_fitness, mean_fitness)
     """
     num_actuators = model.nu
 
@@ -155,36 +162,25 @@ def optimize_controller_cmaes(
         # Run two-phase simulation: 5 seconds settling, then controlled locomotion
         settling_duration = 5.0
         control_duration = simulation_duration - settling_duration
-        simulate_with_settling_phase(
+        contact_count = simulate_with_settling_phase(
             model=model,
             data=data,
             controller=controller,
             tracker=tracker,
             settling_duration=settling_duration,
             control_duration=control_duration,
+            track_contacts=True,
         )
 
-        # Calculate fitness as forward displacement with height penalty
+        # Calculate fitness with all penalties (height + contact)
         # baseline_time=0 since tracker was reset at start of control phase
-        dt = model.opt.timestep
-        time_steps_per_save = 500  # As defined in Controller
-        seconds_per_save = dt * time_steps_per_save
-        baseline_index = 0  # Always 0 since we measure from start of control phase
-
-        # Ensure we have enough history, otherwise use first available
-        if len(tracker.history["xpos"][0]) > baseline_index:
-            initial_pos = tracker.history["xpos"][0][baseline_index]
-        else:
-            initial_pos = tracker.history["xpos"][0][0]
-
-        final_pos = tracker.history["xpos"][0][-1]
-        x_displacement = final_pos[0] - initial_pos[0]
-
-        # Apply height penalty based on spawn height (morphology height)
-        if spawn_height > 0.21:
-            fitness = x_displacement - spawn_height
-        else:
-            fitness = x_displacement
+        fitness = calculate_displacement_fitness(
+            tracker=tracker,
+            baseline_time=0.0,
+            model=model,
+            spawn_height=spawn_height,
+            contact_count=contact_count,
+        )
 
         return float(fitness)
 
@@ -204,10 +200,39 @@ def optimize_controller_cmaes(
         initial_guess = rng.uniform(-sigma_init, sigma_init, num_weights)
     optimizer.suggest(initial_guess)
 
+    # Initialize with inherited CMA-ES state if provided (Lamarckian CMA-ES)
+    if initial_cmaes_state is not None:
+        # Access the underlying CMA-ES optimizer
+        cma_es = optimizer.optim.es
+
+        # Set inherited covariance matrix and sigma
+        cma_es.C = initial_cmaes_state.covariance_matrix.copy()
+        cma_es.sigma = initial_cmaes_state.sigma
+
+        # Set mean if available
+        if initial_cmaes_state.mean is not None and len(initial_cmaes_state.mean) == num_weights:
+            cma_es.mean = initial_cmaes_state.mean.copy()
+
+        # Note: We don't restore full nevergrad state here because the optimizer
+        # was already created with potentially different dimensions. We only
+        # inherit the learned covariance and sigma.
+
+    # Capture initial CMA-ES state before optimization begins
+    try:
+        from ariel.ec.strategies.cmaes_inheritance import extract_cmaes_state_from_nevergrad
+        # Get layer sizes for the state
+        input_size = 2 * model.nu + 9
+        layer_sizes = [input_size] + hidden_layers + [model.nu]
+        initial_cmaes_state_captured = extract_cmaes_state_from_nevergrad(optimizer, layer_sizes)
+    except Exception as e:
+        print(f"Warning: Initial CMA-ES state capture failed: {e}")
+        initial_cmaes_state_captured = None
+
     # Run CMA-ES optimization
     best_fitness = float('-inf') if maximize else float('inf')
     best_weights = None
     fitness_history = []  # Track fitness at each iteration
+    initial_fitness = None  # Track first evaluation
 
     for i in range(cmaes_budget):
         # Get candidate from CMA-ES
@@ -216,6 +241,10 @@ def optimize_controller_cmaes(
 
         # Evaluate fitness
         fitness = evaluate_weights(candidate)
+
+        # Track first fitness (before optimization)
+        if i == 0:
+            initial_fitness = fitness
 
         # Track fitness history
         fitness_history.append(fitness)
@@ -234,7 +263,37 @@ def optimize_controller_cmaes(
             best_fitness = fitness
             best_weights = candidate.copy()
 
-    return best_weights, best_fitness, fitness_history
+    # Extract final CMA-ES state directly from optimizer
+    try:
+        from ariel.ec.strategies.cmaes_inheritance import extract_cmaes_state_from_nevergrad
+        # Get layer sizes for the state
+        # Note: Input size is 2*num_actuators + 9 (actuator pos+vel + core body state)
+        input_size = 2 * model.nu + 9
+        layer_sizes = [input_size] + hidden_layers + [model.nu]
+        cmaes_state = extract_cmaes_state_from_nevergrad(optimizer, layer_sizes)
+        # Note: We don't use nevergrad's dump() because it requires a filepath
+        # and we're handling serialization ourselves via the CMAESState object
+        nevergrad_state = None
+    except Exception as e:
+        # If extraction fails, return None
+        print(f"Warning: CMA-ES state extraction failed: {e}")
+        nevergrad_state = None
+        cmaes_state = None
+
+    # Calculate metrics
+    metrics = {
+        "iterations": len(fitness_history),
+        "budget": cmaes_budget,
+        "initial_fitness": initial_fitness,
+        "final_fitness": best_fitness,
+        "mean_fitness": float(np.mean(fitness_history)) if fitness_history else None,
+        "num_evaluations": len(fitness_history),
+        "initial_cmaes_state": initial_cmaes_state_captured,  # State before optimization
+        "optimized_cmaes_state": cmaes_state,  # State after optimization
+        "cmaes_state": cmaes_state,  # For backward compatibility (deprecated)
+    }
+
+    return best_weights, best_fitness, fitness_history, nevergrad_state, metrics
 
 
 def optimize_controller_random_search(

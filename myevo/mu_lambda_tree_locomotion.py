@@ -131,6 +131,8 @@ class TreeLocomotionEvolution:
         # Lamarckian evolution parameters
         enable_lamarckian: bool = False,
         lamarckian_crossover_mode: str = "average",
+        covariance_inheritance_mode: str = "adaptive",
+        sigma_inheritance_mode: str = "blend",
         # Video recording parameters
         enable_video_recording: bool = False,
         video_interval: int = 1,
@@ -206,6 +208,19 @@ class TreeLocomotionEvolution:
             - "parent1": Use only first parent's weights
             - "random": Randomly choose one parent's weights
             - "closest_parent": Use weights from parent with smallest tree edit distance to offspring
+        covariance_inheritance_mode : str
+            How to adapt CMA-ES covariance matrices when morphology changes.
+            Options:
+            - "adaptive": Preserve learned correlations for existing weights (default)
+            - "reset": Always use identity matrix (no inheritance)
+            - "preserve": Scale existing matrix to new size (experimental)
+        sigma_inheritance_mode : str
+            How to adapt CMA-ES step size when morphology changes.
+            Options:
+            - "blend": Blend parent sigma with initial sigma based on proportion of new weights (default)
+            - "reset": Always use sigma_init (no inheritance)
+            - "keep": Always use parent sigma (full inheritance)
+            - "adaptive": Custom blending logic
         enable_video_recording : bool
             Whether to record videos of the best robot after each generation.
         video_interval : int
@@ -245,6 +260,8 @@ class TreeLocomotionEvolution:
         # Lamarckian evolution parameters (will be passed to strategy)
         self.enable_lamarckian = enable_lamarckian
         self.lamarckian_crossover_mode = lamarckian_crossover_mode
+        self.covariance_inheritance_mode = covariance_inheritance_mode
+        self.sigma_inheritance_mode = sigma_inheritance_mode
 
         # Video recording parameters
         self.enable_video_recording = enable_video_recording
@@ -290,6 +307,8 @@ class TreeLocomotionEvolution:
             lamarckian_mode=enable_lamarckian,
             weight_crossover_mode=lamarckian_crossover_mode,
             weight_sigma=sigma_init,
+            covariance_inheritance_mode=covariance_inheritance_mode,
+            sigma_inheritance_mode=sigma_inheritance_mode,
             post_evaluation_callback=self.recalculate_novelty_for_generation if use_novelty else None,
             save_database_per_generation=True,  # Enable per-generation database saving
         )
@@ -453,7 +472,8 @@ class TreeLocomotionEvolution:
         model: mj.MjModel,
         world_spec: Any,
         initial_weights: np.ndarray | None = None,
-    ) -> tuple[np.ndarray, float, list[float]]:
+        initial_cmaes_state: Any | None = None,
+    ) -> tuple[np.ndarray, float, list[float], dict[str, Any] | None, dict[str, Any]]:
         """Wrapper for CMA-ES controller optimization.
 
         Parameters
@@ -464,11 +484,13 @@ class TreeLocomotionEvolution:
             The world specification for tracking.
         initial_weights : np.ndarray | None, optional
             Initial weights to start optimization from (for Lamarckian evolution).
+        initial_cmaes_state : CMAESState | None, optional
+            Initial CMA-ES state to inherit from parent.
 
         Returns
         -------
-        tuple[np.ndarray, float, list[float]]
-            Best weights, their fitness value, and learning curve.
+        tuple[np.ndarray, float, list[float], dict | None, dict]
+            Best weights, fitness, learning curve, nevergrad state, and metrics.
         """
         return optimize_controller_cmaes(
             model=model,
@@ -480,6 +502,7 @@ class TreeLocomotionEvolution:
             cmaes_population_size=self.cmaes_population_size,
             sigma_init=self.sigma_init,
             initial_weights=initial_weights,
+            initial_cmaes_state=initial_cmaes_state,
             maximize=self.maximize,
             baseline_time=5.0,
             seed=SEED,
@@ -545,12 +568,28 @@ class TreeLocomotionEvolution:
             num_weights = controller.get_num_weights()
             random_weights = self.rng.uniform(-self.sigma_init, self.sigma_init, num_weights)
 
-            # Store weights in tags for inheritance (even though we didn't evaluate)
+            # Create default CMA-ES state for consistency
+            from ariel.ec.strategies.cmaes_inheritance import (
+                create_default_cmaes_state,
+                save_cmaes_state_to_disk,
+            )
+            default_cmaes_state = create_default_cmaes_state(
+                controller.layer_sizes,
+                sigma_init=self.sigma_init,
+            )
+
+            # Store weights and CMA-ES state in tags for inheritance (even though we didn't evaluate)
             if individual is not None:
                 individual.tags["initial_weights"] = random_weights
                 individual.tags["optimized_weights"] = random_weights  # Same as initial (no optimization)
                 individual.tags["layer_sizes"] = controller.layer_sizes
                 individual.tags["locomotion_fitness"] = 0.0  # Store fitness of 0.0
+                individual.tags["cmaes_state"] = default_cmaes_state
+                # Store default metrics
+                individual.tags["cmaes_sigma"] = default_cmaes_state.sigma
+                individual.tags["cmaes_condition_number"] = 1.0  # Identity covariance
+                individual.tags["cmaes_mean_fitness"] = None
+                individual.tags["cmaes_num_evaluations"] = 0
 
             # Save brain files for consistency
             if save_dir is not None:
@@ -560,6 +599,9 @@ class TreeLocomotionEvolution:
                 np.save(save_path / "initial_brain.npy", random_weights)
                 np.save(save_path / "optimized_brain.npy", random_weights)
 
+                # Save default CMA-ES state
+                save_cmaes_state_to_disk(default_cmaes_state, save_path)
+
                 # Save metadata
                 metadata = {
                     "controller_hidden_layers": self.controller_hidden_layers,
@@ -568,6 +610,8 @@ class TreeLocomotionEvolution:
                     "num_actuators": model.nu,
                     "num_weights": len(random_weights),
                     "input_size": model.nq + model.nv,
+                    "cmaes_budget": 0,
+                    "cmaes_sigma_final": float(default_cmaes_state.sigma),
                     "note": "Robot has < 4 actuators, not evaluated for locomotion",
                 }
                 with open(save_path / "metadata.json", 'w') as f:
@@ -592,10 +636,12 @@ class TreeLocomotionEvolution:
         # Get initial weights - either inherited from parent (via strategy) or random
         # The strategy populates individual.tags["inherited_weights"] before evaluation
         initial_weights = None
+        initial_cmaes_state = None
 
         if individual is not None:
             inherited_weights = individual.tags.get("inherited_weights")
             inherited_layer_sizes = individual.tags.get("inherited_layer_sizes")
+            inherited_cmaes_state = individual.tags.get("inherited_cmaes_state")
 
             if inherited_weights is not None and inherited_layer_sizes is not None:
                 # Strategy provided inherited weights - adapt to offspring morphology if needed
@@ -613,6 +659,29 @@ class TreeLocomotionEvolution:
                     # Same morphology - use weights directly
                     initial_weights = inherited_weights
 
+            # Retrieve and adapt inherited CMA-ES state to offspring morphology
+            if inherited_cmaes_state is not None:
+                # Check if morphology changed and adaptation is needed
+                if inherited_layer_sizes is not None and inherited_layer_sizes != controller.layer_sizes:
+                    # Morphology changed - adapt CMA-ES state to new architecture
+                    from ariel.ec.strategies.cmaes_inheritance import adapt_cmaes_state_to_morphology
+                    initial_cmaes_state = adapt_cmaes_state_to_morphology(
+                        parent_state=inherited_cmaes_state,
+                        parent_layer_sizes=inherited_layer_sizes,
+                        offspring_layer_sizes=controller.layer_sizes,
+                        sigma_init=self.sigma_init,
+                        covariance_mode=self.covariance_inheritance_mode,
+                        sigma_mode=self.sigma_inheritance_mode,
+                        rng=self.rng,
+                    )
+                elif inherited_layer_sizes is None:
+                    # Missing layer size info - skip CMA-ES state inheritance for safety
+                    console.print(f"[yellow]WARNING: Individual {individual.id if individual else 'unknown'} missing inherited_layer_sizes, skipping CMA-ES state inheritance[/yellow]")
+                    initial_cmaes_state = None
+                else:
+                    # Same morphology - use state directly
+                    initial_cmaes_state = inherited_cmaes_state
+
         # Fallback to random initialization if no inherited weights
         if initial_weights is None:
             initial_weights = self.rng.uniform(-self.sigma_init, self.sigma_init, num_weights)
@@ -621,15 +690,47 @@ class TreeLocomotionEvolution:
         if self.use_cmaes:
 
             # Use CMA-ES to optimize controller weights
-            optimized_weights, cmaes_fitness, learning_curve = self.optimize_controller_cmaes_wrapper(
-                model, world_spec, initial_weights=initial_weights
+            optimized_weights, cmaes_fitness, learning_curve, nevergrad_state, metrics = \
+                self.optimize_controller_cmaes_wrapper(
+                    model, world_spec,
+                    initial_weights=initial_weights,
+                    initial_cmaes_state=initial_cmaes_state
+                )
+
+            # Extract CMA-ES states from metrics
+            from ariel.ec.strategies.cmaes_inheritance import (
+                create_default_cmaes_state,
+                save_cmaes_state_to_disk,
             )
 
-            # Store weights in individual tags for strategy to extract
+            # Get both initial and optimized CMA-ES states from metrics
+            initial_cmaes_state = metrics.get("initial_cmaes_state")
+            optimized_cmaes_state = metrics.get("optimized_cmaes_state")
+
+            # Fallback to default if extraction failed
+            if initial_cmaes_state is None:
+                initial_cmaes_state = create_default_cmaes_state(
+                    controller.layer_sizes,
+                    sigma_init=self.sigma_init,
+                )
+            if optimized_cmaes_state is None:
+                optimized_cmaes_state = create_default_cmaes_state(
+                    controller.layer_sizes,
+                    sigma_init=self.sigma_init,
+                )
+
+            # Store weights and BOTH CMA-ES states in individual tags for strategy to extract
             if individual is not None:
                 individual.tags["initial_weights"] = initial_weights
                 individual.tags["optimized_weights"] = optimized_weights
                 individual.tags["layer_sizes"] = controller.layer_sizes
+                individual.tags["initial_cmaes_state"] = initial_cmaes_state
+                individual.tags["optimized_cmaes_state"] = optimized_cmaes_state
+                # Store metrics for database (use optimized state for reporting)
+                individual.tags["cmaes_sigma"] = optimized_cmaes_state.sigma
+                individual.tags["cmaes_condition_number"] = optimized_cmaes_state.condition_number
+                individual.tags["cmaes_mean_fitness"] = metrics.get("mean_fitness")
+                individual.tags["cmaes_num_evaluations"] = metrics.get("num_evaluations")
 
             # Save brain files directly if save_dir is available
             if save_dir is not None:
@@ -639,7 +740,16 @@ class TreeLocomotionEvolution:
                 np.save(save_path / "initial_brain.npy", initial_weights)
                 np.save(save_path / "optimized_brain.npy", optimized_weights)
 
-                # Save metadata about neural network architecture
+                # Save both initial and optimized CMA-ES states to disk
+                # Save initial state with prefix
+                initial_state_dir = save_path / "initial_cmaes"
+                initial_state_dir.mkdir(exist_ok=True)
+                save_cmaes_state_to_disk(initial_cmaes_state, initial_state_dir)
+
+                # Save optimized state (backward compatible location)
+                save_cmaes_state_to_disk(optimized_cmaes_state, save_path)
+
+                # Save metadata about neural network architecture and CMA-ES
                 metadata = {
                     "controller_hidden_layers": self.controller_hidden_layers,
                     "controller_activation": self.controller_activation,
@@ -647,6 +757,13 @@ class TreeLocomotionEvolution:
                     "num_actuators": model.nu,
                     "num_weights": len(optimized_weights),
                     "input_size": model.nq + model.nv,
+                    "cmaes_budget": self.cmaes_budget,
+                    "cmaes_population_size": self.cmaes_population_size,
+                    "sigma_init": self.sigma_init,
+                    "cmaes_sigma_initial": float(initial_cmaes_state.sigma),
+                    "cmaes_sigma_final": float(optimized_cmaes_state.sigma),
+                    "cmaes_condition_number_initial": float(initial_cmaes_state.condition_number) if initial_cmaes_state.condition_number else None,
+                    "cmaes_condition_number_final": float(optimized_cmaes_state.condition_number) if optimized_cmaes_state.condition_number else None,
                 }
                 with open(save_path / "metadata.json", 'w') as f:
                     json.dump(metadata, f, indent=2)
@@ -689,22 +806,24 @@ class TreeLocomotionEvolution:
             # Run two-phase simulation: 5 seconds settling, then controlled locomotion
             settling_duration = 5.0
             control_duration = self.simulation_duration - settling_duration
-            simulate_with_settling_phase(
+            contact_count = simulate_with_settling_phase(
                 model=model,
                 data=data,
                 controller=controller,
                 tracker=tracker,
                 settling_duration=settling_duration,
                 control_duration=control_duration,
+                track_contacts=True,
             )
 
             # Calculate fitness (baseline_time=0 since tracker was reset at start of control phase)
-            # Pass spawn_height for the height penalty calculation
+            # Pass spawn_height and contact_count for penalty calculations
             x_displacement = calculate_displacement_fitness(
                 tracker,
                 baseline_time=0.0,
                 model=model,
-                spawn_height=spawn_height
+                spawn_height=spawn_height,
+                contact_count=contact_count,
             )
 
             # Store weights in individual tags for strategy to extract
@@ -713,6 +832,20 @@ class TreeLocomotionEvolution:
                 individual.tags["initial_weights"] = initial_weights
                 individual.tags["optimized_weights"] = initial_weights  # Same as initial
                 individual.tags["layer_sizes"] = controller.layer_sizes
+
+                # Create and store default CMA-ES states for consistency
+                from ariel.ec.strategies.cmaes_inheritance import create_default_cmaes_state
+                default_cmaes_state = create_default_cmaes_state(
+                    controller.layer_sizes,
+                    sigma_init=self.sigma_init,
+                )
+                individual.tags["initial_cmaes_state"] = default_cmaes_state
+                individual.tags["optimized_cmaes_state"] = default_cmaes_state  # Same as initial (no optimization)
+                # Store metrics for database
+                individual.tags["cmaes_sigma"] = default_cmaes_state.sigma
+                individual.tags["cmaes_condition_number"] = 1.0  # Identity covariance
+                individual.tags["cmaes_mean_fitness"] = None
+                individual.tags["cmaes_num_evaluations"] = 0
 
             # Save brain files directly if save_dir is available
             # No optimization in this case, so initial = optimized
@@ -911,7 +1044,7 @@ def parse_args():
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=4,
+        default=30,
         help="Number of parallel workers for evaluation (default: 4)"
     )
     parser.add_argument(
@@ -943,6 +1076,20 @@ def parse_args():
         type=int,
         default=20,
         help="CMA-ES population size (default: 20)"
+    )
+    parser.add_argument(
+        "--covariance-inheritance-mode",
+        type=str,
+        default="adaptive",
+        choices=["adaptive", "reset", "preserve"],
+        help="CMA-ES covariance inheritance mode (default: adaptive)"
+    )
+    parser.add_argument(
+        "--sigma-inheritance-mode",
+        type=str,
+        default="blend",
+        choices=["blend", "reset", "keep", "adaptive"],
+        help="CMA-ES sigma inheritance mode (default: blend)"
     )
 
     return parser.parse_args()
@@ -1011,6 +1158,8 @@ def main() -> None:
         # Lamarckian evolution parameters
         enable_lamarckian=args.enable_lamarckian,  # Enable Lamarckian weight inheritance (from command line)
         lamarckian_crossover_mode="closest_parent",  # Weight combination mode: average, parent1, random, closest_parent
+        covariance_inheritance_mode=args.covariance_inheritance_mode,  # CMA-ES covariance inheritance mode (from command line)
+        sigma_inheritance_mode=args.sigma_inheritance_mode,  # CMA-ES sigma inheritance mode (from command line)
 
         # Video recording parameters
         enable_video_recording=False,     # Enable video recording of best robot

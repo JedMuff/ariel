@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --output=slurm_out/locomotion-%A_%a.out
-#SBATCH --error=slurm_out/locomotion-%A_%a.err
+#SBATCH --output=slurm_out/lamarckian_cmaes-%A_%a.out
+#SBATCH --error=slurm_out/lamarckian_cmaes-%A_%a.err
 #SBATCH --time=100:00:00
 #SBATCH --cpus-per-task=32
 #SBATCH --array=0-39
@@ -36,7 +36,7 @@ which python3
 python3 --version
 
 # Calculate experiment type and repetition from array task ID
-# Now organized so all experiments run in parallel for each repetition:
+# Organization: all experiments run in parallel for each repetition
 # Tasks 0-3:   Repetition 0 (all 4 experiments)
 # Tasks 4-7:   Repetition 1 (all 4 experiments)
 # Tasks 8-11:  Repetition 2 (all 4 experiments)
@@ -56,25 +56,25 @@ echo "Seed: $SEED"
 
 # Set experiment-specific parameters
 if [ $EXPERIMENT_ID -eq 0 ]; then
-    # Darwin + Locomotion (baseline)
-    EXPERIMENT_NAME="darwin_locomotion_rep${REPETITION}"
-    FLAGS=""
-    echo "Running: Darwin Evolution + Locomotion"
+    # Lamarckian + Covariance Inheritance (sigma reset) + Locomotion
+    EXPERIMENT_NAME="lamarck_cov_sigmareset_locomotion_rep${REPETITION}"
+    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode reset"
+    echo "Running: Lamarckian (Cov=adaptive, Sigma=reset) + Locomotion"
 elif [ $EXPERIMENT_ID -eq 1 ]; then
-    # Lamarckian + Locomotion
-    EXPERIMENT_NAME="lamarckian_locomotion_rep${REPETITION}"
-    FLAGS="--enable-lamarckian"
-    echo "Running: Lamarckian Evolution + Locomotion"
+    # Lamarckian + Covariance + Sigma Inheritance + Locomotion
+    EXPERIMENT_NAME="lamarck_cov_sigma_locomotion_rep${REPETITION}"
+    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode blend"
+    echo "Running: Lamarckian (Cov=adaptive, Sigma=blend) + Locomotion"
 elif [ $EXPERIMENT_ID -eq 2 ]; then
-    # Darwin + Novelty*Locomotion
-    EXPERIMENT_NAME="darwin_novelty_rep${REPETITION}"
-    FLAGS="--use-novelty"
-    echo "Running: Darwin Evolution + Novelty*Locomotion"
+    # Lamarckian + Covariance Inheritance (sigma reset) + Novelty*Locomotion
+    EXPERIMENT_NAME="lamarck_cov_sigmareset_novelty_rep${REPETITION}"
+    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode reset --use-novelty"
+    echo "Running: Lamarckian (Cov=adaptive, Sigma=reset) + Novelty*Locomotion"
 elif [ $EXPERIMENT_ID -eq 3 ]; then
-    # Lamarckian + Novelty*Locomotion
-    EXPERIMENT_NAME="lamarckian_novelty_rep${REPETITION}"
-    FLAGS="--enable-lamarckian --use-novelty"
-    echo "Running: Lamarckian Evolution + Novelty*Locomotion"
+    # Lamarckian + Covariance + Sigma Inheritance + Novelty*Locomotion
+    EXPERIMENT_NAME="lamarck_cov_sigma_novelty_rep${REPETITION}"
+    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode blend --use-novelty"
+    echo "Running: Lamarckian (Cov=adaptive, Sigma=blend) + Novelty*Locomotion"
 else
     echo "ERROR: Invalid experiment ID: $EXPERIMENT_ID"
     exit 1
