@@ -19,6 +19,8 @@ from ariel.simulation.environments import SimpleFlatWorld
 from ariel.utils.runners import simple_runner
 from ariel.utils.tracker import Tracker
 
+from contact_utils import get_rotors_in_contact
+
 if TYPE_CHECKING:
     from neural_network_controller import FlexibleNeuralNetworkController
 
@@ -124,6 +126,7 @@ def calculate_displacement_fitness(
     baseline_time: float,
     model: mj.MjModel,
     spawn_height: float,
+    contact_count: int = 0,
 ) -> float:
     """Calculate fitness as forward displacement from a baseline time.
 
@@ -133,6 +136,10 @@ def calculate_displacement_fitness(
     A height penalty is applied: if the robot's spawn height (morphology height)
     is above 0.21m, the spawn height is subtracted from the fitness. This prevents
     tall robots from exploiting falling/settling for free displacement.
+
+    A contact penalty is applied to punish morphologies that exploit hinge-ground
+    contact glitches. The penalty is 0.005 * contact_count. If contact_count exceeds
+    200, the fitness is set to -1.0.
 
     Parameters
     ----------
@@ -145,11 +152,13 @@ def calculate_displacement_fitness(
     spawn_height : float
         The spawn height (z-coordinate) of the robot's core at initialization.
         This is the robot's morphological height used for the penalty.
+    contact_count : int, optional
+        Number of unique rotor-ground contact events during the simulation, by default 0.
 
     Returns
     -------
     float
-        Forward displacement in meters from baseline time to end, with height penalty applied.
+        Forward displacement in meters from baseline time to end, with penalties applied.
     """
     # Get timestep information
     dt = model.opt.timestep
@@ -173,6 +182,14 @@ def calculate_displacement_fitness(
         fitness = x_displacement - spawn_height
     else:
         fitness = x_displacement
+
+    # Apply contact penalty
+    # If excessive contacts (>200), return severe penalty
+    if contact_count > 200:
+        return -1.0
+
+    # Otherwise apply linear penalty
+    fitness = fitness - 0.005 * contact_count
 
     return float(fitness)
 
@@ -229,7 +246,8 @@ def simulate_with_settling_phase(
     control_duration: float,
     time_steps_per_ctrl_step: int = 100,
     time_steps_per_save: int = 500,
-) -> None:
+    track_contacts: bool = False,
+) -> int:
     """Run a two-phase simulation: passive settling, then active control.
 
     Phase 1: Robot settles passively for settling_duration with no control input.
@@ -256,6 +274,13 @@ def simulate_with_settling_phase(
         Control update frequency, by default 100.
     time_steps_per_save : int, optional
         Tracking save frequency, by default 500.
+    track_contacts : bool, optional
+        Whether to track rotor-ground contact events during Phase 2, by default False.
+
+    Returns
+    -------
+    int
+        Number of unique rotor-ground contact events during Phase 2 (0 if track_contacts=False).
     """
     # Phase 1: Passive settling (no control)
     mj.set_mjcb_control(None)
@@ -275,8 +300,31 @@ def simulate_with_settling_phase(
     # Set control callback
     mj.set_mjcb_control(lambda m, d: ctrl.set_control(m, d))
 
-    # Continue simulation with control
-    simple_runner(model, data, duration=control_duration)
+    # Track contacts if requested
+    contact_count = 0
+    if track_contacts:
+        # Track contact events during Phase 2
+        previous_rotors_in_contact = set()
+        num_steps = int(control_duration / model.opt.timestep)
+
+        for step in range(num_steps):
+            # Step the simulation
+            mj.mj_step(model, data)
+
+            # Check current contacts
+            current_rotors_in_contact = get_rotors_in_contact(model, data)
+
+            # Count new contacts (rotors that are touching now but weren't before)
+            new_contacts = current_rotors_in_contact - previous_rotors_in_contact
+            contact_count += len(new_contacts)
+
+            # Update tracking set for next iteration
+            previous_rotors_in_contact = current_rotors_in_contact
+    else:
+        # Continue simulation with control (no contact tracking)
+        simple_runner(model, data, duration=control_duration)
+
+    return contact_count
 
 
 def evaluate_morphology_fitness(

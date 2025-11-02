@@ -151,7 +151,7 @@ def main():
     parser.add_argument(
         "--duration",
         type=float,
-        default=10.0,
+        default=35.0,
         help="Simulation duration in seconds for learning (default: 10.0)",
     )
     parser.add_argument(
@@ -291,6 +291,30 @@ def main():
                 return data.geom(i).xpos.copy()
         raise ValueError("Could not find core geom")
 
+    # Helper function to detect rotor-ground contacts
+    def get_rotors_in_contact(model, data):
+        """Find which rotor geoms are currently in contact with the ground.
+
+        Returns
+        -------
+        set[str]
+            Set of rotor geom names currently in contact with floor.
+        """
+        rotors_touching = set()
+        for i in range(data.ncon):
+            contact = data.contact[i]
+            geom1_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, contact.geom1)
+            geom2_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, contact.geom2)
+
+            # Check if one geom is a rotor and the other is the floor
+            if geom1_name and geom2_name:
+                if "rotor" in geom1_name and "floor" in geom2_name:
+                    rotors_touching.add(geom1_name)
+                elif "rotor" in geom2_name and "floor" in geom1_name:
+                    rotors_touching.add(geom2_name)
+
+        return rotors_touching
+
     # Compute forward kinematics to update positions
     mj.mj_forward(model, data)
 
@@ -326,12 +350,64 @@ def main():
     )
     mj.set_mjcb_control(lambda m, d: ctrl.set_control(m, d))
 
-    # Run controlled simulation
-    simple_runner(model, data, duration=control_duration)
+    # Run controlled simulation with contact tracking
+    # Track unique contact events (when a rotor makes new contact with ground)
+    previous_rotors_in_contact = set()
+    unique_contact_events = 0
+    contact_event_log = []  # Store details of each contact event
+
+    num_steps = int(control_duration / model.opt.timestep)
+    for step in range(num_steps):
+        mj.mj_step(model, data)
+
+        # Check current contacts
+        current_rotors_in_contact = get_rotors_in_contact(model, data)
+
+        # Count new contacts (rotors that are touching now but weren't before)
+        new_contacts = current_rotors_in_contact - previous_rotors_in_contact
+
+        # Log each new contact event with timestamp
+        if new_contacts:
+            sim_time = data.time
+            for rotor_name in new_contacts:
+                contact_event_log.append((sim_time, rotor_name))
+                unique_contact_events += 1
+
+        # Also track when contacts are lost (for debugging)
+        lost_contacts = previous_rotors_in_contact - current_rotors_in_contact
+        if lost_contacts and len(contact_event_log) < 50:  # Only log first 50 to avoid spam
+            sim_time = data.time
+            for rotor_name in lost_contacts:
+                contact_event_log.append((sim_time, f"LOST: {rotor_name}"))
+
+        # Update tracking set for next iteration
+        previous_rotors_in_contact = current_rotors_in_contact
 
     # Get final position
     final_pos = get_core_position(data, model)
     console.print(f"[cyan]Final position:[/cyan] x={final_pos[0]:.4f}m, y={final_pos[1]:.4f}m, z={final_pos[2]:.4f}m")
+
+    # Print contact statistics
+    console.print(f"\n[bold cyan]Contact Statistics:[/bold cyan]")
+    console.print(f"[cyan]Hinge rotor ground contacts:[/cyan] {unique_contact_events} unique contact events")
+
+    # Count how many unique rotors made contact
+    unique_rotors = set()
+    contact_times = []  # Store times of new contacts only
+    for time, rotor in contact_event_log:
+        if "LOST:" not in str(rotor):
+            unique_rotors.add(rotor)
+            contact_times.append(time)
+
+    console.print(f"[cyan]Unique rotors that made contact:[/cyan] {len(unique_rotors)}")
+    if unique_rotors:
+        console.print(f"[dim]  Rotor names: {', '.join(sorted(unique_rotors))}[/dim]")
+
+    # Calculate average time between contacts
+    if len(contact_times) > 1:
+        time_diffs = [contact_times[i+1] - contact_times[i] for i in range(len(contact_times)-1)]
+        avg_time_between = sum(time_diffs) / len(time_diffs)
+        console.print(f"[cyan]Average time between contacts:[/cyan] {avg_time_between*1000:.1f} ms ({1.0/avg_time_between:.1f} contacts/sec)")
 
     # Calculate fitness components using the baseline position
     initial_pos = baseline_pos
