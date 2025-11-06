@@ -603,8 +603,14 @@ def save_cmaes_state_to_disk(
 
     Creates multiple files:
     - cmaes_state.pkl: Full pickled nevergrad state (if available)
-    - cmaes_covariance.npy: Covariance matrix as NumPy array
+    - cmaes_covariance.npy: Covariance matrix as NumPy array (symmetric, compressed)
     - cmaes_sigma.txt: Sigma value in plain text
+
+    The covariance matrix is stored in compressed format using:
+    1. Symmetric storage (upper triangle only) - 50% reduction
+    2. float32 precision - additional 50% reduction
+    3. npz compression - further compression
+    Total: ~4x compression ratio (75% disk space savings)
 
     Args:
         state: CMA-ES state to save
@@ -619,14 +625,22 @@ def save_cmaes_state_to_disk(
             pickle.dump(state.nevergrad_state, f)
 
     # Save covariance matrix (compressed to save disk space)
-    np.savez_compressed(directory / "cmaes_covariance.npz", covariance=state.covariance_matrix)
+    # Store only upper triangle since matrix is symmetric
+    n = state.covariance_matrix.shape[0]
+    triu_indices = np.triu_indices(n)
+    triu_values = state.covariance_matrix[triu_indices].astype(np.float32)
+    np.savez_compressed(
+        directory / "cmaes_covariance.npz",
+        triu_values=triu_values,
+        size=n,
+    )
 
     # Save sigma as text (human-readable)
     with open(directory / "cmaes_sigma.txt", 'w') as f:
         f.write(f"{state.sigma}\n")
 
-    # Save mean vector (compressed to save disk space)
-    np.savez_compressed(directory / "cmaes_mean.npz", mean=state.mean)
+    # Save mean vector (compressed to save disk space, also use float32)
+    np.savez_compressed(directory / "cmaes_mean.npz", mean=state.mean.astype(np.float32))
 
 
 def load_cmaes_state_from_disk(
@@ -634,6 +648,11 @@ def load_cmaes_state_from_disk(
     layer_sizes: list[int],
 ) -> CMAESState | None:
     """Load CMA-ES state from individual's directory.
+
+    Supports multiple formats for backward compatibility:
+    1. New format: symmetric storage (triu_values + size)
+    2. Old format: full matrix (covariance key)
+    3. Legacy format: uncompressed .npy file
 
     Args:
         directory: Directory containing saved files
@@ -645,15 +664,30 @@ def load_cmaes_state_from_disk(
     directory = Path(directory)
 
     # Check if covariance file exists (minimum requirement)
-    # Support both compressed (.npz) and uncompressed (.npy) formats
     cov_file_compressed = directory / "cmaes_covariance.npz"
     cov_file_uncompressed = directory / "cmaes_covariance.npy"
 
     if cov_file_compressed.exists():
         # Load compressed format
-        covariance = np.load(cov_file_compressed)['covariance']
+        data = np.load(cov_file_compressed)
+
+        # Check if it's the new symmetric format or old full matrix format
+        if 'triu_values' in data:
+            # New symmetric format - reconstruct full matrix
+            triu_values = data['triu_values']
+            n = int(data['size'])
+
+            # Reconstruct symmetric matrix from upper triangle
+            covariance = np.zeros((n, n), dtype=np.float64)
+            triu_indices = np.triu_indices(n)
+            covariance[triu_indices] = triu_values
+            # Mirror to lower triangle (excluding diagonal)
+            covariance = covariance + covariance.T - np.diag(np.diag(covariance))
+        else:
+            # Old full matrix format (backward compatibility)
+            covariance = np.load(cov_file_compressed)['covariance']
     elif cov_file_uncompressed.exists():
-        # Load uncompressed format (backward compatibility)
+        # Legacy uncompressed format (backward compatibility)
         covariance = np.load(cov_file_uncompressed)
     else:
         return None
