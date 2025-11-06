@@ -6,7 +6,10 @@ adapted to work with ARIEL's Individual model and database persistence.
 
 from __future__ import annotations
 
+import gc
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -67,6 +70,7 @@ class MuLambdaStrategy:
         sigma_inheritance_mode: str = "blend",
         post_evaluation_callback: Callable[[list[Individual]], None] | None = None,
         save_database_per_generation: bool = False,
+        cache_dir: Path | str | None = None,
     ):
         """Initialize the Mu+Lambda or Mu,Lambda evolution strategy.
 
@@ -171,6 +175,12 @@ class MuLambdaStrategy:
 
         # Database saving per generation
         self.save_database_per_generation = save_database_per_generation
+
+        # Cache directory for CMA-ES states (experiment-specific to avoid conflicts)
+        if cache_dir is None:
+            self.cache_dir = Path(tempfile.gettempdir()) / "ariel_cmaes_cache"
+        else:
+            self.cache_dir = Path(cache_dir)
 
         # Weight managers for inheritance
         # Initial weights manager: stores pre-optimization weights (for non-Lamarckian mode)
@@ -369,6 +379,21 @@ class MuLambdaStrategy:
         # This captures both initial and optimized weights for future inheritance
         self._extract_and_store_weights(offspring)
 
+        # Clean up temp cache files after extraction is complete
+        # At this point, all offspring have been evaluated and their states extracted
+        # The temporary cache files from parent inheritance are no longer needed
+        import shutil
+        if self.cache_dir.exists():
+            try:
+                files_before = len(list(self.cache_dir.glob("**/*")))
+                if files_before > 0:
+                    shutil.rmtree(self.cache_dir)
+                    self.cache_dir.mkdir(parents=True, exist_ok=True)
+                    if self.verbose:
+                        print(f"  Cleaned {files_before} temp cache files after offspring evaluation", flush=True)
+            except Exception:
+                pass  # Silently ignore cleanup errors during evaluation
+
         # Handle reevaluation of parents (only for plus strategy)
         if reevaluate_parents and self.strategy_type == "plus":
             population = evaluate_population(
@@ -401,6 +426,10 @@ class MuLambdaStrategy:
         # Clean up old states to prevent memory leaks
         # Only keep states for the surviving population (μ individuals)
         self._cleanup_old_states(next_population)
+
+        # Force garbage collection after each generation to prevent memory accumulation
+        # This is especially important with high CMA-ES budgets
+        gc.collect()
 
         return next_population
 
@@ -503,13 +532,24 @@ class MuLambdaStrategy:
                 child.tags["inherited_weights"] = parent_weights
                 child.tags["inherited_layer_sizes"] = parent_layer_sizes
 
-            # Populate inherited CMA-ES state from the same parent we chose for weights
-            # Note: We pass the parent's state directly; adaptation to offspring morphology
-            # happens in the fitness function where we know the actual offspring architecture
+            # Save parent's CMA-ES state to a temporary cache file for multiprocessing
+            # This avoids serializing large covariance matrices through pipes (which causes BrokenPipeError)
             if chosen_parent_id is not None:
                 parent_cmaes_state = cmaes_manager.get_state(chosen_parent_id)
                 if parent_cmaes_state is not None:
-                    child.tags["inherited_cmaes_state"] = parent_cmaes_state
+                    # Save to temporary file that worker can load
+                    from ariel.ec.strategies.cmaes_inheritance import save_cmaes_state_to_disk
+
+                    # Create temp directory if it doesn't exist
+                    self.cache_dir.mkdir(exist_ok=True, parents=True)
+
+                    # Save state with parent ID as filename
+                    cache_file = self.cache_dir / f"parent_{chosen_parent_id}_state"
+                    save_cmaes_state_to_disk(parent_cmaes_state, cache_file)
+
+                    # Store file path in tags (much smaller than the full state object)
+                    child.tags["inherited_cmaes_cache_path"] = str(cache_file)
+                    child.tags["inherited_layer_sizes_cmaes"] = parent_cmaes_state.layer_sizes
 
     def _extract_and_store_weights(self, offspring: list[Individual]) -> None:
         """Extract weights and CMA-ES states from evaluated offspring and store in managers.
@@ -518,8 +558,9 @@ class MuLambdaStrategy:
         - tags["initial_weights"]: Pre-optimization weights
         - tags["optimized_weights"]: Post-optimization weights
         - tags["layer_sizes"]: Neural network architecture
-        - tags["initial_cmaes_state"]: CMA-ES state before optimization
-        - tags["optimized_cmaes_state"]: CMA-ES state after optimization
+        - tags["initial_cmaes_cache_path"]: Path to initial CMA-ES state cache file
+        - tags["optimized_cmaes_cache_path"]: Path to optimized CMA-ES state cache file
+        - tags["optimized_cmaes_layer_sizes"]: Layer sizes for optimized state
 
         This method extracts these and stores them for future inheritance.
 
@@ -528,13 +569,33 @@ class MuLambdaStrategy:
         offspring : list[Individual]
             Evaluated offspring with weight and CMA-ES state information in tags.
         """
+        from pathlib import Path
+        from ariel.ec.strategies.cmaes_inheritance import load_cmaes_state_from_disk
+
         for child in offspring:
             # Extract weights and layer sizes from tags
             initial_weights = child.tags.get("initial_weights")
             optimized_weights = child.tags.get("optimized_weights")
             layer_sizes = child.tags.get("layer_sizes")
-            initial_cmaes_state = child.tags.get("initial_cmaes_state")
-            optimized_cmaes_state = child.tags.get("optimized_cmaes_state")
+
+            # Load CMA-ES states from cache files (avoid pipe serialization)
+            initial_cmaes_cache_path = child.tags.get("initial_cmaes_cache_path")
+            initial_cmaes_layer_sizes = child.tags.get("initial_cmaes_layer_sizes")
+            optimized_cmaes_cache_path = child.tags.get("optimized_cmaes_cache_path")
+            optimized_cmaes_layer_sizes = child.tags.get("optimized_cmaes_layer_sizes")
+
+            initial_cmaes_state = None
+            optimized_cmaes_state = None
+
+            if initial_cmaes_cache_path is not None and initial_cmaes_layer_sizes is not None:
+                cache_path = Path(initial_cmaes_cache_path)
+                if cache_path.exists():
+                    initial_cmaes_state = load_cmaes_state_from_disk(cache_path, initial_cmaes_layer_sizes)
+
+            if optimized_cmaes_cache_path is not None and optimized_cmaes_layer_sizes is not None:
+                cache_path = Path(optimized_cmaes_cache_path)
+                if cache_path.exists():
+                    optimized_cmaes_state = load_cmaes_state_from_disk(cache_path, optimized_cmaes_layer_sizes)
 
             # Store in weight managers if available
             if initial_weights is not None and layer_sizes is not None:
@@ -625,6 +686,10 @@ class MuLambdaStrategy:
         current_population : list[Individual]
             The current population to retain states for.
         """
+        import shutil
+        import tempfile
+        from pathlib import Path
+
         # Get IDs of individuals to keep (current population)
         keep_ids = {ind.id for ind in current_population if ind.id is not None}
 
@@ -640,6 +705,23 @@ class MuLambdaStrategy:
             for old_id in old_ids:
                 manager._states.pop(old_id, None)
                 manager._layer_sizes.pop(old_id, None)
+
+        # AGGRESSIVE CLEANUP: Remove ALL temp cache files after every generation
+        # This is critical because cache files accumulate faster than cleanup can track them
+        # (e.g., 30 offspring × 2 states = 60 files per generation)
+        if self.cache_dir.exists():
+            try:
+                # Get count before cleanup for logging
+                files_before = len(list(self.cache_dir.glob("**/*")))
+                if files_before > 0:
+                    # Remove entire cache directory and recreate
+                    shutil.rmtree(self.cache_dir)
+                    self.cache_dir.mkdir(parents=True, exist_ok=True)
+                    if self.verbose:
+                        print(f"Cleaned {files_before} temp cache files", flush=True)
+            except Exception as e:
+                if self.verbose:
+                    print(f"Warning: Failed to clean temp cache: {e}", flush=True)
 
         # Clean up evaluated individuals list (keep only current population)
         # This prevents unbounded growth of the tracking list
@@ -784,6 +866,18 @@ class MuLambdaStrategy:
                     self._last_selected_population,
                     generation
                 )
+
+            # Log memory usage every 5 generations
+            if generation % 5 == 0:
+                try:
+                    import psutil
+                    process = psutil.Process()
+                    mem_info = process.memory_info()
+                    mem_mb = mem_info.rss / (1024 * 1024)
+                    if self.verbose:
+                        print(f"\nG:{generation} Memory: {mem_mb:.1f} MB RSS", flush=True)
+                except ImportError:
+                    pass  # psutil not available
 
             # Update progress bar with stats
             if self.verbose:

@@ -618,15 +618,15 @@ def save_cmaes_state_to_disk(
         with open(directory / "cmaes_state.pkl", 'wb') as f:
             pickle.dump(state.nevergrad_state, f)
 
-    # Save covariance matrix
-    np.save(directory / "cmaes_covariance.npy", state.covariance_matrix)
+    # Save covariance matrix (compressed to save disk space)
+    np.savez_compressed(directory / "cmaes_covariance.npz", covariance=state.covariance_matrix)
 
     # Save sigma as text (human-readable)
     with open(directory / "cmaes_sigma.txt", 'w') as f:
         f.write(f"{state.sigma}\n")
 
-    # Save mean vector
-    np.save(directory / "cmaes_mean.npy", state.mean)
+    # Save mean vector (compressed to save disk space)
+    np.savez_compressed(directory / "cmaes_mean.npz", mean=state.mean)
 
 
 def load_cmaes_state_from_disk(
@@ -645,12 +645,18 @@ def load_cmaes_state_from_disk(
     directory = Path(directory)
 
     # Check if covariance file exists (minimum requirement)
-    cov_file = directory / "cmaes_covariance.npy"
-    if not cov_file.exists():
-        return None
+    # Support both compressed (.npz) and uncompressed (.npy) formats
+    cov_file_compressed = directory / "cmaes_covariance.npz"
+    cov_file_uncompressed = directory / "cmaes_covariance.npy"
 
-    # Load covariance matrix
-    covariance = np.load(cov_file)
+    if cov_file_compressed.exists():
+        # Load compressed format
+        covariance = np.load(cov_file_compressed)['covariance']
+    elif cov_file_uncompressed.exists():
+        # Load uncompressed format (backward compatibility)
+        covariance = np.load(cov_file_uncompressed)
+    else:
+        return None
 
     # Load sigma
     sigma_file = directory / "cmaes_sigma.txt"
@@ -660,10 +666,14 @@ def load_cmaes_state_from_disk(
     else:
         sigma = 1.0  # Default if not found
 
-    # Load mean
-    mean_file = directory / "cmaes_mean.npy"
-    if mean_file.exists():
-        mean = np.load(mean_file)
+    # Load mean (support both compressed and uncompressed formats)
+    mean_file_compressed = directory / "cmaes_mean.npz"
+    mean_file_uncompressed = directory / "cmaes_mean.npy"
+
+    if mean_file_compressed.exists():
+        mean = np.load(mean_file_compressed)['mean']
+    elif mean_file_uncompressed.exists():
+        mean = np.load(mean_file_uncompressed)
     else:
         mean = np.zeros(covariance.shape[0])
 
@@ -673,6 +683,18 @@ def load_cmaes_state_from_disk(
     if state_file.exists():
         with open(state_file, 'rb') as f:
             nevergrad_state = pickle.load(f)
+
+    # Validate that layer_sizes matches the actual covariance matrix dimension
+    expected_dim = _calculate_total_weights(layer_sizes)
+    actual_dim = covariance.shape[0]
+
+    if expected_dim != actual_dim:
+        raise ValueError(
+            f"Dimension mismatch when loading CMA-ES state from {directory}: "
+            f"layer_sizes {layer_sizes} implies {expected_dim} weights, "
+            f"but covariance matrix has dimension {actual_dim}. "
+            f"The cached state may be corrupted or from a different architecture."
+        )
 
     # Create state object
     state = CMAESState(

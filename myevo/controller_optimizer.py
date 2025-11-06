@@ -8,6 +8,7 @@ algorithm. This is used as an inner loop within morphological evolution.
 from __future__ import annotations
 
 from typing import Any
+import gc
 
 import mujoco as mj
 import nevergrad as ng
@@ -263,6 +264,11 @@ def optimize_controller_cmaes(
             best_fitness = fitness
             best_weights = candidate.copy()
 
+        # Periodic garbage collection to prevent memory accumulation
+        # More frequent GC for higher budgets to prevent buildup
+        if cmaes_budget >= 500 and i % 100 == 0:
+            gc.collect()
+
     # Extract final CMA-ES state directly from optimizer
     try:
         from ariel.ec.strategies.cmaes_inheritance import extract_cmaes_state_from_nevergrad
@@ -292,6 +298,10 @@ def optimize_controller_cmaes(
         "optimized_cmaes_state": cmaes_state,  # State after optimization
         "cmaes_state": cmaes_state,  # For backward compatibility (deprecated)
     }
+
+    # Final cleanup after CMA-ES optimization completes
+    # This helps prevent memory accumulation across multiple individuals
+    gc.collect()
 
     return best_weights, best_fitness, fitness_history, nevergrad_state, metrics
 

@@ -22,6 +22,7 @@ dependencies = [
   "numpy-quaternion>=2023.0.3",
   "opencv-python>=4.11.0.86",
   "pillow>=11.3.0",
+  "psutil>=7.1.0",
   "pydantic>=2.11.9",
   "pydantic-settings>=2.10.1",
   "python-fcl>=0.7.0",

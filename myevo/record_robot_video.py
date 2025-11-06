@@ -30,6 +30,7 @@ from simulation_utils import (
     setup_tracker,
 )
 from macos_video_recorder import MacOSVideoRecorder
+from linux_video_recorder import LinuxVideoRecorder
 
 console = Console()
 
@@ -177,6 +178,15 @@ def record_robot_video(
             fps=video_fps,
         )
         codec_info = "mp4v (macOS-compatible)"
+    elif platform.lower() == "linux":
+        video_recorder = LinuxVideoRecorder(
+            file_name="robot_video",
+            output_folder=str(output_dir),
+            width=video_width,
+            height=video_height,
+            fps=video_fps,
+        )
+        codec_info = "XVID/MJPEG (Linux-compatible)"
     else:  # windows or other
         video_recorder = VideoRecorder(
             file_name="robot_video",
@@ -197,6 +207,8 @@ def record_robot_video(
     # Find the core body ID for tracking
     try:
         core_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, geom_to_track)
+        if verbose:
+            console.print(f"[green]Found tracking body: {geom_to_track} (ID: {core_body_id})[/green]")
     except ValueError:
         # Try to find any body with "core" in the name
         core_body_id = None
@@ -204,11 +216,31 @@ def record_robot_video(
             body_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, i)
             if body_name and "core" in body_name:
                 core_body_id = i
+                if verbose:
+                    console.print(f"[yellow]Using fallback tracking body: {body_name} (ID: {core_body_id})[/yellow]")
                 break
+
+        if core_body_id is None and verbose:
+            console.print(f"[red]Warning: No tracking body found! Camera will be static.[/red]")
 
     # Enable joint visualization
     scene_option = mj.MjvOption()
     scene_option.flags[mj.mjtVisFlag.mjVIS_JOINT] = True
+
+    # Setup camera for tracking - create once and reuse
+    camera = mj.MjvCamera()
+    if core_body_id is not None:
+        camera.type = mj.mjtCamera.mjCAMERA_TRACKING
+        camera.trackbodyid = core_body_id
+        camera.distance = tracking_distance
+        camera.azimuth = tracking_azimuth
+        camera.elevation = tracking_elevation
+    else:
+        # Use free camera if no tracking body found
+        camera.type = mj.mjtCamera.mjCAMERA_FREE
+        camera.distance = tracking_distance
+        camera.azimuth = tracking_azimuth
+        camera.elevation = tracking_elevation
 
     # Calculate steps per frame
     options = mj.MjOption()
@@ -227,17 +259,8 @@ def record_robot_video(
             # Step simulation
             mj.mj_step(model, data, nstep=math.floor(steps_per_frame))
 
-            # Update camera tracking if core body found
-            if core_body_id is not None:
-                camera = mj.MjvCamera()
-                camera.type = mj.mjtCamera.mjCAMERA_TRACKING
-                camera.trackbodyid = core_body_id
-                camera.distance = tracking_distance
-                camera.azimuth = tracking_azimuth
-                camera.elevation = tracking_elevation
-                renderer.update_scene(data, scene_option=scene_option, camera=camera)
-            else:
-                renderer.update_scene(data, scene_option=scene_option)
+            # Update scene with tracking camera
+            renderer.update_scene(data, scene_option=scene_option, camera=camera)
 
             # Save frame
             video_recorder.write(frame=renderer.render())
@@ -259,17 +282,8 @@ def record_robot_video(
             # Step simulation
             mj.mj_step(model, data, nstep=math.floor(steps_per_frame))
 
-            # Update camera tracking if core body found
-            if core_body_id is not None:
-                camera = mj.MjvCamera()
-                camera.type = mj.mjtCamera.mjCAMERA_TRACKING
-                camera.trackbodyid = core_body_id
-                camera.distance = tracking_distance
-                camera.azimuth = tracking_azimuth
-                camera.elevation = tracking_elevation
-                renderer.update_scene(data, scene_option=scene_option, camera=camera)
-            else:
-                renderer.update_scene(data, scene_option=scene_option)
+            # Update scene with tracking camera
+            renderer.update_scene(data, scene_option=scene_option, camera=camera)
 
             # Save frame
             video_recorder.write(frame=renderer.render())

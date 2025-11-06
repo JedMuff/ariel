@@ -71,7 +71,7 @@ def main():
     parser.add_argument(
         "--duration",
         type=float,
-        default=15.0,
+        default=35.0,
         help="Simulation duration in seconds (default: 15.0)",
     )
     parser.add_argument(
@@ -166,16 +166,37 @@ def main():
     else:
         console.print(f"[yellow]No metadata.json found, will use default or command-line parameters[/yellow]")
 
-    # Load brain (prefer optimized)
-    brain_file = individual_dir / "optimized_brain.npy"
-    if not brain_file.exists():
-        brain_file = individual_dir / "initial_brain.npy"
+    # Load brain (prefer optimized, support both .npz and .npy formats)
+    brain_weights = None
+    brain_file = None
 
-    if not brain_file.exists():
+    # Try optimized brain first
+    for ext in ['.npz', '.npy']:
+        candidate = individual_dir / f"optimized_brain{ext}"
+        if candidate.exists():
+            brain_file = candidate
+            if ext == '.npz':
+                brain_weights = np.load(brain_file)['weights']
+            else:
+                brain_weights = np.load(brain_file)
+            break
+
+    # Fall back to initial brain
+    if brain_weights is None:
+        for ext in ['.npz', '.npy']:
+            candidate = individual_dir / f"initial_brain{ext}"
+            if candidate.exists():
+                brain_file = candidate
+                if ext == '.npz':
+                    brain_weights = np.load(brain_file)['weights']
+                else:
+                    brain_weights = np.load(brain_file)
+                break
+
+    if brain_weights is None:
         console.print(f"[red]No brain weights found in:[/red] {individual_dir}")
         return
 
-    brain_weights = np.load(brain_file)
     console.print(f"[green]Loaded {brain_file.name}[/green] ({len(brain_weights)} parameters)")
 
     # Record video

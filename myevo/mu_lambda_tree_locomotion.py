@@ -30,6 +30,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"   # macOS Accelerate framework
 # Standard library
 import random
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -69,11 +70,14 @@ from simulation_utils import (
 )
 from visualization_utils import plot_fitness_history, visualize_best_morphology
 from record_robot_video import record_robot_video
+from memory_profiler import MemoryProfiler, profile_memory, check_temp_cache_status, cleanup_temp_cache
 
 # Global constants
 SCRIPT_NAME = __file__.split("/")[-1][:-3]
 DATA = None  # Will be set in main()
 SEED = 42
+PROFILER = None  # Global memory profiler
+CACHE_DIR = None  # Experiment-specific cache directory (set in main())
 
 # Global functions
 install(show_locals=False)
@@ -293,6 +297,7 @@ class TreeLocomotionEvolution:
         num_crossover = lambda_ - num_mutate
 
         # Initialize evolution strategy with weight inheritance
+        global CACHE_DIR
         self.strategy = MuLambdaStrategy(
             genotype=self.tree_genotype,
             population_size=mu,
@@ -311,6 +316,7 @@ class TreeLocomotionEvolution:
             sigma_inheritance_mode=sigma_inheritance_mode,
             post_evaluation_callback=self.recalculate_novelty_for_generation if use_novelty else None,
             save_database_per_generation=True,  # Enable per-generation database saving
+            cache_dir=CACHE_DIR,  # Experiment-specific cache directory
         )
 
         # Initialize novelty archive if enabled
@@ -537,7 +543,14 @@ class TreeLocomotionEvolution:
         float
             Fitness value (forward displacement in meters).
         """
+        global PROFILER, CACHE_DIR
         from ariel.ec import TreeGenotype
+        from pathlib import Path
+        import tempfile
+
+        # Profile memory at start of fitness evaluation (only for first individual per generation)
+        if PROFILER and individual.id is not None and individual.id % 30 == 0:
+            PROFILER.log_memory(f"fitness_start_ind_{individual.id}")
 
         # Extract tree from genotype
         genome = individual.genotype
@@ -578,13 +591,27 @@ class TreeLocomotionEvolution:
                 sigma_init=self.sigma_init,
             )
 
-            # Store weights and CMA-ES state in tags for inheritance (even though we didn't evaluate)
+            # Store weights in tags for inheritance (even though we didn't evaluate)
+            # Save CMA-ES state to disk cache to avoid pipe serialization
             if individual is not None:
                 individual.tags["initial_weights"] = random_weights
                 individual.tags["optimized_weights"] = random_weights  # Same as initial (no optimization)
                 individual.tags["layer_sizes"] = controller.layer_sizes
                 individual.tags["locomotion_fitness"] = 0.0  # Store fitness of 0.0
-                individual.tags["cmaes_state"] = default_cmaes_state
+
+                # Save default CMA-ES state to cache (same for both initial and optimized)
+                # Use global experiment-specific cache directory
+
+                # Save to temp cache
+                cache_path = CACHE_DIR / f"ind_{individual.id}_default_state"
+                save_cmaes_state_to_disk(default_cmaes_state, cache_path)
+
+                # Store paths (not the full object)
+                individual.tags["initial_cmaes_cache_path"] = str(cache_path)
+                individual.tags["initial_cmaes_layer_sizes"] = controller.layer_sizes
+                individual.tags["optimized_cmaes_cache_path"] = str(cache_path)
+                individual.tags["optimized_cmaes_layer_sizes"] = controller.layer_sizes
+
                 # Store default metrics
                 individual.tags["cmaes_sigma"] = default_cmaes_state.sigma
                 individual.tags["cmaes_condition_number"] = 1.0  # Identity covariance
@@ -596,8 +623,9 @@ class TreeLocomotionEvolution:
                 import csv
                 import json
                 save_path = Path(save_dir)
-                np.save(save_path / "initial_brain.npy", random_weights)
-                np.save(save_path / "optimized_brain.npy", random_weights)
+                # Use compressed format to save disk space
+                np.savez_compressed(save_path / "initial_brain.npz", weights=random_weights)
+                np.savez_compressed(save_path / "optimized_brain.npz", weights=random_weights)
 
                 # Save default CMA-ES state
                 save_cmaes_state_to_disk(default_cmaes_state, save_path)
@@ -641,7 +669,22 @@ class TreeLocomotionEvolution:
         if individual is not None:
             inherited_weights = individual.tags.get("inherited_weights")
             inherited_layer_sizes = individual.tags.get("inherited_layer_sizes")
-            inherited_cmaes_state = individual.tags.get("inherited_cmaes_state")
+
+            # Load inherited CMA-ES state from temporary cache file
+            # This avoids pickling large covariance matrices through multiprocessing pipes
+            inherited_cmaes_state = None
+            inherited_cmaes_cache_path = individual.tags.get("inherited_cmaes_cache_path")
+            inherited_layer_sizes_cmaes = individual.tags.get("inherited_layer_sizes_cmaes")
+
+            if inherited_cmaes_cache_path is not None and inherited_layer_sizes_cmaes is not None:
+                # Load parent's CMA-ES state from temporary cache file
+                from ariel.ec.strategies.cmaes_inheritance import load_cmaes_state_from_disk
+                cache_path = Path(inherited_cmaes_cache_path)
+                if cache_path.exists():
+                    inherited_cmaes_state = load_cmaes_state_from_disk(
+                        cache_path,
+                        inherited_layer_sizes_cmaes
+                    )
 
             if inherited_weights is not None and inherited_layer_sizes is not None:
                 # Strategy provided inherited weights - adapt to offspring morphology if needed
@@ -661,22 +704,24 @@ class TreeLocomotionEvolution:
 
             # Retrieve and adapt inherited CMA-ES state to offspring morphology
             if inherited_cmaes_state is not None:
-                # Check if morphology changed and adaptation is needed
-                if inherited_layer_sizes is not None and inherited_layer_sizes != controller.layer_sizes:
+                # CRITICAL: Use inherited_layer_sizes_cmaes (not inherited_layer_sizes) as parent architecture
+                # because the covariance matrix was loaded with inherited_layer_sizes_cmaes
+                # inherited_layer_sizes might be different and cause dimension mismatches!
+                if inherited_layer_sizes_cmaes is not None and inherited_layer_sizes_cmaes != controller.layer_sizes:
                     # Morphology changed - adapt CMA-ES state to new architecture
                     from ariel.ec.strategies.cmaes_inheritance import adapt_cmaes_state_to_morphology
                     initial_cmaes_state = adapt_cmaes_state_to_morphology(
                         parent_state=inherited_cmaes_state,
-                        parent_layer_sizes=inherited_layer_sizes,
+                        parent_layer_sizes=inherited_layer_sizes_cmaes,  # Use the layer sizes that match the loaded covariance!
                         offspring_layer_sizes=controller.layer_sizes,
                         sigma_init=self.sigma_init,
                         covariance_mode=self.covariance_inheritance_mode,
                         sigma_mode=self.sigma_inheritance_mode,
                         rng=self.rng,
                     )
-                elif inherited_layer_sizes is None:
+                elif inherited_layer_sizes_cmaes is None:
                     # Missing layer size info - skip CMA-ES state inheritance for safety
-                    console.print(f"[yellow]WARNING: Individual {individual.id if individual else 'unknown'} missing inherited_layer_sizes, skipping CMA-ES state inheritance[/yellow]")
+                    console.print(f"[yellow]WARNING: Individual {individual.id if individual else 'unknown'} missing inherited_layer_sizes_cmaes, skipping CMA-ES state inheritance[/yellow]")
                     initial_cmaes_state = None
                 else:
                     # Same morphology - use state directly
@@ -719,13 +764,30 @@ class TreeLocomotionEvolution:
                     sigma_init=self.sigma_init,
                 )
 
-            # Store weights and BOTH CMA-ES states in individual tags for strategy to extract
+            # Store weights in individual tags for strategy to extract
+            # IMPORTANT: Do NOT store full CMA-ES state objects in tags - they're too large for multiprocessing pipes!
+            # Instead, save them to disk and store file paths in tags
             if individual is not None:
                 individual.tags["initial_weights"] = initial_weights
                 individual.tags["optimized_weights"] = optimized_weights
                 individual.tags["layer_sizes"] = controller.layer_sizes
-                individual.tags["initial_cmaes_state"] = initial_cmaes_state
-                individual.tags["optimized_cmaes_state"] = optimized_cmaes_state
+
+                # Save CMA-ES states to disk cache for strategy to load later
+                # This avoids serializing large covariance matrices through multiprocessing pipes
+                # Use temp cache for states (cleaned up by strategy after extraction)
+
+                # Save initial state
+                initial_cache_path = CACHE_DIR / f"ind_{individual.id}_initial_state"
+                save_cmaes_state_to_disk(initial_cmaes_state, initial_cache_path)
+                individual.tags["initial_cmaes_cache_path"] = str(initial_cache_path)
+                individual.tags["initial_cmaes_layer_sizes"] = controller.layer_sizes
+
+                # Save optimized state
+                optimized_cache_path = CACHE_DIR / f"ind_{individual.id}_optimized_state"
+                save_cmaes_state_to_disk(optimized_cmaes_state, optimized_cache_path)
+                individual.tags["optimized_cmaes_cache_path"] = str(optimized_cache_path)
+                individual.tags["optimized_cmaes_layer_sizes"] = controller.layer_sizes
+
                 # Store metrics for database (use optimized state for reporting)
                 individual.tags["cmaes_sigma"] = optimized_cmaes_state.sigma
                 individual.tags["cmaes_condition_number"] = optimized_cmaes_state.condition_number
@@ -737,8 +799,9 @@ class TreeLocomotionEvolution:
                 import csv
                 import json
                 save_path = Path(save_dir)
-                np.save(save_path / "initial_brain.npy", initial_weights)
-                np.save(save_path / "optimized_brain.npy", optimized_weights)
+                # Use compressed format to save disk space
+                np.savez_compressed(save_path / "initial_brain.npz", weights=initial_weights)
+                np.savez_compressed(save_path / "optimized_brain.npz", weights=optimized_weights)
 
                 # Save both initial and optimized CMA-ES states to disk
                 # Save initial state with prefix
@@ -833,14 +896,25 @@ class TreeLocomotionEvolution:
                 individual.tags["optimized_weights"] = initial_weights  # Same as initial
                 individual.tags["layer_sizes"] = controller.layer_sizes
 
-                # Create and store default CMA-ES states for consistency
+                # Create and save default CMA-ES states to cache for consistency
                 from ariel.ec.strategies.cmaes_inheritance import create_default_cmaes_state
                 default_cmaes_state = create_default_cmaes_state(
                     controller.layer_sizes,
                     sigma_init=self.sigma_init,
                 )
-                individual.tags["initial_cmaes_state"] = default_cmaes_state
-                individual.tags["optimized_cmaes_state"] = default_cmaes_state  # Same as initial (no optimization)
+
+                # Save to disk cache to avoid pipe serialization
+
+                # Save default state (same for both initial and optimized)
+                cache_path = CACHE_DIR / f"ind_{individual.id}_default_state"
+                save_cmaes_state_to_disk(default_cmaes_state, cache_path)
+
+                # Store paths (not the full object)
+                individual.tags["initial_cmaes_cache_path"] = str(cache_path)
+                individual.tags["initial_cmaes_layer_sizes"] = controller.layer_sizes
+                individual.tags["optimized_cmaes_cache_path"] = str(cache_path)
+                individual.tags["optimized_cmaes_layer_sizes"] = controller.layer_sizes
+
                 # Store metrics for database
                 individual.tags["cmaes_sigma"] = default_cmaes_state.sigma
                 individual.tags["cmaes_condition_number"] = 1.0  # Identity covariance
@@ -853,8 +927,9 @@ class TreeLocomotionEvolution:
                 import csv
                 import json
                 save_path = Path(save_dir)
-                np.save(save_path / "initial_brain.npy", initial_weights)
-                np.save(save_path / "optimized_brain.npy", initial_weights)
+                # Use compressed format to save disk space
+                np.savez_compressed(save_path / "initial_brain.npz", weights=initial_weights)
+                np.savez_compressed(save_path / "optimized_brain.npz", weights=initial_weights)
 
                 # Save metadata about neural network architecture
                 metadata = {
@@ -894,6 +969,13 @@ class TreeLocomotionEvolution:
             }
             with open(save_path / "fitness_components.json", 'w') as f:
                 json.dump(fitness_components, f, indent=2)
+
+        # Profile memory at end of fitness evaluation (only for first individual per generation)
+        if PROFILER and individual.id is not None and individual.id % 30 == 0:
+            PROFILER.log_memory(f"fitness_end_ind_{individual.id}")
+            # Force GC occasionally to prevent accumulation
+            import gc
+            gc.collect()
 
         # Return locomotion fitness only (novelty will be applied per-generation)
         return float(base_fitness)
@@ -943,6 +1025,8 @@ class TreeLocomotionEvolution:
         list[Individual]
             All individuals from all generations.
         """
+        global PROFILER
+
         if self.verbose:
             console.print(
                 f"\n[bold cyan]Starting Evolution[/bold cyan]\n"
@@ -950,8 +1034,16 @@ class TreeLocomotionEvolution:
                 f"Fitness: {'Locomotion' + (' * Novelty' if self.use_novelty else '')}\n"
             )
 
+        # Profile initial state
+        if PROFILER:
+            PROFILER.log_memory("evolution_start")
+            PROFILER.take_snapshot("evolution_start")
+
         # Initialize diverse population (returns list of genomes, not Individuals)
         initial_genomes = self.initialize_diverse_population()
+
+        if PROFILER:
+            PROFILER.log_memory("after_population_init")
 
         # Run evolution using MuLambdaStrategy.evolve()
         # This handles ID assignment, weight inheritance, and evaluation automatically
@@ -964,6 +1056,11 @@ class TreeLocomotionEvolution:
             num_workers=self.num_workers,
             reevaluate_parents=False,
         )
+
+        # Profile final state
+        if PROFILER:
+            PROFILER.log_memory("evolution_end")
+            PROFILER.take_snapshot("evolution_end")
 
         # Note: Database is already saved per-generation by the strategy
         # (see save_database_per_generation=True in __init__)
@@ -1104,6 +1201,7 @@ def main() -> None:
     global DATA
     global SEED
     global RNG
+    global PROFILER
     SEED = args.seed
 
     # Re-seed random number generators with command-line seed
@@ -1118,6 +1216,27 @@ def main() -> None:
         dir_name = f"{SCRIPT_NAME}_{timestamp}"
     DATA = CWD / "__data__" / dir_name
     DATA.mkdir(exist_ok=True, parents=True)
+
+    # Set experiment-specific cache directory to avoid conflicts between parallel runs
+    global CACHE_DIR
+    CACHE_DIR = Path(tempfile.gettempdir()) / f"ariel_cmaes_cache_{timestamp}_{os.getpid()}"
+    CACHE_DIR.mkdir(exist_ok=True, parents=True)
+
+    # Initialize memory profiler
+    PROFILER = MemoryProfiler(log_dir=DATA, enable_tracemalloc=True)
+    PROFILER.log_memory("main_start")
+
+    # Check and clean temp cache at start (ALWAYS clean to ensure fresh start)
+    cache_status = check_temp_cache_status(CACHE_DIR)
+    if cache_status['exists'] and cache_status['num_files'] > 0:
+        console.print(f"[yellow]Found {cache_status['num_files']} files in temp cache ({cache_status['total_mb']:.2f} MB)[/yellow]")
+        console.print("[yellow]Cleaning temp cache...[/yellow]")
+        files_removed = cleanup_temp_cache(CACHE_DIR)
+        console.print(f"[green]Removed {files_removed} cache files[/green]")
+    else:
+        console.print("[green]Temp cache is clean[/green]")
+
+    PROFILER.log_memory("after_cache_cleanup")
 
     # Create evolution system with all hyperparameters exposed
     evolution = TreeLocomotionEvolution(
@@ -1174,7 +1293,14 @@ def main() -> None:
     )
 
     # Run evolution
+    PROFILER.log_memory("before_evolution_run")
     all_individuals = evolution.run(num_generations=args.num_generations)
+    PROFILER.log_memory("after_evolution_run")
+
+    # Force garbage collection and check memory
+    import gc
+    gc_stats = PROFILER.force_gc()
+    console.print(f"[cyan]Garbage collected {gc_stats['collected']} objects, freed {gc_stats['freed_mb']:.2f} MB[/cyan]")
 
     # Plot fitness history
     evolution.plot_fitness_history_wrapper(all_individuals)
@@ -1182,9 +1308,25 @@ def main() -> None:
     # Visualize best morphology
     evolution.visualize_best_wrapper(all_individuals, mode="viewer", duration=15.0)
 
+    PROFILER.log_memory("main_end")
+
+    # Print memory profile summary
+    console.print("\n" + "=" * 80)
+    PROFILER.print_summary()
+
+    # Save snapshot report
+    PROFILER.save_snapshot_report()
+
+    # Check final temp cache status and clean up experiment-specific cache
+    final_cache = check_temp_cache_status(CACHE_DIR)
+    if final_cache['exists'] and final_cache['num_files'] > 0:
+        console.print(f"[yellow]Cleaning up experiment cache: {final_cache['num_files']} files ({final_cache['total_mb']:.2f} MB)[/yellow]")
+        cleanup_temp_cache(CACHE_DIR)
+
     console.print(
         f"\n[bold green]All results saved to:[/bold green] {DATA.absolute()}"
     )
+    console.print(f"[bold green]Memory profile saved to:[/bold green] {DATA.absolute() / 'memory_profile.csv'}")
 
 
 if __name__ == "__main__":
