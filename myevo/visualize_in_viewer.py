@@ -190,12 +190,21 @@ def main():
         # Load brain if available (unless we're learning a new one)
         brain_weights = None
         if not args.learn:
-            brain_file = individual_dir / "optimized_brain.npy"
+            # Try to load optimized brain (prefer .npz format, fallback to .npy)
+            brain_file = individual_dir / "optimized_brain.npz"
+            if not brain_file.exists():
+                brain_file = individual_dir / "optimized_brain.npy"
+            if not brain_file.exists():
+                brain_file = individual_dir / "initial_brain.npz"
             if not brain_file.exists():
                 brain_file = individual_dir / "initial_brain.npy"
 
             if brain_file.exists():
-                brain_weights = np.load(brain_file)
+                # Load weights based on file format
+                if brain_file.suffix == '.npz':
+                    brain_weights = np.load(brain_file)['weights']  # Extract 'weights' key from npz
+                else:
+                    brain_weights = np.load(brain_file)
                 console.print(f"[green]Loaded brain from {brain_file.name}[/green] ({len(brain_weights)} parameters)")
             else:
                 console.print(f"[yellow]No brain weights found, will use random weights[/yellow]")
