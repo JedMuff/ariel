@@ -24,13 +24,13 @@ from ariel.utils.video_recorder import VideoRecorder
 from ariel.simulation.controllers.controller import Controller
 
 # Local imports
-from simulation_utils import (
+from myevo.simulation.simulation_utils import (
     create_robot_model,
     create_controller,
     setup_tracker,
 )
-from macos_video_recorder import MacOSVideoRecorder
-from linux_video_recorder import LinuxVideoRecorder
+from myevo.visualization.macos_video_recorder import MacOSVideoRecorder
+from myevo.visualization.linux_video_recorder import LinuxVideoRecorder
 
 console = Console()
 
@@ -205,23 +205,34 @@ def record_robot_video(
         console.print(f"Tracking: {geom_to_track} (distance={tracking_distance}, azimuth={tracking_azimuth}, elevation={tracking_elevation})")
 
     # Find the core body ID for tracking
-    try:
-        core_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, geom_to_track)
-        if verbose:
-            console.print(f"[green]Found tracking body: {geom_to_track} (ID: {core_body_id})[/green]")
-    except ValueError:
-        # Try to find any body with "core" in the name
-        core_body_id = None
+    core_body_id = None
+
+    # First, try exact name match
+    for i in range(model.nbody):
+        body_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, i)
+        if body_name == geom_to_track:
+            core_body_id = i
+            if verbose:
+                console.print(f"[green]Found tracking body: {geom_to_track} (ID: {core_body_id})[/green]")
+            break
+
+    # If not found, try to find any body with "core" in the name
+    if core_body_id is None:
         for i in range(model.nbody):
             body_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, i)
-            if body_name and "core" in body_name:
+            if body_name and "core" in body_name.lower():
                 core_body_id = i
                 if verbose:
                     console.print(f"[yellow]Using fallback tracking body: {body_name} (ID: {core_body_id})[/yellow]")
                 break
 
-        if core_body_id is None and verbose:
-            console.print(f"[red]Warning: No tracking body found! Camera will be static.[/red]")
+    # If still not found, fail hard - we need a tracking body
+    if core_body_id is None:
+        raise ValueError(
+            f"No tracking body found! Tried exact match for '{geom_to_track}' "
+            f"and fallback search for 'core' in body names. "
+            f"Available bodies: {[mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, i) for i in range(model.nbody)]}"
+        )
 
     # Enable joint visualization
     scene_option = mj.MjvOption()

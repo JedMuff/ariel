@@ -21,7 +21,7 @@ from ariel.simulation.controllers.controller import Controller
 from ariel.utils.renderers import single_frame_renderer, video_renderer
 from ariel.utils.video_recorder import VideoRecorder
 
-from simulation_utils import create_controller, create_robot_model, setup_tracker
+from myevo.simulation.simulation_utils import create_controller, create_robot_model, setup_tracker
 
 console = Console()
 
@@ -137,7 +137,7 @@ def visualize_best_morphology(
     weight_manager : Any | None, optional
         DEPRECATED: No longer used. Weights are loaded from saved files instead.
     """
-    from ariel.ec import TreeGenotype
+    from myevo.core import TreeGenotype
 
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
@@ -200,7 +200,7 @@ def visualize_best_morphology(
             console.print("[cyan]Optimizing controller with CMA-ES for visualization...[/cyan]")
             from controller_optimizer import optimize_controller_cmaes
 
-            weights, _, _ = optimize_controller_cmaes(
+            weights, _, _, _, _ = optimize_controller_cmaes(
                 model=model,
                 world_spec=world_spec,
                 hidden_layers=controller_params["hidden_layers"],
@@ -332,7 +332,7 @@ def save_best_individuals(
     top_n : int, optional
         Number of top individuals to save, by default 10.
     """
-    from ariel.ec import TreeGenotype
+    from myevo.core import TreeGenotype
 
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)

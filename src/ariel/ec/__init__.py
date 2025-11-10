@@ -2,15 +2,12 @@
 
 from . import evaluation, selection, strategies
 from .a001 import Individual
-from .genotypes import Genotype, NeuralDevelopmentalEncoding, TreeGenotype
-from .strategies import MuLambdaStrategy
+from .genotypes import Genotype, NeuralDevelopmentalEncoding
 
 __all__ = [
     "Individual",
     "Genotype",
-    "TreeGenotype",
     "NeuralDevelopmentalEncoding",
-    "MuLambdaStrategy",
     "evaluation",
     "selection",
     "strategies",

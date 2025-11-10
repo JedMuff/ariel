@@ -22,12 +22,12 @@ ariel_config.ALLOWED_ROTATIONS = ALLOWED_ROTATIONS
 import matplotlib.pyplot as plt
 import numpy as np
 import mujoco as mj
-from ariel.ec import TreeGenotype
+from myevo.core import TreeGenotype
 from ariel.body_phenotypes.robogen_lite.constructor import construct_mjspec_from_graph
 from ariel.body_phenotypes.robogen_lite.decoders import draw_graph
 from ariel.simulation.environments import SimpleFlatWorld
 from ariel.utils.renderers import single_frame_renderer
-from novelty import PoissonArchive, euclidean_distance
+from myevo.measures.novelty import PoissonArchive, euclidean_distance
 
 
 def select_diverse_individuals(all_individuals, measures_dict, n_individuals=12,
@@ -50,7 +50,7 @@ def select_diverse_individuals(all_individuals, measures_dict, n_individuals=12,
     list
         Selected diverse individuals
     """
-    from ariel.ec import TreeGenotype
+    from myevo.core import TreeGenotype
     from morphological_measures import MorphologicalMeasures
 
     # Filter to only individuals with measures

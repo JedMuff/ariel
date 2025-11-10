@@ -7,7 +7,6 @@ adapted to work with ARIEL's Individual model and database persistence.
 from __future__ import annotations
 
 import gc
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -21,7 +20,8 @@ from ariel.ec.a001 import Individual
 from ariel.ec.evaluation import evaluate_population
 from ariel.ec.genotypes.base import Genotype
 from ariel.ec.selection import select_parents
-from ariel.ec.strategies.weight_inheritance import ParentWeightManager
+from myevo.core.services import CacheManager, DatabasePersistence
+from myevo.core.weight_inheritance import ParentWeightManager
 
 
 class MuLambdaStrategy:
@@ -176,11 +176,8 @@ class MuLambdaStrategy:
         # Database saving per generation
         self.save_database_per_generation = save_database_per_generation
 
-        # Cache directory for CMA-ES states (experiment-specific to avoid conflicts)
-        if cache_dir is None:
-            self.cache_dir = Path(tempfile.gettempdir()) / "ariel_cmaes_cache"
-        else:
-            self.cache_dir = Path(cache_dir)
+        # Cache manager for CMA-ES states (experiment-specific to avoid conflicts)
+        self.cache_manager = CacheManager(cache_dir=cache_dir, verbose=verbose)
 
         # Weight managers for inheritance
         # Initial weights manager: stores pre-optimization weights (for non-Lamarckian mode)
@@ -194,20 +191,24 @@ class MuLambdaStrategy:
             sigma=weight_sigma,
         )
 
-        # CMA-ES state managers for inheritance (Lamarckian CMA-ES)
-        from ariel.ec.strategies.cmaes_inheritance import CMAESStateManager
-        # Initial CMA-ES states: stores pre-optimization CMA-ES states
-        self._initial_cmaes_manager = CMAESStateManager(
-            sigma_init=weight_sigma,
-            covariance_mode=covariance_inheritance_mode,
-            sigma_mode=sigma_inheritance_mode,
-        )
-        # Optimized CMA-ES states: stores post-optimization CMA-ES states
-        self._optimized_cmaes_manager = CMAESStateManager(
-            sigma_init=weight_sigma,
-            covariance_mode=covariance_inheritance_mode,
-            sigma_mode=sigma_inheritance_mode,
-        )
+        # CMA-ES state managers for inheritance (only if Lamarckian mode is enabled)
+        if lamarckian_mode:
+            from myevo.core.cmaes_inheritance import CMAESStateManager
+            # Initial CMA-ES states: stores pre-optimization CMA-ES states
+            self._initial_cmaes_manager = CMAESStateManager(
+                sigma_init=weight_sigma,
+                covariance_mode=covariance_inheritance_mode,
+                sigma_mode=sigma_inheritance_mode,
+            )
+            # Optimized CMA-ES states: stores post-optimization CMA-ES states
+            self._optimized_cmaes_manager = CMAESStateManager(
+                sigma_init=weight_sigma,
+                covariance_mode=covariance_inheritance_mode,
+                sigma_mode=sigma_inheritance_mode,
+            )
+        else:
+            self._initial_cmaes_manager = None
+            self._optimized_cmaes_manager = None
 
         # Evolution state
         self.current_generation = 0
@@ -285,16 +286,59 @@ class MuLambdaStrategy:
             Number of parallel workers for evaluation, by default 1.
         reevaluate_parents : bool, optional
             Whether to reevaluate parents each generation (only for 'plus'), by default False.
-            Set to True if you want all μ+λ individuals to have log folders created in each
-            generation. When False, only offspring get new folders (parents retain folders
-            from when they were originally evaluated).
 
         Returns
         -------
         list[Individual]
             The next generation population (μ individuals).
         """
-        # Select parents for crossover and mutation
+        # Generate offspring
+        offspring = self._generate_offspring(population, generation)
+
+        # Assign IDs to offspring
+        self._assign_offspring_ids(offspring, population)
+
+        # Setup weight inheritance
+        self._populate_inherited_weights(offspring, population)
+
+        # Evaluate offspring
+        offspring = self._evaluate_offspring(
+            offspring, fitness_function, generation, log_dir_base, num_workers
+        )
+
+        # Optionally reevaluate parents
+        if reevaluate_parents and self.strategy_type == "plus":
+            population = evaluate_population(
+                population, fitness_function, generation, log_dir_base, num_workers
+            )
+
+        # Select survivors
+        next_population = self._select_survivors(population, offspring)
+
+        # Cleanup
+        self._cleanup_old_states(next_population)
+        gc.collect()
+
+        return next_population
+
+    def _generate_offspring(
+        self, population: list[Individual], generation: int
+    ) -> list[Individual]:
+        """Generate offspring via crossover and mutation.
+
+        Parameters
+        ----------
+        population : list[Individual]
+            Current population.
+        generation : int
+            Current generation number.
+
+        Returns
+        -------
+        list[Individual]
+            Generated offspring.
+        """
+        # Select parents
         num_parents_needed = self.num_crossover * 2 + self.num_mutate
         parents = select_parents(
             population,
@@ -303,27 +347,46 @@ class MuLambdaStrategy:
             maximize=self.maximize,
         )
 
-        # Split parents into groups
         crossover_parents = parents[: self.num_crossover * 2]
         mutation_parents = parents[self.num_crossover * 2 :]
 
-        # Generate offspring via crossover
-        offspring = []
-        for i in range(0, len(crossover_parents), 2):
-            parent1 = crossover_parents[i]
-            parent2 = crossover_parents[i + 1]
+        # Generate via crossover
+        offspring = self._create_crossover_offspring(crossover_parents, generation)
 
-            # Perform crossover
-            child_genome1, child_genome2 = self.genotype.crossover(
-                parent1.genotype,
-                parent2.genotype,
+        # Generate via mutation
+        offspring.extend(self._create_mutation_offspring(mutation_parents, generation))
+
+        return offspring
+
+    def _create_crossover_offspring(
+        self, parents: list[Individual], generation: int
+    ) -> list[Individual]:
+        """Create offspring via crossover.
+
+        Parameters
+        ----------
+        parents : list[Individual]
+            Parent individuals (pairs).
+        generation : int
+            Current generation number.
+
+        Returns
+        -------
+        list[Individual]
+            Crossover offspring.
+        """
+        offspring = []
+        for i in range(0, len(parents), 2):
+            parent1 = parents[i]
+            parent2 = parents[i + 1]
+
+            child_genome1, _ = self.genotype.crossover(
+                parent1.genotype, parent2.genotype
             )
 
-            # Optionally mutate after crossover
             if self.mutate_after_crossover:
                 child_genome1 = self.genotype.mutate(child_genome1)
 
-            # Create Individual for first child
             child = Individual()
             child.genotype = child_genome1
             child.time_of_birth = generation
@@ -334,12 +397,29 @@ class MuLambdaStrategy:
             }
             offspring.append(child)
 
-        # Generate offspring via mutation
-        for parent in mutation_parents:
-            # Perform mutation
+        return offspring
+
+    def _create_mutation_offspring(
+        self, parents: list[Individual], generation: int
+    ) -> list[Individual]:
+        """Create offspring via mutation.
+
+        Parameters
+        ----------
+        parents : list[Individual]
+            Parent individuals.
+        generation : int
+            Current generation number.
+
+        Returns
+        -------
+        list[Individual]
+            Mutation offspring.
+        """
+        offspring = []
+        for parent in parents:
             child_genome = self.genotype.mutate(parent.genotype)
 
-            # Create Individual
             child = Individual()
             child.genotype = child_genome
             child.time_of_birth = generation
@@ -349,8 +429,20 @@ class MuLambdaStrategy:
             }
             offspring.append(child)
 
-        # Assign IDs to offspring before evaluation (needed for log_dir paths)
-        # Find the maximum ID in the current population
+        return offspring
+
+    def _assign_offspring_ids(
+        self, offspring: list[Individual], population: list[Individual]
+    ) -> None:
+        """Assign unique IDs to offspring.
+
+        Parameters
+        ----------
+        offspring : list[Individual]
+            Offspring to assign IDs to.
+        population : list[Individual]
+            Current population (to find max ID).
+        """
         max_id = max([ind.id for ind in population if ind.id is not None], default=0)
         next_id = max_id + 1
         for child in offspring:
@@ -358,78 +450,86 @@ class MuLambdaStrategy:
                 child.id = next_id
                 next_id += 1
 
-        # Populate inherited weights for offspring before evaluation
-        # This enables weight inheritance from parents
-        self._populate_inherited_weights(offspring, population)
+    def _evaluate_offspring(
+        self,
+        offspring: list[Individual],
+        fitness_function: Callable,
+        generation: int,
+        log_dir_base: str | None,
+        num_workers: int,
+    ) -> list[Individual]:
+        """Evaluate offspring and handle post-processing.
 
-        # Evaluate offspring
+        Parameters
+        ----------
+        offspring : list[Individual]
+            Offspring to evaluate.
+        fitness_function : Callable
+            Fitness evaluation function.
+        generation : int
+            Current generation.
+        log_dir_base : str | None
+            Base logging directory.
+        num_workers : int
+            Number of parallel workers.
+
+        Returns
+        -------
+        list[Individual]
+            Evaluated offspring.
+        """
+        # Evaluate
         offspring = evaluate_population(
-            offspring,
-            fitness_function,
-            generation,
-            log_dir_base,
-            num_workers,
+            offspring, fitness_function, generation, log_dir_base, num_workers
         )
 
-        # Call post-evaluation callback if provided (e.g., for novelty recalculation)
+        # Post-evaluation callback (e.g., novelty)
         if self.post_evaluation_callback is not None:
             self.post_evaluation_callback(offspring)
 
-        # Extract and store weights from evaluated offspring
-        # This captures both initial and optimized weights for future inheritance
+        # Extract and store weights
         self._extract_and_store_weights(offspring)
 
-        # Clean up temp cache files after extraction is complete
-        # At this point, all offspring have been evaluated and their states extracted
-        # The temporary cache files from parent inheritance are no longer needed
-        import shutil
-        if self.cache_dir.exists():
-            try:
-                files_before = len(list(self.cache_dir.glob("**/*")))
-                if files_before > 0:
-                    shutil.rmtree(self.cache_dir)
-                    self.cache_dir.mkdir(parents=True, exist_ok=True)
-                    if self.verbose:
-                        print(f"  Cleaned {files_before} temp cache files after offspring evaluation", flush=True)
-            except Exception:
-                pass  # Silently ignore cleanup errors during evaluation
+        # Clean up cache
+        num_files = self.cache_manager.cleanup()
+        if num_files > 0 and self.verbose:
+            print(f"  Cleaned {num_files} temp cache files after offspring evaluation", flush=True)
 
-        # Handle reevaluation of parents (only for plus strategy)
-        if reevaluate_parents and self.strategy_type == "plus":
-            population = evaluate_population(
-                population,
-                fitness_function,
-                generation,
-                log_dir_base,
-                num_workers,
-            )
+        return offspring
 
-        # Survivor selection
+    def _select_survivors(
+        self, population: list[Individual], offspring: list[Individual]
+    ) -> list[Individual]:
+        """Select survivors for next generation.
+
+        Parameters
+        ----------
+        population : list[Individual]
+            Current population (parents).
+        offspring : list[Individual]
+            Generated offspring.
+
+        Returns
+        -------
+        list[Individual]
+            Next generation population.
+        """
+        # Combine based on strategy type
         if self.strategy_type == "plus":
-            # (μ+λ): Select best μ from μ parents + λ offspring
             combined = population + offspring
         else:
-            # (μ,λ): Select best μ from λ offspring only
             combined = offspring
 
-        # Sort by fitness and select top μ
+        # Sort and select top μ
         combined.sort(
             key=lambda ind: ind.fitness or (float('-inf') if self.maximize else float('inf')),
             reverse=self.maximize,
         )
         next_population = combined[: self.population_size]
 
-        # Store combined population for database saving (includes both selected and non-selected)
+        # Store for database saving
         self._last_combined_population = combined
         self._last_selected_population = next_population
-
-        # Clean up old states to prevent memory leaks
-        # Only keep states for the surviving population (μ individuals)
-        self._cleanup_old_states(next_population)
-
-        # Force garbage collection after each generation to prevent memory accumulation
-        # This is especially important with high CMA-ES budgets
-        gc.collect()
 
         return next_population
 
@@ -479,7 +579,7 @@ class MuLambdaStrategy:
                 if self.weight_crossover_mode == "closest_parent":
                     # Use tree distance to find closest parent
                     if parent1_data and parent2_data:
-                        from ariel.ec.strategies.weight_inheritance import tree_distance
+                        from myevo.core.weight_inheritance import tree_distance
                         offspring_tree = child.genotype.tree if isinstance(child.genotype, TreeGenotype) else child.genotype
                         # Find parent individuals
                         parent1_ind = next((ind for ind in population if ind.id == parent1_id), None)
@@ -534,17 +634,15 @@ class MuLambdaStrategy:
 
             # Save parent's CMA-ES state to a temporary cache file for multiprocessing
             # This avoids serializing large covariance matrices through pipes (which causes BrokenPipeError)
-            if chosen_parent_id is not None:
+            # Only when Lamarckian mode is enabled (cmaes_manager is not None)
+            if cmaes_manager is not None and chosen_parent_id is not None:
                 parent_cmaes_state = cmaes_manager.get_state(chosen_parent_id)
                 if parent_cmaes_state is not None:
                     # Save to temporary file that worker can load
-                    from ariel.ec.strategies.cmaes_inheritance import save_cmaes_state_to_disk
-
-                    # Create temp directory if it doesn't exist
-                    self.cache_dir.mkdir(exist_ok=True, parents=True)
+                    from myevo.core.cmaes_inheritance import save_cmaes_state_to_disk
 
                     # Save state with parent ID as filename
-                    cache_file = self.cache_dir / f"parent_{chosen_parent_id}_state"
+                    cache_file = self.cache_manager.get_path(f"parent_{chosen_parent_id}_state")
                     save_cmaes_state_to_disk(parent_cmaes_state, cache_file)
 
                     # Store file path in tags (much smaller than the full state object)
@@ -570,7 +668,7 @@ class MuLambdaStrategy:
             Evaluated offspring with weight and CMA-ES state information in tags.
         """
         from pathlib import Path
-        from ariel.ec.strategies.cmaes_inheritance import load_cmaes_state_from_disk
+        from myevo.core.cmaes_inheritance import load_cmaes_state_from_disk
 
         for child in offspring:
             # Extract weights and layer sizes from tags
@@ -578,24 +676,25 @@ class MuLambdaStrategy:
             optimized_weights = child.tags.get("optimized_weights")
             layer_sizes = child.tags.get("layer_sizes")
 
-            # Load CMA-ES states from cache files (avoid pipe serialization)
-            initial_cmaes_cache_path = child.tags.get("initial_cmaes_cache_path")
-            initial_cmaes_layer_sizes = child.tags.get("initial_cmaes_layer_sizes")
-            optimized_cmaes_cache_path = child.tags.get("optimized_cmaes_cache_path")
-            optimized_cmaes_layer_sizes = child.tags.get("optimized_cmaes_layer_sizes")
-
+            # Load CMA-ES states from cache files (only if Lamarckian mode is enabled)
             initial_cmaes_state = None
             optimized_cmaes_state = None
 
-            if initial_cmaes_cache_path is not None and initial_cmaes_layer_sizes is not None:
-                cache_path = Path(initial_cmaes_cache_path)
-                if cache_path.exists():
-                    initial_cmaes_state = load_cmaes_state_from_disk(cache_path, initial_cmaes_layer_sizes)
+            if self._initial_cmaes_manager is not None and self._optimized_cmaes_manager is not None:
+                initial_cmaes_cache_path = child.tags.get("initial_cmaes_cache_path")
+                initial_cmaes_layer_sizes = child.tags.get("initial_cmaes_layer_sizes")
+                optimized_cmaes_cache_path = child.tags.get("optimized_cmaes_cache_path")
+                optimized_cmaes_layer_sizes = child.tags.get("optimized_cmaes_layer_sizes")
 
-            if optimized_cmaes_cache_path is not None and optimized_cmaes_layer_sizes is not None:
-                cache_path = Path(optimized_cmaes_cache_path)
-                if cache_path.exists():
-                    optimized_cmaes_state = load_cmaes_state_from_disk(cache_path, optimized_cmaes_layer_sizes)
+                if initial_cmaes_cache_path is not None and initial_cmaes_layer_sizes is not None:
+                    cache_path = Path(initial_cmaes_cache_path)
+                    if cache_path.exists():
+                        initial_cmaes_state = load_cmaes_state_from_disk(cache_path, initial_cmaes_layer_sizes)
+
+                if optimized_cmaes_cache_path is not None and optimized_cmaes_layer_sizes is not None:
+                    cache_path = Path(optimized_cmaes_cache_path)
+                    if cache_path.exists():
+                        optimized_cmaes_state = load_cmaes_state_from_disk(cache_path, optimized_cmaes_layer_sizes)
 
             # Store in weight managers if available
             if initial_weights is not None and layer_sizes is not None:
@@ -612,68 +711,16 @@ class MuLambdaStrategy:
                     layer_sizes,
                 )
 
-            # Store CMA-ES states in respective managers (CRITICAL FIX)
-            # Initial manager gets initial state, optimized manager gets optimized state
-            if initial_cmaes_state is not None:
+            # Store CMA-ES states in respective managers (only if Lamarckian mode is enabled)
+            if self._initial_cmaes_manager is not None and initial_cmaes_state is not None:
                 self._initial_cmaes_manager.store_state(child.id, initial_cmaes_state)
 
-            if optimized_cmaes_state is not None:
+            if self._optimized_cmaes_manager is not None and optimized_cmaes_state is not None:
                 self._optimized_cmaes_manager.store_state(child.id, optimized_cmaes_state)
 
             # Add to evaluated individuals list
             self._initial_weight_manager.add_evaluated_individual(child)
             self._optimized_weight_manager.add_evaluated_individual(child)
-
-    def _validate_state_separation(self, individual: Individual, verbose: bool = False) -> bool:
-        """Validate that initial and optimized states are properly separated.
-
-        This is a debugging/validation helper to ensure the inheritance system
-        is working correctly. Checks that initial and optimized states differ
-        when CMA-ES optimization is used.
-
-        Parameters
-        ----------
-        individual : Individual
-            Individual to validate states for.
-        verbose : bool, optional
-            Whether to print validation messages, by default False.
-
-        Returns
-        -------
-        bool
-            True if validation passes, False otherwise.
-        """
-        # Get states from tags
-        initial_weights = individual.tags.get("initial_weights")
-        optimized_weights = individual.tags.get("optimized_weights")
-        initial_cmaes = individual.tags.get("initial_cmaes_state")
-        optimized_cmaes = individual.tags.get("optimized_cmaes_state")
-        num_evaluations = individual.tags.get("cmaes_num_evaluations", 0)
-
-        # If CMA-ES was used (num_evaluations > 0), states should differ
-        if num_evaluations > 0:
-            # Check weights
-            if initial_weights is not None and optimized_weights is not None:
-                weights_differ = not np.allclose(initial_weights, optimized_weights)
-                if verbose and not weights_differ:
-                    print(f"WARNING: Individual {individual.id} has identical initial/optimized weights despite CMA-ES optimization!")
-
-            # Check CMA-ES sigma
-            if initial_cmaes is not None and optimized_cmaes is not None:
-                sigma_differs = abs(initial_cmaes.sigma - optimized_cmaes.sigma) > 1e-6
-                if verbose and not sigma_differs:
-                    print(f"WARNING: Individual {individual.id} has identical initial/optimized sigma despite CMA-ES optimization!")
-
-                # Check covariance condition number (should change during optimization)
-                if initial_cmaes.condition_number is not None and optimized_cmaes.condition_number is not None:
-                    condition_differs = abs(initial_cmaes.condition_number - optimized_cmaes.condition_number) > 1e-3
-                    if verbose and not condition_differs:
-                        print(f"WARNING: Individual {individual.id} has identical covariance condition numbers!")
-
-                return True
-
-        # If CMA-ES was not used, states should be identical (both default)
-        return True
 
     def _cleanup_old_states(self, current_population: list[Individual]) -> None:
         """Clean up weights and CMA-ES states for individuals no longer in population.
@@ -686,10 +733,6 @@ class MuLambdaStrategy:
         current_population : list[Individual]
             The current population to retain states for.
         """
-        import shutil
-        import tempfile
-        from pathlib import Path
-
         # Get IDs of individuals to keep (current population)
         keep_ids = {ind.id for ind in current_population if ind.id is not None}
 
@@ -698,30 +741,14 @@ class MuLambdaStrategy:
         self._optimized_weight_manager.clear_old_weights(keep_ids)
 
         # Clean up CMA-ES state managers (keep only current population)
-        # Note: CMAESStateManager doesn't have clear_old_states, so we need to add it
-        # For now, we'll manually filter the internal dicts
         for manager in [self._initial_cmaes_manager, self._optimized_cmaes_manager]:
             old_ids = set(manager._states.keys()) - keep_ids
             for old_id in old_ids:
                 manager._states.pop(old_id, None)
                 manager._layer_sizes.pop(old_id, None)
 
-        # AGGRESSIVE CLEANUP: Remove ALL temp cache files after every generation
-        # This is critical because cache files accumulate faster than cleanup can track them
-        # (e.g., 30 offspring × 2 states = 60 files per generation)
-        if self.cache_dir.exists():
-            try:
-                # Get count before cleanup for logging
-                files_before = len(list(self.cache_dir.glob("**/*")))
-                if files_before > 0:
-                    # Remove entire cache directory and recreate
-                    shutil.rmtree(self.cache_dir)
-                    self.cache_dir.mkdir(parents=True, exist_ok=True)
-                    if self.verbose:
-                        print(f"Cleaned {files_before} temp cache files", flush=True)
-            except Exception as e:
-                if self.verbose:
-                    print(f"Warning: Failed to clean temp cache: {e}", flush=True)
+        # Clean up cache files using CacheManager
+        self.cache_manager.cleanup()
 
         # Clean up evaluated individuals list (keep only current population)
         # This prevents unbounded growth of the tracking list
@@ -867,18 +894,6 @@ class MuLambdaStrategy:
                     generation
                 )
 
-            # Log memory usage every 5 generations
-            if generation % 5 == 0:
-                try:
-                    import psutil
-                    process = psutil.Process()
-                    mem_info = process.memory_info()
-                    mem_mb = mem_info.rss / (1024 * 1024)
-                    if self.verbose:
-                        print(f"\nG:{generation} Memory: {mem_mb:.1f} MB RSS", flush=True)
-                except ImportError:
-                    pass  # psutil not available
-
             # Update progress bar with stats
             if self.verbose:
                 fitnesses = [ind.fitness or 0.0 for ind in population]
@@ -906,9 +921,7 @@ class MuLambdaStrategy:
     ) -> None:
         """Save database snapshot to CSV/JSON, appending current generation records.
 
-        This method appends all evaluated individuals to database.csv, including
-        both selected and non-selected individuals. For μ+λ strategies, this includes
-        both parents and offspring evaluated in the generation.
+        This method delegates to DatabasePersistence service for actual I/O operations.
 
         Parameters
         ----------
@@ -922,83 +935,12 @@ class MuLambdaStrategy:
         current_generation : int
             The current generation number.
         """
-        import csv
-        import json
-        from pathlib import Path
-
-        save_dir = Path(log_dir_base)
-        csv_path = save_dir / "database.csv"
-        json_path = save_dir / "database.json"
-
-        # Create set of selected individual IDs for quick lookup
-        selected_ids = {ind.id for ind in selected_individuals}
-
-        # Prepare records for all evaluated individuals in this generation
-        records = []
-        for ind in all_individuals:
-            # Get tree for counting parts/actuators
-            from ariel.ec import TreeGenotype
-            tree = ind.genotype.tree if isinstance(ind.genotype, TreeGenotype) else ind.genotype
-
-            # Get parent IDs from tags
-            parent1_id = ind.tags.get("parent1_id", None) if ind.tags else None
-            parent2_id = ind.tags.get("parent2_id", None) if ind.tags else None
-
-            # Get directory path from tags (set during evaluation)
-            directory = ind.tags.get("log_dir", "") if ind.tags else ""
-
-            # Count parts and actuators
-            num_parts = len(tree.nodes)
-            num_actuators = sum(1 for _, data in tree.nodes(data=True) if data.get("type") == "HINGE")
-
-            # Extract fitness components from tags if available
-            locomotion_fitness = ind.tags.get("locomotion_fitness") if ind.tags else None
-            novelty_score = ind.tags.get("novelty_score") if ind.tags else None
-
-            # Extract CMA-ES metrics from tags if available
-            cmaes_sigma = ind.tags.get("cmaes_sigma") if ind.tags else None
-            cmaes_condition_number = ind.tags.get("cmaes_condition_number") if ind.tags else None
-            cmaes_mean_fitness = ind.tags.get("cmaes_mean_fitness") if ind.tags else None
-            cmaes_num_evaluations = ind.tags.get("cmaes_num_evaluations") if ind.tags else None
-
-            record = {
-                "individual_id": ind.id,
-                "birth_generation": ind.time_of_birth,
-                "current_generation": current_generation,
-                "selected": ind.id in selected_ids,
-                "fitness": ind.fitness if ind.fitness is not None else None,
-                "locomotion_fitness": locomotion_fitness,
-                "novelty_score": novelty_score,
-                "parent1_id": parent1_id,
-                "parent2_id": parent2_id,
-                "directory": directory,
-                "num_parts": num_parts,
-                "num_actuators": num_actuators,
-                "cmaes_sigma": cmaes_sigma,
-                "cmaes_condition_number": cmaes_condition_number,
-                "cmaes_mean_fitness": cmaes_mean_fitness,
-                "cmaes_num_evaluations": cmaes_num_evaluations,
-            }
-            records.append(record)
-
-        # Append to CSV (create with header if doesn't exist)
-        if records:
-            file_exists = csv_path.exists()
-            with open(csv_path, 'a', newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=records[0].keys())
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerows(records)
-
-        # For JSON, read existing data, append, and save
-        # (JSON is less efficient for incremental updates but maintained for compatibility)
-        all_records = []
-        if json_path.exists():
-            with open(json_path, 'r') as f:
-                all_records = json.load(f)
-        all_records.extend(records)
-        with open(json_path, 'w') as f:
-            json.dump(all_records, f, indent=2)
+        DatabasePersistence.save_snapshot(
+            log_dir_base,
+            all_individuals,
+            selected_individuals,
+            current_generation,
+        )
 
     def get_best_individual(self, population: list[Individual]) -> Individual:
         """Get the best individual from a population.

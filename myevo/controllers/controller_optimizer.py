@@ -14,12 +14,13 @@ import mujoco as mj
 import nevergrad as ng
 import numpy as np
 
-from simulation_utils import (
-    calculate_displacement_fitness,
+from myevo.simulation.simulation_utils import (
     create_controller,
     create_robot_model,
     setup_tracker,
-    simulate_with_controller,
+)
+from myevo.measures.locomotion_fitness import (
+    calculate_displacement_fitness,
     simulate_with_settling_phase,
 )
 
@@ -219,15 +220,11 @@ def optimize_controller_cmaes(
         # inherit the learned covariance and sigma.
 
     # Capture initial CMA-ES state before optimization begins
-    try:
-        from ariel.ec.strategies.cmaes_inheritance import extract_cmaes_state_from_nevergrad
-        # Get layer sizes for the state
-        input_size = 2 * model.nu + 9
-        layer_sizes = [input_size] + hidden_layers + [model.nu]
-        initial_cmaes_state_captured = extract_cmaes_state_from_nevergrad(optimizer, layer_sizes)
-    except Exception as e:
-        print(f"Warning: Initial CMA-ES state capture failed: {e}")
-        initial_cmaes_state_captured = None
+    # If this fails, we want to know about it (indicates optimizer setup issue)
+    from myevo.core.cmaes_inheritance import extract_cmaes_state_from_nevergrad
+    input_size = 2 * model.nu + 9
+    layer_sizes = [input_size] + hidden_layers + [model.nu]
+    initial_cmaes_state_captured = extract_cmaes_state_from_nevergrad(optimizer, layer_sizes)
 
     # Run CMA-ES optimization
     best_fitness = float('-inf') if maximize else float('inf')
@@ -270,21 +267,16 @@ def optimize_controller_cmaes(
             gc.collect()
 
     # Extract final CMA-ES state directly from optimizer
-    try:
-        from ariel.ec.strategies.cmaes_inheritance import extract_cmaes_state_from_nevergrad
-        # Get layer sizes for the state
-        # Note: Input size is 2*num_actuators + 9 (actuator pos+vel + core body state)
-        input_size = 2 * model.nu + 9
-        layer_sizes = [input_size] + hidden_layers + [model.nu]
-        cmaes_state = extract_cmaes_state_from_nevergrad(optimizer, layer_sizes)
-        # Note: We don't use nevergrad's dump() because it requires a filepath
-        # and we're handling serialization ourselves via the CMAESState object
-        nevergrad_state = None
-    except Exception as e:
-        # If extraction fails, return None
-        print(f"Warning: CMA-ES state extraction failed: {e}")
-        nevergrad_state = None
-        cmaes_state = None
+    # If this fails, we want to know about it (indicates optimizer corruption)
+    from myevo.core.cmaes_inheritance import extract_cmaes_state_from_nevergrad
+    # Get layer sizes for the state
+    # Note: Input size is 2*num_actuators + 9 (actuator pos+vel + core body state)
+    input_size = 2 * model.nu + 9
+    layer_sizes = [input_size] + hidden_layers + [model.nu]
+    cmaes_state = extract_cmaes_state_from_nevergrad(optimizer, layer_sizes)
+    # Note: We don't use nevergrad's dump() because it requires a filepath
+    # and we're handling serialization ourselves via the CMAESState object
+    nevergrad_state = None
 
     # Calculate metrics
     metrics = {
@@ -304,112 +296,3 @@ def optimize_controller_cmaes(
     gc.collect()
 
     return best_weights, best_fitness, fitness_history, nevergrad_state, metrics
-
-
-def optimize_controller_random_search(
-    model: mj.MjModel,
-    world_spec: Any,
-    hidden_layers: list[int],
-    activation: str,
-    simulation_duration: float,
-    num_samples: int,
-    sigma_init: float = 1.0,
-    maximize: bool = True,
-    baseline_time: float = 1.0,
-    seed: int = 42,
-) -> tuple[np.ndarray, float]:
-    """Optimize controller weights using random search (baseline method).
-
-    This is a simpler alternative to CMA-ES that just samples random weights
-    and keeps the best. Useful as a baseline for comparison.
-
-    Parameters
-    ----------
-    model : mj.MjModel
-        The MuJoCo model to optimize for.
-    world_spec : Any
-        The world specification for tracking.
-    hidden_layers : list[int]
-        Neural network hidden layer sizes.
-    activation : str
-        Activation function name.
-    simulation_duration : float
-        Duration of each simulation in seconds.
-    num_samples : int
-        Number of random weight samples to try.
-    sigma_init : float, optional
-        Range for random initialization, by default 1.0.
-    maximize : bool, optional
-        Whether to maximize fitness, by default True.
-    baseline_time : float, optional
-        Time offset for displacement, by default 1.0.
-    seed : int, optional
-        Random seed, by default 42.
-
-    Returns
-    -------
-    tuple[np.ndarray, float]
-        - Best weights found
-        - Best fitness value achieved
-    """
-    rng = np.random.default_rng(seed)
-
-    # Create controller
-    controller = create_controller(
-        model=model,
-        hidden_layers=hidden_layers,
-        activation=activation,
-        seed=seed,
-    )
-    num_weights = controller.get_num_weights()
-
-    best_fitness = float('-inf') if maximize else float('inf')
-    best_weights = None
-
-    for _ in range(num_samples):
-        # Generate random weights
-        weights = rng.uniform(-sigma_init, sigma_init, num_weights)
-
-        # Evaluate
-        from simulation_utils import evaluate_morphology_fitness
-        from networkx import DiGraph
-
-        # This is a simplified version - in practice you'd need the tree
-        # For now, we'll use the model directly
-        controller.set_weights(weights)
-
-        data = mj.MjData(model)
-        mj.mj_resetData(model, data)
-
-        tracker = setup_tracker(world_spec, data)
-        simulate_with_controller(
-            model=model,
-            data=data,
-            controller=controller,
-            tracker=tracker,
-            duration=simulation_duration,
-        )
-
-        # Calculate fitness
-        dt = model.opt.timestep
-        time_steps_per_save = 500
-        seconds_per_save = dt * time_steps_per_save
-        baseline_index = int(baseline_time / seconds_per_save)
-
-        if len(tracker.history["xpos"][0]) > baseline_index:
-            initial_pos = tracker.history["xpos"][0][baseline_index]
-        else:
-            initial_pos = tracker.history["xpos"][0][0]
-
-        final_pos = tracker.history["xpos"][0][-1]
-        fitness = float(final_pos[0] - initial_pos[0])
-
-        # Track best
-        if maximize and fitness > best_fitness:
-            best_fitness = fitness
-            best_weights = weights.copy()
-        elif not maximize and fitness < best_fitness:
-            best_fitness = fitness
-            best_weights = weights.copy()
-
-    return best_weights, best_fitness

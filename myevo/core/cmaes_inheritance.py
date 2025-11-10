@@ -15,7 +15,7 @@ import numpy as np
 from numpy.random import Generator
 
 from ariel.ec.a001 import Individual
-from ariel.ec.strategies.weight_inheritance import tree_distance
+from myevo.core.weight_inheritance import tree_distance
 
 
 def _calculate_total_weights(layer_sizes: list[int]) -> int:
@@ -185,10 +185,6 @@ def adapt_cmaes_state_to_morphology(
     Returns:
         Adapted CMAESState for offspring
     """
-    # If architectures are identical, return parent state unchanged
-    if parent_layer_sizes == offspring_layer_sizes:
-        return parent_state
-
     # Calculate weight dimensions (including biases)
     parent_dim = _calculate_total_weights(parent_layer_sizes)
     offspring_dim = _calculate_total_weights(offspring_layer_sizes)
@@ -420,30 +416,6 @@ def _build_weight_correspondence(
         offspring_offset = offspring_weight_offset + o_out
 
     return correspondences
-
-
-def _calculate_layer_weight_indices(layer_sizes: list[int]) -> list[int]:
-    """Calculate start indices for each layer's weights in flattened vector.
-
-    The weight vector is organized as:
-    [layer0_weights, layer0_biases, layer1_weights, layer1_biases, ...]
-
-    Returns:
-        List of start indices, with final element being total dimension
-    """
-    indices = [0]
-    cumsum = 0
-
-    for i in range(len(layer_sizes) - 1):
-        # Weights for this layer
-        layer_weights = layer_sizes[i] * layer_sizes[i + 1]
-        # Biases for this layer
-        layer_biases = layer_sizes[i + 1]
-        # Total for this layer
-        cumsum += layer_weights + layer_biases
-        indices.append(cumsum)
-
-    return indices
 
 
 class CMAESStateManager:

@@ -32,7 +32,7 @@ from pathlib import Path
 # Apply custom config BEFORE importing ARIEL modules
 CWD = Path.cwd()
 sys.path.insert(0, str(CWD / "myevo"))
-from custom_config import ALLOWED_FACES, ALLOWED_ROTATIONS
+from myevo.config.custom_config import ALLOWED_FACES, ALLOWED_ROTATIONS
 import ariel.body_phenotypes.robogen_lite.config as ariel_config
 ariel_config.ALLOWED_FACES = ALLOWED_FACES
 ariel_config.ALLOWED_ROTATIONS = ALLOWED_ROTATIONS

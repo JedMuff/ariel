@@ -353,11 +353,8 @@ def cleanup_temp_cache(cache_dir: Path | str | None = None) -> int:
 
     files_before = len(list(temp_dir.glob("**/*")))
 
-    try:
-        shutil.rmtree(temp_dir)
-        temp_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        print(f"Warning: Failed to clean temp cache: {e}")
-        return 0
+    # Remove cache directory - if this fails, we want to know about it
+    shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     return files_before

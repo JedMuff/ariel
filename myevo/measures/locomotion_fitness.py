@@ -1,0 +1,182 @@
+"""Locomotion fitness evaluation for evolved robots.
+
+This module provides simulation-based fitness functions for evaluating robot
+locomotion performance using forward displacement in MuJoCo simulations.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import mujoco as mj
+from ariel.simulation.controllers.controller import Controller
+from ariel.utils.runners import simple_runner
+from ariel.utils.tracker import Tracker
+
+from myevo.simulation.contact_utils import get_rotors_in_contact
+
+if TYPE_CHECKING:
+    from myevo.controllers.neural_network_controller import FlexibleNeuralNetworkController
+
+
+def calculate_displacement_fitness(
+    tracker: Tracker,
+    baseline_time: float,
+    model: mj.MjModel,
+    spawn_height: float,
+    contact_count: int = 0,
+) -> float:
+    """Calculate fitness as forward displacement from a baseline time.
+
+    This uses the x-axis displacement (forward direction in ARIEL) from
+    a baseline time to avoid advantages from initial falling/settling.
+
+    A height penalty is applied: if the robot's spawn height (morphology height)
+    is above 0.21m, the spawn height is subtracted from the fitness. This prevents
+    tall robots from exploiting falling/settling for free displacement.
+
+    A contact penalty is applied to punish morphologies that exploit hinge-ground
+    contact glitches. The penalty is 0.005 * contact_count. If contact_count exceeds
+    200, the fitness is set to -1.0.
+
+    Parameters
+    ----------
+    tracker : Tracker
+        Tracker with recorded position history.
+    baseline_time : float
+        Time in seconds to use as baseline (e.g., 1.0 for 1 second).
+    model : mj.MjModel
+        MuJoCo model (needed for timestep).
+    spawn_height : float
+        The spawn height (z-coordinate) of the robot's core at initialization.
+        This is the robot's morphological height used for the penalty.
+    contact_count : int, optional
+        Number of unique rotor-ground contact events during the simulation, by default 0.
+
+    Returns
+    -------
+    float
+        Forward displacement in meters from baseline time to end, with penalties applied.
+    """
+    # Get timestep information
+    dt = model.opt.timestep
+    time_steps_per_save = 500  # As defined in Controller
+    seconds_per_save = dt * time_steps_per_save
+
+    # Calculate baseline index
+    baseline_index = int(baseline_time / seconds_per_save)
+
+    # Ensure we have enough history, otherwise use first available
+    initial_pos = tracker.history["xpos"][0][baseline_index]
+
+    final_pos = tracker.history["xpos"][0][-1]
+
+    # X-axis is forward direction in ARIEL
+    x_displacement = final_pos[0] - initial_pos[0]
+
+    # Apply height penalty based on spawn height (morphological height)
+    # (allows up to 1 core + 3 bricks stacked below it: 0.21m)
+    if spawn_height > 0.21:
+        fitness = x_displacement - spawn_height
+    else:
+        fitness = x_displacement
+
+    # Apply contact penalty
+    # If excessive contacts (>200), return severe penalty
+    if contact_count > 200:
+        return -1.0
+
+    # Otherwise apply linear penalty
+    fitness = fitness - 0.005 * contact_count
+
+    return float(fitness)
+
+
+def simulate_with_settling_phase(
+    model: mj.MjModel,
+    data: mj.MjData,
+    controller: FlexibleNeuralNetworkController,
+    tracker: Tracker,
+    settling_duration: float,
+    control_duration: float,
+    time_steps_per_ctrl_step: int = 100,
+    time_steps_per_save: int = 500,
+    track_contacts: bool = False,
+) -> int:
+    """Run a two-phase simulation: passive settling, then active control.
+
+    Phase 1: Robot settles passively for settling_duration with no control input.
+    Phase 2: Controller takes over from the settled state for control_duration.
+
+    The tracker is reset at the start of Phase 2, so displacement is measured
+    only during the controlled phase.
+
+    Parameters
+    ----------
+    model : mj.MjModel
+        MuJoCo model.
+    data : mj.MjData
+        MuJoCo data (should be reset before calling).
+    controller : FlexibleNeuralNetworkController
+        Controller with weights already set.
+    tracker : Tracker
+        Tracker already setup with world_spec and data.
+    settling_duration : float
+        Duration of passive settling phase in seconds.
+    control_duration : float
+        Duration of active control phase in seconds.
+    time_steps_per_ctrl_step : int, optional
+        Control update frequency, by default 100.
+    time_steps_per_save : int, optional
+        Tracking save frequency, by default 500.
+    track_contacts : bool, optional
+        Whether to track rotor-ground contact events during Phase 2, by default False.
+
+    Returns
+    -------
+    int
+        Number of unique rotor-ground contact events during Phase 2 (0 if track_contacts=False).
+    """
+    # Phase 1: Passive settling (no control)
+    mj.set_mjcb_control(None)
+    simple_runner(model, data, duration=settling_duration)
+
+    # Reset tracker history so we only measure displacement during controlled phase
+    tracker.reset()
+
+    # Phase 2: Active control from settled state
+    ctrl = Controller(
+        controller_callback_function=controller,
+        tracker=tracker,
+        time_steps_per_ctrl_step=time_steps_per_ctrl_step,
+        time_steps_per_save=time_steps_per_save,
+    )
+
+    # Set control callback
+    mj.set_mjcb_control(lambda m, d: ctrl.set_control(m, d))
+
+    # Track contacts if requested
+    contact_count = 0
+    if track_contacts:
+        # Track contact events during Phase 2
+        previous_rotors_in_contact = set()
+        num_steps = int(control_duration / model.opt.timestep)
+
+        for step in range(num_steps):
+            # Step the simulation
+            mj.mj_step(model, data)
+
+            # Check current contacts
+            current_rotors_in_contact = get_rotors_in_contact(model, data)
+
+            # Count new contacts (rotors that are touching now but weren't before)
+            new_contacts = current_rotors_in_contact - previous_rotors_in_contact
+            contact_count += len(new_contacts)
+
+            # Update tracking set for next iteration
+            previous_rotors_in_contact = current_rotors_in_contact
+    else:
+        # Continue simulation with control (no contact tracking)
+        simple_runner(model, data, duration=control_duration)
+
+    return contact_count

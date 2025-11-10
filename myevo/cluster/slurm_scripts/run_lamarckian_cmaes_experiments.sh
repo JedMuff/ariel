@@ -1,9 +1,9 @@
 #!/bin/bash
 
-#SBATCH --output=slurm_out/lamarckian_cmaes-%A_%a.out
-#SBATCH --error=slurm_out/lamarckian_cmaes-%A_%a.err
+#SBATCH --output=slurm_out/lamarckian_sigma-%A_%a.out
+#SBATCH --error=slurm_out/lamarckian_sigma-%A_%a.err
 #SBATCH --time=100:00:00
-#SBATCH --cpus-per-task=64
+#SBATCH --cpus-per-task=32
 #SBATCH --array=0-39
 
 # Virtual environment path - UPDATE THIS to match your cluster setup
@@ -55,26 +55,27 @@ echo "Repetition: $REPETITION"
 echo "Seed: $SEED"
 
 # Set experiment-specific parameters
+# Test different sigma inheritance modes with Lamarckian evolution
 if [ $EXPERIMENT_ID -eq 0 ]; then
-    # Lamarckian + Covariance Inheritance (sigma reset) + Locomotion
-    EXPERIMENT_NAME="lamarck_cov_sigmareset_locomotion_rep${REPETITION}"
-    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode reset"
-    echo "Running: Lamarckian (Cov=adaptive, Sigma=reset) + Locomotion"
-elif [ $EXPERIMENT_ID -eq 1 ]; then
-    # Lamarckian + Covariance + Sigma Inheritance + Locomotion
-    EXPERIMENT_NAME="lamarck_cov_sigma_locomotion_rep${REPETITION}"
+    # Lamarckian with sigma mode: blend (default)
+    EXPERIMENT_NAME="lamarck_sigma_blend_rep${REPETITION}"
     FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode blend"
-    echo "Running: Lamarckian (Cov=adaptive, Sigma=blend) + Locomotion"
+    echo "Running: Lamarckian with Sigma=blend (default)"
+elif [ $EXPERIMENT_ID -eq 1 ]; then
+    # Lamarckian with sigma mode: reset
+    EXPERIMENT_NAME="lamarck_sigma_reset_rep${REPETITION}"
+    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode reset"
+    echo "Running: Lamarckian with Sigma=reset"
 elif [ $EXPERIMENT_ID -eq 2 ]; then
-    # Lamarckian + Covariance Inheritance (sigma reset) + Novelty*Locomotion
-    EXPERIMENT_NAME="lamarck_cov_sigmareset_novelty_rep${REPETITION}"
-    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode reset --use-novelty"
-    echo "Running: Lamarckian (Cov=adaptive, Sigma=reset) + Novelty*Locomotion"
+    # Lamarckian with sigma mode: keep
+    EXPERIMENT_NAME="lamarck_sigma_keep_rep${REPETITION}"
+    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode keep"
+    echo "Running: Lamarckian with Sigma=keep"
 elif [ $EXPERIMENT_ID -eq 3 ]; then
-    # Lamarckian + Covariance + Sigma Inheritance + Novelty*Locomotion
-    EXPERIMENT_NAME="lamarck_cov_sigma_novelty_rep${REPETITION}"
-    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode blend --use-novelty"
-    echo "Running: Lamarckian (Cov=adaptive, Sigma=blend) + Novelty*Locomotion"
+    # Lamarckian with sigma mode: adaptive
+    EXPERIMENT_NAME="lamarck_sigma_adaptive_rep${REPETITION}"
+    FLAGS="--enable-lamarckian --covariance-inheritance-mode adaptive --sigma-inheritance-mode adaptive"
+    echo "Running: Lamarckian with Sigma=adaptive"
 else
     echo "ERROR: Invalid experiment ID: $EXPERIMENT_ID"
     exit 1
@@ -92,7 +93,7 @@ echo "==============================================="
 
 # Run the experiment
 echo "Starting experiment at $(date)"
-srun python3 myevo/mu_lambda_tree_locomotion.py \
+srun python3 myevo/core/mu_lambda_tree_locomotion.py \
     --experiment-name "$EXPERIMENT_NAME" \
     --seed $SEED \
     --num-workers 30 \

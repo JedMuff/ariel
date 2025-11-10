@@ -441,45 +441,6 @@ class TreeGenotype(Genotype):
 
         return mutated_tree
 
-    def mutation(self, population: np.ndarray) -> np.ndarray:
-        """Apply mutation to an entire population.
-
-        Parameters
-        ----------
-        population : np.ndarray
-            Array of tree genotypes.
-
-        Returns
-        -------
-        np.ndarray
-            Array of mutated tree genotypes.
-        """
-        new_population = []
-        for individual in population:
-            mutated_tree = self.mutate_tree(individual.tree)
-            mutated_individual = TreeGenotype(
-                max_part_limit=self.max_part_limit,
-                max_actuators=self.max_actuators,
-                default_depth=self.default_depth,
-                mutation_strength=self.mutation_strength,
-                mutation_reps=self.mutation_reps,
-                enable_collision_repair=self.enable_collision_repair,
-                max_repair_iterations=self.max_repair_iterations,
-            )
-            mutated_individual.tree = mutated_tree
-            
-            # mutate mutation strength and reps for next generation
-            random_number_between_0_and_1 = random.random()
-            if random_number_between_0_and_1 < self.mutate_attributes_prob:
-                mutated_individual.mutation_strength = mutated_individual.mutation_strength + random.randint(-1, 1)
-                mutated_individual.mutation_strength = max(0, mutated_individual.mutation_strength)
-                mutated_individual.mutation_reps = mutated_individual.mutation_reps + random.randint(-1, 2)
-                mutated_individual.mutation_reps = max(1, mutated_individual.mutation_reps)
-
-            new_population.append(mutated_individual)
-            
-        return np.array(new_population, dtype=object)
-
     def crossover_tree(
         self,
         parent1: nx.DiGraph,
@@ -579,59 +540,6 @@ class TreeGenotype(Genotype):
 
         return offspring1, offspring2
 
-    def crossover(
-        self,
-        population: np.ndarray,
-        mating_pool1: np.ndarray,
-        mating_pool2: np.ndarray,
-    ) -> np.ndarray:
-        """Apply crossover to pairs from mating pools.
-
-        Parameters
-        ----------
-        population : np.ndarray
-            The population array of TreeGenotype objects.
-        mating_pool1 : np.ndarray
-            Indices of first parents.
-        mating_pool2 : np.ndarray
-            Indices of second parents.
-
-        Returns
-        -------
-        np.ndarray
-            Array of offspring TreeGenotype objects from crossover.
-        """
-        new_population = []
-        for parent1_idx, parent2_idx in zip(mating_pool1, mating_pool2):
-            parent1_genotype = population[parent1_idx]
-            parent2_genotype = population[parent2_idx]
-
-            # Extract trees from TreeGenotype objects
-            parent1_tree = parent1_genotype.tree
-            parent2_tree = parent2_genotype.tree
-
-            # Perform crossover on trees
-            child1_tree, _ = self.crossover_tree(parent1_tree, parent2_tree)
-
-            # Create new TreeGenotype object for offspring
-            child1_genotype = TreeGenotype(
-                max_part_limit=self.max_part_limit,
-                max_actuators=self.max_actuators,
-                default_depth=self.default_depth,
-                mutation_strength=parent1_genotype.mutation_strength,
-                mutation_reps=parent1_genotype.mutation_reps,
-                mutate_attributes_prob=self.mutate_attributes_prob,
-                enable_collision_repair=self.enable_collision_repair,
-                max_repair_iterations=self.max_repair_iterations,
-            )
-            child1_genotype.tree = child1_tree
-
-            # Inherit mutation parameters from first parent (could also be averaged or randomized)
-            # Already set in constructor above
-
-            new_population.append(child1_genotype)
-        return np.array(new_population, dtype=object)
-
     def get_tree_size(self, tree: nx.DiGraph) -> int:
         """Get the number of modules in a tree.
 
@@ -664,10 +572,8 @@ class TreeGenotype(Genotype):
             return 0
 
         # Calculate longest path from root
-        try:
-            return nx.dag_longest_path_length(tree)
-        except nx.NetworkXError:
-            return 0
+        # If this fails, we want to know about it (indicates malformed tree)
+        return nx.dag_longest_path_length(tree)
 
     # ========== Genotype Base Class Interface ==========
 

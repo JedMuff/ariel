@@ -71,22 +71,21 @@ class LinuxVideoRecorder:
         self.output_file = str(output_file)
 
         # Try XVID first, fall back to MJPEG if not available
-        try:
-            fourcc = cv2.VideoWriter_fourcc(*self._video_encoding)
-            video_writer = cv2.VideoWriter(
-                self.output_file,
-                fourcc,
-                self.fps,
-                (self.width, self.height),
-            )
+        video_writer = None
 
-            # Check if VideoWriter was successfully initialized
-            if not video_writer.isOpened():
-                raise RuntimeError("XVID codec not available")
+        # Try XVID
+        fourcc = cv2.VideoWriter_fourcc(*self._video_encoding)
+        video_writer = cv2.VideoWriter(
+            self.output_file,
+            fourcc,
+            self.fps,
+            (self.width, self.height),
+        )
 
-        except (cv2.error, RuntimeError):
-            # Fall back to MJPEG
+        # Check if VideoWriter was successfully initialized
+        if not video_writer.isOpened():
             print("XVID codec not available, falling back to MJPEG")
+            # Fall back to MJPEG
             self._video_encoding = "MJPG"
             fourcc = cv2.VideoWriter_fourcc(*self._video_encoding)
             video_writer = cv2.VideoWriter(
@@ -95,6 +94,13 @@ class LinuxVideoRecorder:
                 self.fps,
                 (self.width, self.height),
             )
+
+            # If MJPEG also fails, raise error
+            if not video_writer.isOpened():
+                raise RuntimeError(
+                    f"Failed to initialize video writer with both XVID and MJPEG codecs. "
+                    f"Output file: {self.output_file}, Resolution: {self.width}x{self.height}, FPS: {self.fps}"
+                )
 
         # Class attributes
         self.frame_count = 0

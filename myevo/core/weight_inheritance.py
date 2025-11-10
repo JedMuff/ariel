@@ -199,17 +199,21 @@ def tree_distance(tree1: DiGraph, tree2: DiGraph, timeout: float = 1.0) -> float
         return edge1.get("face") == edge2.get("face")
 
     # Compute graph edit distance with attribute matching
-    try:
-        ged = nx.graph_edit_distance(
-            tree1,
-            tree2,
-            node_match=node_match,
-            edge_match=edge_match,
-            timeout=timeout,
+    # If this times out or fails, let the exception propagate
+    ged = nx.graph_edit_distance(
+        tree1,
+        tree2,
+        node_match=node_match,
+        edge_match=edge_match,
+        timeout=timeout,
+    )
+    # If timeout occurred, ged will be None
+    if ged is None:
+        raise TimeoutError(
+            f"Graph edit distance computation timed out after {timeout}s. "
+            "Trees may be too large or complex."
         )
-        return float(ged) if ged is not None else 1000.0
-    except Exception:
-        return 1000.0
+    return float(ged)
 
 
 class ParentWeightManager:

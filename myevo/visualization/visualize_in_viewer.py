@@ -30,7 +30,7 @@ from pathlib import Path
 # Apply custom config BEFORE importing ARIEL modules
 CWD = Path.cwd()
 sys.path.insert(0, str(CWD / "myevo"))
-from custom_config import ALLOWED_FACES, ALLOWED_ROTATIONS
+from myevo.config.custom_config import ALLOWED_FACES, ALLOWED_ROTATIONS
 import ariel.body_phenotypes.robogen_lite.config as ariel_config
 ariel_config.ALLOWED_FACES = ALLOWED_FACES
 ariel_config.ALLOWED_ROTATIONS = ALLOWED_ROTATIONS
@@ -47,8 +47,8 @@ from ariel.body_phenotypes.robogen_lite.decoders import load_graph_from_json
 from ariel.simulation.controllers.controller import Controller
 
 # Local imports
-from simulation_utils import create_robot_model, create_controller, setup_tracker
-from controller_optimizer import optimize_controller_cmaes
+from myevo.simulation.simulation_utils import create_robot_model, create_controller, setup_tracker
+from myevo.controllers.controller_optimizer import optimize_controller_cmaes
 
 # Setup
 install(show_locals=False)
@@ -250,7 +250,7 @@ def main():
         console.print(f"Budget: {args.cmaes_budget}, Population: {args.cmaes_population}")
         console.print(f"Duration: {args.duration}s")
 
-        brain_weights, best_fitness, fitness_history = optimize_controller_cmaes(
+        brain_weights, best_fitness, fitness_history, _, _ = optimize_controller_cmaes(
             model=model,
             world_spec=world_spec,
             hidden_layers=args.hidden_layers,

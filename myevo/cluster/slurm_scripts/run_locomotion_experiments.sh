@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --output=slurm_out/locomotion-%A_%a.out
-#SBATCH --error=slurm_out/locomotion-%A_%a.err
+#SBATCH --output=slurm_out/darwinian-%A_%a.out
+#SBATCH --error=slurm_out/darwinian-%A_%a.err
 #SBATCH --time=100:00:00
 #SBATCH --cpus-per-task=32
 #SBATCH --array=0-39
@@ -37,44 +37,35 @@ python3 --version
 
 # Calculate experiment type and repetition from array task ID
 # Now organized so all experiments run in parallel for each repetition:
-# Tasks 0-3:   Repetition 0 (all 4 experiments)
-# Tasks 4-7:   Repetition 1 (all 4 experiments)
-# Tasks 8-11:  Repetition 2 (all 4 experiments)
+# Tasks 0-1:   Repetition 0 (both Darwinian experiments)
+# Tasks 2-3:   Repetition 1 (both Darwinian experiments)
+# Tasks 4-5:   Repetition 2 (both Darwinian experiments)
 # ...
-# Tasks 36-39: Repetition 9 (all 4 experiments)
+# Tasks 38-39: Repetition 19 (both Darwinian experiments)
 
-REPETITION=$((SLURM_ARRAY_TASK_ID / 4))
-EXPERIMENT_ID=$((SLURM_ARRAY_TASK_ID % 4))
+REPETITION=$((SLURM_ARRAY_TASK_ID / 2))
+EXPERIMENT_ID=$((SLURM_ARRAY_TASK_ID % 2))
 # Make seed unique for each experiment AND repetition
 # Formula: base_seed + (repetition * 10) + experiment_id
 # This ensures each experiment has a unique seed
-SEED=$((17 + (REPETITION * 10) + EXPERIMENT_ID))
+SEED=$((27 + (REPETITION * 10) + EXPERIMENT_ID))
 
 echo "Experiment ID: $EXPERIMENT_ID"
 echo "Repetition: $REPETITION"
 echo "Seed: $SEED"
 
 # Set experiment-specific parameters
+# Only Darwinian experiments (no Lamarckian evolution)
 if [ $EXPERIMENT_ID -eq 0 ]; then
-    # Darwin + Locomotion (baseline)
-    EXPERIMENT_NAME="darwin_locomotion_rep${REPETITION}"
+    # Darwinian + Locomotion (baseline)
+    EXPERIMENT_NAME="darwinian_locomotion_rep${REPETITION}"
     FLAGS=""
-    echo "Running: Darwin Evolution + Locomotion"
+    echo "Running: Darwinian Evolution + Locomotion (baseline)"
 elif [ $EXPERIMENT_ID -eq 1 ]; then
-    # Lamarckian + Locomotion
-    EXPERIMENT_NAME="lamarckian_locomotion_rep${REPETITION}"
-    FLAGS="--enable-lamarckian"
-    echo "Running: Lamarckian Evolution + Locomotion"
-elif [ $EXPERIMENT_ID -eq 2 ]; then
-    # Darwin + Novelty*Locomotion
-    EXPERIMENT_NAME="darwin_novelty_rep${REPETITION}"
+    # Darwinian + Novelty*Locomotion
+    EXPERIMENT_NAME="darwinian_novelty_rep${REPETITION}"
     FLAGS="--use-novelty"
-    echo "Running: Darwin Evolution + Novelty*Locomotion"
-elif [ $EXPERIMENT_ID -eq 3 ]; then
-    # Lamarckian + Novelty*Locomotion
-    EXPERIMENT_NAME="lamarckian_novelty_rep${REPETITION}"
-    FLAGS="--enable-lamarckian --use-novelty"
-    echo "Running: Lamarckian Evolution + Novelty*Locomotion"
+    echo "Running: Darwinian Evolution + Novelty*Locomotion"
 else
     echo "ERROR: Invalid experiment ID: $EXPERIMENT_ID"
     exit 1
@@ -88,11 +79,12 @@ echo "Flags: $FLAGS"
 echo "Seed: $SEED"
 echo "Workers: 30"
 echo "Generations: 50"
+echo "Total Repetitions: 20"
 echo "==============================================="
 
 # Run the experiment
 echo "Starting experiment at $(date)"
-srun python3 myevo/mu_lambda_tree_locomotion.py \
+srun python3 myevo/core/mu_lambda_tree_locomotion.py \
     --experiment-name "$EXPERIMENT_NAME" \
     --seed $SEED \
     --num-workers 30 \
