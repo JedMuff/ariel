@@ -550,7 +550,7 @@ class MuLambdaStrategy:
         population : list[Individual]
             Parent population (for tracking).
         """
-        from ariel.ec import TreeGenotype
+        from myevo.core import TreeGenotype
 
         # Track all evaluated individuals in weight and CMA-ES managers
         for ind in population:
@@ -741,11 +741,13 @@ class MuLambdaStrategy:
         self._optimized_weight_manager.clear_old_weights(keep_ids)
 
         # Clean up CMA-ES state managers (keep only current population)
-        for manager in [self._initial_cmaes_manager, self._optimized_cmaes_manager]:
-            old_ids = set(manager._states.keys()) - keep_ids
-            for old_id in old_ids:
-                manager._states.pop(old_id, None)
-                manager._layer_sizes.pop(old_id, None)
+        # Only clean if managers exist (they're None when Lamarckian mode is disabled)
+        if self._initial_cmaes_manager is not None and self._optimized_cmaes_manager is not None:
+            for manager in [self._initial_cmaes_manager, self._optimized_cmaes_manager]:
+                old_ids = set(manager._states.keys()) - keep_ids
+                for old_id in old_ids:
+                    manager._states.pop(old_id, None)
+                    manager._layer_sizes.pop(old_id, None)
 
         # Clean up cache files using CacheManager
         self.cache_manager.cleanup()

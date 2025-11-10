@@ -293,7 +293,7 @@ class DatabasePersistence:
         dict
             Record dictionary.
         """
-        from ariel.ec import TreeGenotype
+        from myevo.core import TreeGenotype
 
         # Get tree for counting
         tree = (

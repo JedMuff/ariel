@@ -307,7 +307,7 @@ class ParentWeightManager:
         parent1_id = individual.tags["parent1_id"]
 
         # Find parent Individual objects
-        from ariel.ec import TreeGenotype
+        from myevo.core import TreeGenotype
 
         parent1_ind = None
         parent2_ind = None
@@ -424,7 +424,7 @@ class ParentWeightManager:
                 return (weights1 + weights2) / 2
 
             # Extract trees from parents
-            from ariel.ec import TreeGenotype
+            from myevo.core import TreeGenotype
             parent1_tree = parent1_ind.genotype.tree if isinstance(parent1_ind.genotype, TreeGenotype) else parent1_ind.genotype
             parent2_tree = parent2_ind.genotype.tree if isinstance(parent2_ind.genotype, TreeGenotype) else parent2_ind.genotype
 
