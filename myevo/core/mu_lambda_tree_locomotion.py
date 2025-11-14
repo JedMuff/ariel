@@ -607,6 +607,12 @@ def parse_args():
         help="Name prefix for experiment directory (default: auto-generated from timestamp)"
     )
     parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Base directory for saving experiment data (default: __data__)"
+    )
+    parser.add_argument(
         "--cmaes-budget",
         type=int,
         default=1000,
@@ -658,7 +664,14 @@ def main() -> None:
         dir_name = f"{args.experiment_name}_{timestamp}"
     else:
         dir_name = f"{SCRIPT_NAME}_{timestamp}"
-    DATA = CWD / "__data__" / dir_name
+
+    # Use custom data directory if specified, otherwise default to __data__
+    if args.data_dir:
+        base_dir = Path(args.data_dir)
+    else:
+        base_dir = CWD / "__data__"
+
+    DATA = base_dir / dir_name
     DATA.mkdir(exist_ok=True, parents=True)
 
     # Set experiment-specific cache directory to avoid conflicts between parallel runs
