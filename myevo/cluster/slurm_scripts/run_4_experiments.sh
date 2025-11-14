@@ -52,7 +52,7 @@ EXPERIMENT_ID=$((SLURM_ARRAY_TASK_ID % 4))
 # Make seed unique for each experiment AND repetition
 # Formula: base_seed + (repetition * 10) + experiment_id
 # This ensures each experiment has a unique seed
-SEED=$((42 + (REPETITION * 10) + EXPERIMENT_ID))
+SEED=$((222 + (REPETITION * 10) + EXPERIMENT_ID))
 
 echo "Experiment ID: $EXPERIMENT_ID"
 echo "Repetition: $REPETITION"
@@ -103,7 +103,7 @@ srun python3 myevo/core/mu_lambda_tree_locomotion.py \
     --data-dir "$DATA_DIR" \
     --seed $SEED \
     --num-workers 30 \
-    --num-generations 100 \
+    --num-generations 75 \
     $FLAGS
 
 EXIT_CODE=$?
