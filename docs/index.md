@@ -18,7 +18,21 @@ ARIEL brings together the full evolutionary robotics pipeline in a single, cohes
 - **Flexible**: swap genotype representations (NDE, CPPN, Tree, Vector) or optimisers without rewriting your experiment.
 - **Scalable**: native support for parallel evaluation via [Ray](source/EA_intro/parallel_ackley).
 - **Reproducible**: built-in database logging and pandas/polars/SQLite export for every run.
- 
+
+| Framework        | 🧬 Body–Brain Co-Design | 🧠 Learning | 🤖 Physical Twins | ⚡ Async Evo & Learning | 🧪 Built-in Simulation | 🖥️ GUI | 🗄️ Database Integration | 🧩 Modularity |
+|-----------------|:-----------------------:|:-----------:|:-----------------:|:----------------------:|:----------------------:|:------:|:------------------------:|:-------------:|
+| RoboGen         | ✅                      | ❌          | ✅                | ❌                     | ✅                     | ❌     | ❌                       | ✅            |
+| JBotEvolver     | ✅                      | ✅          | ❌                | ❌                     | ✅                     | ❌     | ❌                       | ✅            |
+| 2D-VSR Sim      | ❌                      | ✅          | ❌                | ❌                     | ✅                     | ❌     | ❌                       | ❌            |
+| Evolution Gym   | ✅                      | ❌          | ❌                | ❌                     | ✅                     | ❌     | ❌                       | ✅            |
+| POEM            | ✅                      | ✅          | ❌                | ❌                     | ❌                     | ❌     | ❌                       | ❌            |
+| Framsticks      | ✅                      | ❌          | ❌                | ❌                     | ✅                     | ✅     | ❌                       | ✅            |
+| EvoSoro/PyroSim | ✅                      | ❌          | ❌                | ❌                     | ✅                     | ❌     | ❌                       | ✅            |
+| Revolve         | ✅                      | ✅          | ✅                | ❌                     | ✅                     | ❌     | ❌                       | ✅            |
+| EvoTorch        | ❌                      | ✅          | ❌                | ❌                     | ❌                     | ❌     | ❌                       | ✅            |
+| DEAP            | ❌                      | ❌          | ❌                | ❌                     | ❌                     | ❌     | ❌                       | ✅            |
+| **ARIEL**       | ✅                      | ✅          | ✅                | ✅                     | ✅                     | ✅     | ✅                       | ✅            |
+
 ---
 
 ## Features
