@@ -7,6 +7,10 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=31G
 #SBATCH --array=0-4
+# Request 1 GPU per task: we don't compute on it, but MuJoCo's EGL renderer
+# needs the DRI render nodes (/dev/dri/renderD*) which are only accessible
+# when a GPU is allocated. Without this, EGL fails with 'Permission denied'.
+#SBATCH --gres=gpu:1
 
 set -euo pipefail
 
@@ -24,9 +28,9 @@ mkdir -p out_files
 source "$VENV_PATH/bin/activate"
 
 # Headless rendering: compute nodes have no X display, so MuJoCo's default
-# GLFW backend fails. Use OSMesa (CPU software renderer; works on any node).
-export MUJOCO_GL=osmesa
-export PYOPENGL_PLATFORM=osmesa
+# GLFW backend fails. Use EGL (GPU-accelerated, no display needed). Requires
+# a GPU allocation (see #SBATCH --gres=gpu:1 above) for /dev/dri permissions.
+export MUJOCO_GL=egl
 
 echo "Node:       $(hostname)"
 echo "Job:        $SLURM_JOB_ID  Array task: $SLURM_ARRAY_TASK_ID  Seed: $SEED"
