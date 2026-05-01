@@ -14,7 +14,7 @@ REPO=/home/jed/workspaces/ariel
 VENV_PATH=$REPO/.venv
 
 TMP_DIR=/tmp/${USER}/ariel_bb_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}
-FINAL_DIR=$REPO/__data__/body_brain_evolution
+FINAL_DIR=/scratch/jed/ariel_experiments_01052026
 RUN_TAG=body_brain_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}
 SEED=$((42 + SLURM_ARRAY_TASK_ID))
 
