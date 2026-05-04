@@ -129,6 +129,7 @@ CHECKPOINTS.mkdir(exist_ok=True, parents=True)
 
 SPAWN_POSITION = (0.0, 0.0, 0.1)
 HIDDEN_SIZE = 32
+MIN_HINGES = 4  # bodies with fewer hinges are rejected at construction time
 
 # ── Waypoint sampling (copied from 5_randomized_waypoints.py) ─────────────────
 
@@ -645,7 +646,7 @@ def _mutate_morph(genome: TreeGenome) -> TreeGenome:
 def _create_individual() -> Individual:
     while True:
         genome = random_tree(NUM_MODULES)
-        if _joint_count(genome) > 0 and validate_tree_depth(genome, MAX_DEPTH):
+        if _joint_count(genome) >= MIN_HINGES and validate_tree_depth(genome, MAX_DEPTH):
             break
     ind = Individual()
     ind.genotype = {"morph": genome.to_dict()}
@@ -705,16 +706,21 @@ class BodyBrainEvolution:
             child_morph = _mutate_morph(child_morph)
 
             attempts = 0
-            while attempts < 12:
-                if _joint_count(child_morph) > 0 and validate_tree_depth(child_morph, MAX_DEPTH):
+            valid = False
+            while attempts < 50:
+                if _joint_count(child_morph) >= MIN_HINGES and validate_tree_depth(child_morph, MAX_DEPTH):
+                    valid = True
                     break
                 child_morph = _mutate_morph(child_morph)
                 attempts += 1
 
             child = Individual()
             child.genotype = {"morph": child_morph.to_dict()}
-            child.tags = {"ps": False, "valid": True, "best_brain": []}
+            child.tags = {"ps": False, "valid": valid, "best_brain": []}
             child.requires_eval = True
+            if not valid:
+                child.fitness = float("inf")
+                child.requires_eval = False
             offspring.append(child)
 
         population.extend(offspring)
