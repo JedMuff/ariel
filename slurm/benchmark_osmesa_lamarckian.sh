@@ -24,8 +24,11 @@ source "$VENV_PATH/bin/activate"
 
 # Headless software rendering: no GPU, no display. Slower per frame than EGL,
 # but doesn't need /dev/dri access — so we don't need --gres=gpu:1.
+# Compute nodes don't ship libOSMesa system-wide, so we point at a conda-forge
+# mesalib=21.* env we installed under .osmesa/.
 export MUJOCO_GL=osmesa
 export PYOPENGL_PLATFORM=osmesa
+export LD_LIBRARY_PATH=$REPO/.osmesa/lib:${LD_LIBRARY_PATH:-}
 
 echo "Node:       $(hostname)"
 echo "Job:        $SLURM_JOB_ID  Seed: $SEED"
