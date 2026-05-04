@@ -91,7 +91,10 @@ parser.add_argument("--brain-budget",  type=int,   default=30,   help="Inner CMA
 parser.add_argument("--brain-pop",     type=int,   default=32,   help="Inner CMA population per generation")
 parser.add_argument("--brain-workers", type=int,   default=max(1, os.cpu_count() or 1), help="Inner CMA worker processes")
 parser.add_argument("--dur",           type=float, default=60.0, help="Episode duration (s)")
-parser.add_argument("--reach-radius",  type=float, default=0.35, help="Planar reach radius (m)")
+parser.add_argument("--reach-radius",  type=float, default=0.20,
+                    help="Planar reach radius (m). The gate is a vertical cylinder of this radius; "
+                         "trigger fires when the core's centre is within `reach_radius` of the gate centre "
+                         "in the xy-plane.")
 parser.add_argument("--num-waypoints", type=int,   default=3,    help="Waypoints per episode")
 parser.add_argument("--arena-radius",  type=float, default=3.0,  help="Arena radius (m)")
 parser.add_argument("--max-modules",   type=int,   default=12,   help="Max modules per body")
@@ -129,25 +132,33 @@ HIDDEN_SIZE = 32
 
 # ── Waypoint sampling (copied from 5_randomized_waypoints.py) ─────────────────
 
+RING_R_MIN = 0.5
+RING_R_MAX = 1.0
+GATE_HALF_HEIGHT = 0.15  # cylinder half-height; waypoint z is set so base sits on floor
+
+
 def sample_waypoints(
     rng: np.random.Generator,
     n: int = NUM_WAYPOINTS,
-    radius: float = ARENA_RADIUS,
-    min_sep: float = 0.8,
+    r_min: float = RING_R_MIN,
+    r_max: float = RING_R_MAX,
 ) -> list[np.ndarray]:
+    """Sample n waypoints sequentially: each one is offset from the previous
+    waypoint by a random vector in the annulus r ∈ [r_min, r_max], θ ∈ [0, 2π].
+    The first waypoint is offset from the origin (0, 0). Uniform in area
+    (r = sqrt(uniform(r_min², r_max²))) so the distribution is flat over the
+    ring, not biased toward the inner edge.
+    """
+    r2_min, r2_max = r_min * r_min, r_max * r_max
     wps: list[np.ndarray] = []
+    prev_xy = np.array([0.0, 0.0])
     for _ in range(n):
-        for _ in range(2000):
-            r     = rng.uniform(0.8, radius)
-            theta = rng.uniform(0.0, 2.0 * np.pi)
-            p     = np.array([r * np.cos(theta), r * np.sin(theta), 0.1])
-            if all(np.linalg.norm(p[:2] - w[:2]) >= min_sep for w in wps):
-                wps.append(p)
-                break
-        else:
-            r = rng.uniform(0.8, radius)
-            theta = rng.uniform(0.0, 2.0 * np.pi)
-            wps.append(np.array([r * np.cos(theta), r * np.sin(theta), 0.1]))
+        r = float(np.sqrt(rng.uniform(r2_min, r2_max)))
+        theta = float(rng.uniform(0.0, 2.0 * np.pi))
+        offset = np.array([r * np.cos(theta), r * np.sin(theta)])
+        new_xy = prev_xy + offset
+        wps.append(np.array([new_xy[0], new_xy[1], GATE_HALF_HEIGHT]))
+        prev_xy = new_xy
     return wps
 
 
@@ -270,10 +281,22 @@ def compute_fitness(
     completion_time: Optional[float] = None,
     duration: float = DURATION,
 ) -> float:
-    if waypoints_reached == num_waypoints and completion_time is not None:
-        time_bonus = (duration - completion_time) / duration
-        return -waypoints_reached * 10.0 - time_bonus
-    return min_dist_to_current - waypoints_reached * 10.0
+    """Lower is better.
+
+    fitness = -1 * waypoints_reached  +  closeness_to_next
+    closeness_to_next = (d_min_to_next / RING_R_MAX) - 1   ∈ (-1, +∞), no clamp
+                      = 0 when all waypoints reached (no "next").
+
+    With RING_R_MAX = 1.0 m: 0 ≈ at the gate, +1 ≈ ring-radius away.
+    Best possible: -num_waypoints (all reached, ended on the last gate).
+    `completion_time` is unused here — kept in the signature so callers don't break.
+    """
+    del completion_time, duration  # no time bonus in this fitness
+    if waypoints_reached >= num_waypoints:
+        closeness = 0.0
+    else:
+        closeness = (min_dist_to_current / RING_R_MAX) - 1.0
+    return -float(waypoints_reached) + closeness
 
 
 # ── Body construction ────────────────────────────────────────────────────────
@@ -301,14 +324,19 @@ def _build_world_for_body(genome_dict: dict) -> tuple[mujoco.MjModel, mujoco.MjD
         world = SimpleFlatWorld()
         world.spawn(spec, position=SPAWN_POSITION, correct_collision_with_floor=False)
 
-    # Green mocap marker — non-physical (mocap=True; no contact dynamics).
+    # Green pass-through goal: a vertical cylinder of radius REACH_RADIUS so
+    # the visible footprint matches the (planar) reach test exactly. mocap=True
+    # disables joint dynamics; contype/conaffinity=0 removes contact filtering
+    # so the robot passes through. Cylinder sits on the floor (z=GATE_HALF_HEIGHT).
     marker = world.spec.worldbody.add_body(
-        name="green_target", mocap=True, pos=[0.0, 0.0, 0.1]
+        name="green_target", mocap=True, pos=[0.0, 0.0, GATE_HALF_HEIGHT]
     )
     marker.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=[0.15, 0.15, 0.15],
-        rgba=[0, 1, 0, 1],
+        type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+        size=[REACH_RADIUS, GATE_HALF_HEIGHT],  # [radius, half-height], axis along z
+        rgba=[0, 1, 0, 0.7],
+        contype=0,
+        conaffinity=0,
     )
 
     # Top-down overview camera (used for video recording).
