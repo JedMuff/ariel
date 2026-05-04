@@ -95,7 +95,7 @@ parser.add_argument("--reach-radius",  type=float, default=0.20,
                     help="Planar reach radius (m). The gate is a vertical cylinder of this radius; "
                          "trigger fires when the core's centre is within `reach_radius` of the gate centre "
                          "in the xy-plane.")
-parser.add_argument("--num-waypoints", type=int,   default=3,    help="Waypoints per episode")
+parser.add_argument("--num-waypoints", type=int,   default=10,   help="Waypoints per episode")
 parser.add_argument("--arena-radius",  type=float, default=3.0,  help="Arena radius (m)")
 parser.add_argument("--max-modules",   type=int,   default=12,   help="Max modules per body")
 parser.add_argument("--max-depth",     type=int,   default=12,   help="Max tree depth")

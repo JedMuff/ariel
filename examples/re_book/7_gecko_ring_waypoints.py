@@ -64,7 +64,7 @@ parser.add_argument("--budget",        type=int,   default=80,   help="CMA gener
 parser.add_argument("--population",    type=int,   default=40,   help="Requested CMA population (≥ min-lambda, even)")
 parser.add_argument("--dur",           type=float, default=45.0, help="Max episode duration (s)")
 parser.add_argument("--reach-radius",  type=float, default=0.20, help="Planar reach radius (m); also the gate cylinder radius")
-parser.add_argument("--num-waypoints", type=int,   default=3,    help="Waypoints per episode")
+parser.add_argument("--num-waypoints", type=int,   default=10,   help="Waypoints per episode")
 parser.add_argument("--workers",       type=int,   default=max(1, os.cpu_count() or 1))
 parser.add_argument("--seed",          type=int,   default=42)
 parser.add_argument("--no-video",      action="store_true", help="Skip post-evolution video recording")
