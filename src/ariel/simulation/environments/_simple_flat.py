@@ -56,11 +56,16 @@ class SimpleFlatWorld(BaseWorld):
             width=600,  # pixels
             height=600,  # pixels
         )
+        # 1 m × 1 m checker squares: floor is `floor_size` m on a side, the
+        # built-in checker texture has 2 cells per repeat, so set
+        # texrepeat = floor_size / 2. texuniform=False so texrepeat is taken
+        # as repeats-per-meter on the geom rather than uniformly stretched.
+        width, height, _ = self.floor_size
         self.spec.add_material(
             name=self._floor_name,
             textures=["", f"{self._floor_name}"],
-            texrepeat=[3, 3],
-            texuniform=True,
+            texrepeat=[width / 2, height / 2],
+            texuniform=False,
             reflectance=0,
         )
 
