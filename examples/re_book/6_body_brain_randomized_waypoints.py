@@ -97,8 +97,8 @@ parser.add_argument("--reach-radius",  type=float, default=0.20,
                          "in the xy-plane.")
 parser.add_argument("--num-waypoints", type=int,   default=10,   help="Waypoints per episode")
 parser.add_argument("--arena-radius",  type=float, default=3.0,  help="Arena radius (m)")
-parser.add_argument("--max-modules",   type=int,   default=12,   help="Max modules per body")
-parser.add_argument("--max-depth",     type=int,   default=12,   help="Max tree depth")
+parser.add_argument("--max-modules",   type=int,   default=25,   help="Max modules per body")
+parser.add_argument("--max-depth",     type=int,   default=25,   help="Max tree depth")
 parser.add_argument("--seed",          type=int,   default=42)
 parser.add_argument("--strategy",      choices=["within", "across"], default="across",
                     help="'within' parallelises inner-CMA candidates of one body across workers (bodies serial); "

@@ -71,7 +71,7 @@ srun bash -c "
         --brain-budget 75 --brain-pop 20 \
         --brain-workers $SLURM_CPUS_PER_TASK \
         --dur 45.0 --reach-radius 0.20 --num-waypoints 10 --arena-radius 3.0 \
-        --max-modules 12 --max-depth 12 \
+        --max-modules 25 --max-depth 25 \
         --seed $SEED \
         --no-video
 "
