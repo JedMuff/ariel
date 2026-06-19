@@ -6,7 +6,7 @@
 # offspring each subsequent gen → 20 evals in gen-0, 10 per gen after.
 #
 # Usage:
-#   sbatch run_smoke_test.slurm
+#   sbatch examples/d_social_learning/run_smoke_test.slurm
 #
 #SBATCH --job-name=social-smoke
 #SBATCH --output=out_files/smoke-%A_%a.out
@@ -20,16 +20,13 @@
 # Environment
 # ---------------------------------------------------------------------------
 
-REPO_ROOT=/home/jed/workspace/ariel-evogym
-VENV_PATH=/home/jed/workspace/ariel-evogym/.venv
-EVOGYM_PYTHON=/home/jed/workspace/ariel-evogym/evogym-venv/bin/python
+REPO_ROOT=/home/jed/workspaces/ariel
+VENV_PATH=$REPO_ROOT/.venv
+EVOGYM_PYTHON=$REPO_ROOT/evogym-venv/bin/python
 
 echo "Node:       $(hostname)"
 echo "Array task: $SLURM_ARRAY_TASK_ID"
 echo "Date:       $(date)"
-
-export PATH="$VENV_PATH/bin:$PATH"
-export PYTHONPATH="$VENV_PATH/lib/python3.10/site-packages:$PYTHONPATH"
 
 cd "$REPO_ROOT"
 
