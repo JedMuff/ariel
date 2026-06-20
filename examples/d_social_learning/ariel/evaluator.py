@@ -12,10 +12,13 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
 import numpy as np
 
-DURATION = 10.0
+DURATION = 30.0
+SETTLE_TIME = 3.0
 SPAWN_POS = (-0.8, 0.0, 0.1)
 CTRL_EVERY = 50
 N_NEIGHBORS = 6
+HINGE_CONTACT_LIMIT = 200
+HINGE_CONTACT_PENALTY = 0.005
 
 
 def _scale_actions(raw: np.ndarray) -> np.ndarray:
@@ -34,7 +37,7 @@ def evaluate_individual(args: tuple) -> dict:
     Returns
     -------
     dict with keys:
-        distance       : float  — best x-displacement achieved
+        distance       : float  — best fitness achieved
         best_theta     : list[float]  — best θ weights
         init_fitness   : float  — episode fitness of inherited theta before any learning
         learning_curve : list[list[float]]  — per inner-gen, fitness of every candidate
@@ -63,6 +66,14 @@ def evaluate_individual(args: tuple) -> dict:
         model = world.spec.compile()
         data = mujoco.MjData(model)
 
+        # Build hinge and floor geom ID sets once per model
+        hinge_geom_ids: set[int] = set()
+        for i in range(model.ngeom):
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i)
+            if name and ("stator" in name or "rotor" in name):
+                hinge_geom_ids.add(i)
+        floor_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+
         adapter = MorphologyAdapter.from_graph(graph)
         brain = DistributedMLP(n_neighbors=N_NEIGHBORS)
 
@@ -75,16 +86,43 @@ def evaluate_individual(args: tuple) -> dict:
         def run_episode(theta: np.ndarray) -> float:
             brain.set_theta(theta)
             mujoco.mj_resetData(model, data)
-            ctrl_step = sim_step = 0
-            while data.time < DURATION:
+
+            # Record spawn height before any steps (penalises falling)
+            core_height = float(data.qpos[2])
+
+            # Settle phase: let robot fall into place, no control, no counting
+            sim_step = 0
+            while data.time < SETTLE_TIME:
+                mujoco.mj_step(model, data)
+                sim_step += 1
+
+            # Rollout phase: count rising-edge hinge-floor contact events only
+            c_hinge = 0
+            ctrl_step = 0
+            active_hinge_contacts: set[frozenset[int]] = set()
+            rollout_end = SETTLE_TIME + DURATION
+            while data.time < rollout_end:
                 if sim_step % CTRL_EVERY == 0:
                     node_inputs, t = adapter.get_node_inputs(model, data, ctrl_step)
                     raw = brain.forward_all(node_inputs, t)
                     data.ctrl[:] = _scale_actions(raw)
                     ctrl_step += 1
                 mujoco.mj_step(model, data)
+                current: set[frozenset[int]] = set()
+                for k in range(data.ncon):
+                    c = data.contact[k]
+                    if ((c.geom1 == floor_geom_id and c.geom2 in hinge_geom_ids) or
+                            (c.geom2 == floor_geom_id and c.geom1 in hinge_geom_ids)):
+                        current.add(frozenset((c.geom1, c.geom2)))
+                c_hinge += len(current - active_hinge_contacts)
+                active_hinge_contacts = current
                 sim_step += 1
-            return float(data.qpos[0])
+
+            if c_hinge > HINGE_CONTACT_LIMIT:
+                return -1.0
+
+            d = float(data.qpos[0])
+            return d - core_height - HINGE_CONTACT_PENALTY * c_hinge
 
         # Evaluate inherited theta before any learning
         if init_mean is not None:

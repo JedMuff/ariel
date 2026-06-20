@@ -115,7 +115,8 @@ def build_ops(
             parent = parent_pool[i % len(parent_pool)]
             child_morph = mutate(parent.genotype_["morph"])
             child = Individual()
-            child.genotype = {"morph": child_morph, "brain": []}
+            parent_brain = parent.genotype_.get("brain") or []
+            child.genotype = {"morph": child_morph, "brain": parent_brain}
             offspring_list.append(child)
 
         pop_out = Population(list(population))

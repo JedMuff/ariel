@@ -22,11 +22,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Defaults
-GENS=100
-INNER_GENS=20
-INNER_POP=16
-POP=20
-LAM=100
+GENS=50
+INNER_GENS=200
+INNER_POP=20
+POP=32
+LAM=32
 WORKERS=""
 REPS=10
 SCHEMES="darwinian,lamarckian,random,random_many,best,best_many,similar,similar_many"
