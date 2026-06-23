@@ -35,40 +35,25 @@ def compactness(body: np.ndarray) -> float:
     return (body > 0).sum() / convex_hull.sum()
 
 
-def elongation(body: np.ndarray) -> float:
-    """
-    Computes elongation of a 2D voxel robot using
-    the ellipse of equal second moments.
-
-    Returns a value in [0, 1).
-    """
-    body = body.astype(bool)
-    coords = np.argwhere(body)
-
-    # Fewer than 2 voxels → no elongation
-    if len(coords) < 2:
+def elongation(body: np.ndarray, n_directions: int = 20) -> float:
+    if n_directions <= 0:
+        raise ValueError("n_directions must be positive")
+    diameters = []
+    coordinates = np.where(body.transpose() > 0)
+    x_coordinates = coordinates[0]
+    y_coordinates = coordinates[1]
+    if len(x_coordinates) == 0 or len(y_coordinates) == 0:
         return 0.0
+    for i in range(n_directions):
+        theta = i * 2 * np.pi / n_directions
+        rotated_x_coordinates = x_coordinates * np.cos(theta) - y_coordinates * np.sin(theta)
+        rotated_y_coordinates = x_coordinates * np.sin(theta) + y_coordinates * np.cos(theta)
+        x_side = np.max(rotated_x_coordinates) - np.min(rotated_x_coordinates) + 1
+        y_side = np.max(rotated_y_coordinates) - np.min(rotated_y_coordinates) + 1
+        diameter = min(x_side, y_side) / max(x_side, y_side)
+        diameters.append(diameter)
 
-    # Center the coordinates
-    coords = coords.astype(float)
-    centroid = coords.mean(axis=0)
-    centered = coords - centroid
-
-    # Covariance matrix (2x2)
-    cov = np.cov(centered, rowvar=False)
-
-    # Eigenvalues (sorted)
-    eigvals = np.linalg.eigvalsh(cov)
-    lambda_min, lambda_max = eigvals
-
-    if lambda_max <= 0:
-        return 0.0
-
-    # Semi-axis ratio
-    b_over_a = np.sqrt(lambda_min / lambda_max)
-
-    # Elongation definition
-    return np.sqrt(1.0 - b_over_a ** 2)
+    return 1 - min(diameters)
 
 
 def symmetry(body: np.ndarray, axis: str = 'horizontal') -> float:
