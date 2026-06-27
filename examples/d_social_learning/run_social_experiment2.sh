@@ -9,9 +9,9 @@
 #SBATCH --job-name=social-full
 #SBATCH --output=out_files/social-%A_%a.out
 #SBATCH --error=out_files/social-%A_%a.err
-#SBATCH --time=100:00:00
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=16G
+#SBATCH --time=24:00:00
+#SBATCH --cpus-per-task=21
+#SBATCH --mem=17G
 #SBATCH --array=0-239
 
 # ---------------------------------------------------------------------------
@@ -35,12 +35,12 @@ cd "$REPO_ROOT"
 SCHEMES=(darwinian lamarckian random random_many best best_many similar similar_many)
 X_VALUES=(0 0.5 1)
 
-GENS=50
-POP=30
-LAM=30
-INNER_GENS=100
+GENS=20
+POP=20
+LAM=20
+INNER_GENS=50
 INNER_POP=20
-WORKERS=16
+WORKERS=20
 
 TASK=$SLURM_ARRAY_TASK_ID
 
