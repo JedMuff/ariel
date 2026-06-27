@@ -89,6 +89,7 @@ class DistributedMLP:
             nn.Linear(hidden, 1),
             nn.Tanh(),
         )
+        self._w1, self._b1, self._w2, self._b2 = self._extract_weights()
 
     @property
     def n_params(self) -> int:
@@ -99,6 +100,16 @@ class DistributedMLP:
             [p.detach().cpu().numpy().ravel() for p in self._net.parameters()]
         ).astype(np.float64)
 
+    def _extract_weights(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return (W1, b1, W2, b2) as float32 numpy arrays, cached until theta changes."""
+        params = list(self._net.parameters())
+        return (
+            params[0].detach().numpy().astype(np.float32),  # (hidden, input_size)
+            params[1].detach().numpy().astype(np.float32),  # (hidden,)
+            params[2].detach().numpy().astype(np.float32),  # (1, hidden)
+            params[3].detach().numpy().astype(np.float32),  # (1,)
+        )
+
     def set_theta(self, theta: np.ndarray) -> None:
         theta = np.asarray(theta, dtype=np.float32)
         offset = 0
@@ -108,6 +119,7 @@ class DistributedMLP:
                 torch.from_numpy(theta[offset : offset + size].reshape(p.shape))
             )
             offset += size
+        self._w1, self._b1, self._w2, self._b2 = self._extract_weights()
 
     def forward_single(
         self,
@@ -116,30 +128,40 @@ class DistributedMLP:
         time_signal: float,
     ) -> float:
         """Return raw tanh output in [-1, 1] for one actuator node."""
-        padded = list(neighbor_obs) + [EMPTY_NODE] * (self.n_neighbors - len(neighbor_obs))
-        padded = padded[: self.n_neighbors]
-
-        parts = [self_obs.to_vector()]
-        for nb in padded:
-            parts.append(nb.to_vector())
-        parts.append(np.array([time_signal], dtype=np.float32))
-
-        x = np.concatenate(parts)
-        t = torch.from_numpy(x).unsqueeze(0)
-        with torch.no_grad():
-            out = self._net(t)
-        return float(out.squeeze())
+        return float(self.forward_all([(self_obs, neighbor_obs)], time_signal)[0])
 
     def forward_all(
         self,
         node_inputs: list[tuple[NodeObservation, list[NodeObservation]]],
         time_signal: float,
     ) -> np.ndarray:
-        """Return shape (n_actuators,) array of tanh outputs in [-1, 1]."""
-        return np.array(
-            [self.forward_single(s, nb, time_signal) for s, nb in node_inputs],
-            dtype=np.float32,
-        )
+        """Return shape (n_actuators,) array of tanh outputs in [-1, 1].
+
+        Builds a single (N, input_size) batch from all node observations and
+        runs one numpy matmul forward pass — avoiding per-node Python and torch
+        overhead.
+        """
+        n = len(node_inputs)
+        input_size = (1 + self.n_neighbors) * self.features_per_node + 1
+        X = np.empty((n, input_size), dtype=np.float32)
+        feat = self.features_per_node
+        k = self.n_neighbors
+
+        for i, (self_obs, neighbor_obs) in enumerate(node_inputs):
+            row = X[i]
+            row[:feat] = self_obs.to_vector()
+            for j, nb in enumerate(neighbor_obs[:k]):
+                row[feat + j * feat : feat + (j + 1) * feat] = nb.to_vector()
+            # zero-pad missing neighbours
+            filled = len(neighbor_obs)
+            if filled < k:
+                row[feat + filled * feat : feat + k * feat] = 0.0
+            row[-1] = time_signal
+
+        # Two-layer MLP: ReLU then Tanh — pure numpy, no torch overhead
+        h = np.maximum(0.0, X @ self._w1.T + self._b1)   # (N, hidden)
+        out = np.tanh(h @ self._w2.T + self._b2)          # (N, 1)
+        return out[:, 0].astype(np.float32)
 
 
 class StandardMLP:
