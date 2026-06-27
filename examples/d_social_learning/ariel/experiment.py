@@ -117,6 +117,7 @@ def build_ops(
             child = Individual()
             parent_brain = parent.genotype_.get("brain") or []
             child.genotype = {"morph": child_morph, "brain": parent_brain}
+            child.tags = {"parent_id": parent.id}
             offspring_list.append(child)
 
         pop_out = Population(list(population))
@@ -162,7 +163,9 @@ def build_ops(
             desc = descs[i]
             fitness = combined_fitness(distance, novelty, x_val)
             ind.fitness = fitness
+            prior = ind.tags_ or {}
             ind.tags = {
+                "parent_id": prior.get("parent_id"),
                 "distance": distance,
                 "novelty": novelty,
                 "descriptor": desc.tolist(),
@@ -170,6 +173,10 @@ def build_ops(
                 "init_fitness": r["init_fitness"],
                 "learning_curve": r["learning_curve"],
                 "donor_ids": r["donor_ids"],
+                "mean_jerk": r.get("mean_jerk", 0.0),
+                "max_joint_vel": r.get("max_joint_vel", 0.0),
+                "glitch_flag": r.get("glitch_flag", False),
+                "c_hinge": r.get("c_hinge", 0),
             }
             ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
 
