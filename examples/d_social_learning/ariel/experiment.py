@@ -132,53 +132,71 @@ def build_ops(
 
         descs = _compute_descriptors(all_alive)
         novelties = compute_novelty(descs)
-        all_state = _pop_state(all_alive)
-        scheme_fn = SCHEMES[scheme_name]
 
-        from ariel.simulation.controllers.distributed_mlp import DistributedMLP
-        n_params = DistributedMLP(n_neighbors=N_NEIGHBORS).n_params
-
-        worker_args = []
-        for i, ind in enumerate(all_alive):
-            init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params)
-            worker_args.append((
-                ind.genotype_["morph"],
-                init_mean_arr.tolist(),
-                donor_ids,
-                inner_gens,
-                inner_pop,
-            ))
-
-        if num_workers > 1:
-            with Pool(processes=num_workers) as pool:
-                results = pool.map(evaluate_individual, worker_args)
+        if x_val == 0.0:
+            # Pure novelty — no simulation needed
+            for i, ind in enumerate(all_alive):
+                novelty = float(novelties[i])
+                desc = descs[i]
+                prior = ind.tags_ or {}
+                ind.fitness = novelty
+                ind.tags = {
+                    "parent_id": prior.get("parent_id"),
+                    "distance": 0.0,
+                    "novelty": novelty,
+                    "descriptor": desc.tolist(),
+                    "theta": prior.get("theta", []),
+                    "init_fitness": 0.0,
+                    "learning_curve": [],
+                    "donor_ids": [],
+                    "mean_jerk": 0.0,
+                    "c_hinge": 0,
+                }
         else:
-            results = [evaluate_individual(a) for a in worker_args]
+            all_state = _pop_state(all_alive)
+            scheme_fn = SCHEMES[scheme_name]
 
-        for i, ind in enumerate(all_alive):
-            r = results[i]
-            distance = r["distance"]
-            theta_list = r["best_theta"]
-            novelty = float(novelties[i])
-            desc = descs[i]
-            fitness = combined_fitness(distance, novelty, x_val)
-            ind.fitness = fitness
-            prior = ind.tags_ or {}
-            ind.tags = {
-                "parent_id": prior.get("parent_id"),
-                "distance": distance,
-                "novelty": novelty,
-                "descriptor": desc.tolist(),
-                "theta": theta_list,
-                "init_fitness": r["init_fitness"],
-                "learning_curve": r["learning_curve"],
-                "donor_ids": r["donor_ids"],
-                "mean_jerk": r.get("mean_jerk", 0.0),
-                "max_joint_vel": r.get("max_joint_vel", 0.0),
-                "glitch_flag": r.get("glitch_flag", False),
-                "c_hinge": r.get("c_hinge", 0),
-            }
-            ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
+            from ariel.simulation.controllers.distributed_mlp import DistributedMLP
+            n_params = DistributedMLP(n_neighbors=N_NEIGHBORS).n_params
+
+            worker_args = []
+            for i, ind in enumerate(all_alive):
+                init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params)
+                worker_args.append((
+                    ind.genotype_["morph"],
+                    init_mean_arr.tolist(),
+                    donor_ids,
+                    inner_gens,
+                    inner_pop,
+                ))
+
+            if num_workers > 1:
+                with Pool(processes=num_workers) as pool:
+                    results = pool.map(evaluate_individual, worker_args)
+            else:
+                results = [evaluate_individual(a) for a in worker_args]
+
+            for i, ind in enumerate(all_alive):
+                r = results[i]
+                distance = r["distance"]
+                theta_list = r["best_theta"]
+                novelty = float(novelties[i])
+                desc = descs[i]
+                prior = ind.tags_ or {}
+                ind.fitness = combined_fitness(distance, novelty, x_val)
+                ind.tags = {
+                    "parent_id": prior.get("parent_id"),
+                    "distance": distance,
+                    "novelty": novelty,
+                    "descriptor": desc.tolist(),
+                    "theta": theta_list,
+                    "init_fitness": r["init_fitness"],
+                    "learning_curve": r["learning_curve"],
+                    "donor_ids": r["donor_ids"],
+                    "mean_jerk": r.get("mean_jerk", 0.0),
+                    "c_hinge": r.get("c_hinge", 0),
+                }
+                ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
 
         combined = Population(all_alive)
         survivors = combined.best(n=mu).to_list()
@@ -219,6 +237,8 @@ def main() -> None:
     parser.add_argument("--inner-gens", type=int, default=20)
     parser.add_argument("--inner-pop", type=int, default=16)
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from existing database.db at the last saved generation")
     args = parser.parse_args()
 
     x_str = str(args.x).replace(".", "")
@@ -227,7 +247,6 @@ def main() -> None:
 
     console.rule(f"[bold cyan]ARIEL | scheme={args.scheme} x={args.x} rep={args.rep}")
 
-    pop = make_initial_population(args.pop)
     ops = build_ops(
         scheme_name=args.scheme,
         x_val=args.x,
@@ -238,13 +257,25 @@ def main() -> None:
         num_workers=args.workers,
     )
 
-    ea = EA(
-        population=pop,
-        operations=ops,
-        num_steps=args.gens,
-        db_file_path=out_dir / "database.db",
-        db_handling="delete",
-    )
+    db_path = out_dir / "database.db"
+
+    if args.resume:
+        resume_db_path = out_dir / "database_part2.db"
+        ea = EA(
+            restart=db_path,
+            operations=ops,
+            num_steps=args.gens,
+            db_file_path=resume_db_path,
+            db_handling="delete",
+        )
+    else:
+        ea = EA(
+            population=make_initial_population(args.pop),
+            operations=ops,
+            num_steps=args.gens,
+            db_file_path=db_path,
+            db_handling="delete",
+        )
     ea.run()
 
     console.rule("[bold green]Done")

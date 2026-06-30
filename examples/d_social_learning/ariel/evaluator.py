@@ -19,9 +19,7 @@ CTRL_EVERY = 100
 N_NEIGHBORS = 6
 HINGE_CONTACT_LIMIT = 200
 HINGE_CONTACT_PENALTY = 0.005
-# Glitch detection thresholds
 JERK_PENALTY_WEIGHT = 0.01   # penalty per unit of mean absolute ctrl delta
-MAX_JOINT_VEL_THRESHOLD = 20.0  # rad/s — flag as glitching above this
 
 
 def _scale_actions(raw: np.ndarray) -> np.ndarray:
@@ -87,7 +85,7 @@ def evaluate_individual(args: tuple) -> dict:
         )
 
         def run_episode(theta: np.ndarray) -> dict:
-            """Run one episode; return fitness dict with glitch diagnostics."""
+            """Run one episode; return fitness and diagnostics."""
             brain.set_theta(theta)
             mujoco.mj_resetData(model, data)
 
@@ -106,15 +104,12 @@ def evaluate_individual(args: tuple) -> dict:
             active_hinge_contacts: set[frozenset[int]] = set()
             prev_ctrl = np.zeros(model.nu, dtype=np.float32)
             jerk_sum = 0.0
-            max_joint_vel = 0.0
-            glitch_flag = False
             rollout_end = SETTLE_TIME + DURATION
             while data.time < rollout_end:
                 if sim_step % CTRL_EVERY == 0:
                     node_inputs, t = adapter.get_node_inputs(model, data, ctrl_step)
                     raw = brain.forward_all(node_inputs, t)
                     new_ctrl = _scale_actions(raw)
-                    # Jerk: mean absolute change in commanded position
                     if ctrl_step > 0:
                         jerk_sum += float(np.mean(np.abs(new_ctrl - prev_ctrl)))
                     prev_ctrl = new_ctrl.copy()
@@ -122,14 +117,6 @@ def evaluate_individual(args: tuple) -> dict:
                     ctrl_step += 1
 
                 mujoco.mj_step(model, data)
-
-                # Velocity spike detection
-                if model.njnt > 0:
-                    step_max_vel = float(np.max(np.abs(data.qvel[:model.njnt])))
-                    if step_max_vel > max_joint_vel:
-                        max_joint_vel = step_max_vel
-                    if step_max_vel > MAX_JOINT_VEL_THRESHOLD:
-                        glitch_flag = True
 
                 # Rising-edge hinge-floor contact events
                 current: set[frozenset[int]] = set()
@@ -144,10 +131,10 @@ def evaluate_individual(args: tuple) -> dict:
 
             mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
 
-            if c_hinge > HINGE_CONTACT_LIMIT:
+            d = float(data.qpos[0])
+            if c_hinge > HINGE_CONTACT_LIMIT or not np.isfinite(d):
                 fitness = -1.0
             else:
-                d = float(data.qpos[0])
                 fitness = (
                     d
                     - core_height
@@ -158,8 +145,6 @@ def evaluate_individual(args: tuple) -> dict:
             return {
                 "fitness": fitness,
                 "mean_jerk": mean_jerk,
-                "max_joint_vel": max_joint_vel,
-                "glitch_flag": glitch_flag,
                 "c_hinge": c_hinge,
             }
 
@@ -193,8 +178,6 @@ def evaluate_individual(args: tuple) -> dict:
             "learning_curve": learning_curve,
             "donor_ids": donor_ids,
             "mean_jerk": best_ep["mean_jerk"],
-            "max_joint_vel": best_ep["max_joint_vel"],
-            "glitch_flag": best_ep["glitch_flag"],
             "c_hinge": best_ep["c_hinge"],
         }
 
