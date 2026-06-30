@@ -5,8 +5,6 @@ Adapted from examples/re_book/6_body_brain_randomized_waypoints.py with
 additions for extended data logging, NSGA-II selection, and repeat evaluations.
 """
 
-from __future__ import annotations
-
 import contextlib
 import copy
 import hashlib
@@ -14,6 +12,7 @@ import json
 import os
 import random
 import threading
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -507,16 +506,20 @@ def train_body_serial(task: dict[str, Any]) -> dict[str, Any]:
     use_vision   = task["use_vision"]
     num_evals    = task.get("num_evals", 1)
 
+    t_start = time.perf_counter()
+
     try:
         ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision)
     except Exception:
         return {"fitness": float("inf"), "weights": None,
-                "learning_curve": [], "trajectory": [], "control_cost": 0.0}
+                "learning_curve": [], "trajectory": [], "control_cost": 0.0,
+                "eval_time_s": time.perf_counter() - t_start}
 
     model: mujoco.MjModel = ctx["model"]
     if model.nu == 0:
         return {"fitness": float("inf"), "weights": None,
-                "learning_curve": [], "trajectory": [], "control_cost": 0.0}
+                "learning_curve": [], "trajectory": [], "control_cost": 0.0,
+                "eval_time_s": time.perf_counter() - t_start}
 
     num_params: int = ctx["num_params"]
     min_lambda = 4 + int(3 * np.log(max(num_params, 2)))
@@ -576,4 +579,5 @@ def train_body_serial(task: dict[str, Any]) -> dict[str, Any]:
         "learning_curve": learning_curve,
         "trajectory":     best_trajectory,
         "control_cost":   best_ctrl_cost,
+        "eval_time_s":    time.perf_counter() - t_start,
     }

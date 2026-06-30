@@ -13,8 +13,6 @@ Data saved per individual during evolution (run_data.jsonl):
   food_positions, control_cost, yz_symmetry
 """
 
-from __future__ import annotations
-
 import argparse
 import gc
 import json
@@ -108,9 +106,13 @@ DATA = Path.cwd() / "__data__" / SCRIPT_NAME
 DATA.mkdir(exist_ok=True, parents=True)
 CHECKPOINTS = DATA / "checkpoints"
 CHECKPOINTS.mkdir(exist_ok=True, parents=True)
-JSONL_PATH = DATA / "run_data.jsonl"
+JSONL_PATH  = DATA / "run_data.jsonl"
+TIMING_PATH = DATA / "timing.jsonl"
 
 RNG = np.random.default_rng(BASE_SEED)
+
+with (DATA / "run_config.json").open("w") as _fh:
+    json.dump(vars(args), _fh, indent=2)
 
 # ── Episode runner (food collection) ─────────────────────────────────────────
 
@@ -273,12 +275,15 @@ class BodyBrainEvolution:
         assert self.executor is not None
         t0 = time.time()
         results = list(self.executor.map(_train_food_worker, tasks))
-        elapsed = time.time() - t0
+        wall_elapsed = time.time() - t0
 
+        eval_times: list[float] = []
         for idx, (ind, res) in enumerate(zip(to_eval, results)):
             best_fit   = float(res["fitness"])
             best_w_lst = res["weights"]
             best_w     = np.array(best_w_lst) if best_w_lst is not None else None
+            eval_time  = float(res.get("eval_time_s", 0.0))
+            eval_times.append(eval_time)
 
             ind.fitness = best_fit if np.isfinite(best_fit) else float("inf")
             ind.tags = {
@@ -289,6 +294,7 @@ class BodyBrainEvolution:
                 "control_cost":   res.get("control_cost", 0.0),
                 "yz_symmetry":    bilateral_symmetry_score(ind.genotype["morph"]),
                 "food_positions": food_positions,
+                "eval_time_s":    eval_time,
             }
             ind.requires_eval = False
 
@@ -304,7 +310,8 @@ class BodyBrainEvolution:
         finite = [r["fitness"] for r in results if np.isfinite(r["fitness"])]
         stats = (f"min={np.min(finite):.3f}  avg={np.mean(finite):.3f}"
                  if finite else "all-infinite")
-        console.log(f"  {len(to_eval)} bodies in {elapsed:.1f}s  {stats}")
+        console.log(f"  {len(to_eval)} bodies in {wall_elapsed:.1f}s  {stats}")
+        self._write_timing(wall_elapsed, eval_times)
 
         self.outer_gen += 1
         return population
@@ -369,8 +376,24 @@ class BodyBrainEvolution:
             "food_positions": food_positions,
             "control_cost":   ind.tags.get("control_cost", 0.0),
             "yz_symmetry":    ind.tags.get("yz_symmetry", 0.0),
+            "genome_hash":    genome_hash(ind.genotype["morph"]),
+            "eval_time_s":    ind.tags.get("eval_time_s", 0.0),
         }
         with JSONL_PATH.open("a") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    def _write_timing(self, wall_elapsed: float, eval_times: list[float]) -> None:
+        n = len(eval_times)
+        record = {
+            "gen":                self.outer_gen,
+            "n_individuals":      n,
+            "wall_time_s":        round(wall_elapsed, 3),
+            "mean_eval_time_s":   round(float(np.mean(eval_times)) if eval_times else 0.0, 3),
+            "min_eval_time_s":    round(float(np.min(eval_times)) if eval_times else 0.0, 3),
+            "max_eval_time_s":    round(float(np.max(eval_times)) if eval_times else 0.0, 3),
+            "total_eval_time_s":  round(float(np.sum(eval_times)) if eval_times else 0.0, 3),
+        }
+        with TIMING_PATH.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
 
     def _save_checkpoint(self, tag: str) -> None:
@@ -383,6 +406,19 @@ class BodyBrainEvolution:
             np.save(sub / "best_waypoints.npy", np.array(self.best_seen_waypoints))
         with (sub / "best_genome.json").open("w") as fh:
             json.dump(self.best_seen_genotype, fh, indent=2)
+        from shared import bilateral_symmetry_score as _bss
+        from ariel.ec.genotypes.tree.tree_genome import TreeGenome as _TG
+        try:
+            num_mods = len(_TG.from_dict(self.best_seen_genotype).nodes)
+        except Exception:
+            num_mods = 0
+        with (sub / "meta.json").open("w") as fh:
+            json.dump({
+                "gen":          self.outer_gen,
+                "fitness":      self.best_seen_fitness,
+                "yz_symmetry":  _bss(self.best_seen_genotype),
+                "num_modules":  num_mods,
+            }, fh, indent=2)
         console.log(f"  [cyan]checkpoint → {sub}  fitness={self.best_seen_fitness:.3f}[/cyan]")
 
     # -- main -----------------------------------------------------------------
