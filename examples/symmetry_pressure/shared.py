@@ -46,7 +46,6 @@ from ariel.ec.genotypes.tree.tree_genome import TreeGenome
 from ariel.ec.genotypes.tree.validation import validate_genome_dict
 from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
 from ariel.simulation.environments import SimpleFlatWorld
-from ariel.utils.morphological_descriptor import MorphologicalMeasures
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -56,6 +55,19 @@ RING_R_MIN = 0.5
 RING_R_MAX = 1.0
 GATE_HALF_HEIGHT = 0.15
 SPAWN_POSITION = (0.0, 0.0, 0.1)
+
+# Thread-safe counter for assigning individual IDs (Individual.id is a DB
+# primary key and stays None when not persisted to SQLite).
+_ind_id_lock = threading.Lock()
+_ind_id_counter = 0
+
+
+def _next_ind_id() -> int:
+    global _ind_id_counter
+    with _ind_id_lock:
+        _ind_id_counter += 1
+        return _ind_id_counter
+
 
 # ── Neural network ────────────────────────────────────────────────────────────
 
@@ -191,13 +203,70 @@ def genome_hash(genome_dict: dict) -> str:
 
 
 def bilateral_symmetry_score(genome_dict: dict) -> float:
-    """YZ-plane symmetry (bilateral) of a TreeGenome. Returns 0.0 on failure."""
+    """Left-right (XZ-plane) bilateral symmetry of a TreeGenome.
+
+    Computes positions of all modules relative to the root via BFS, then
+    counts how many modules at (x, y, z) have a mirror at (x, -y, z) of
+    the same type. Returns fraction of non-midline modules that are matched,
+    in [0, 1]. Returns 0.0 on failure.
+    """
     try:
         graph = TreeGenome.from_dict(genome_dict).to_networkx()
         if graph.number_of_nodes() == 0:
             return 0.0
-        m = MorphologicalMeasures(graph)
-        return float(m.yz_symmetry)
+
+        # Find root (no predecessors)
+        roots = [n for n in graph.nodes() if graph.in_degree(n) == 0]
+        if not roots:
+            return 0.0
+        root = roots[0]
+
+        # BFS to assign integer (x, y, z) grid positions.
+        # Edge attribute 'face' encodes direction: FRONT=+x, BACK=-x,
+        # RIGHT=+y, LEFT=-y, TOP=+z, BOTTOM=-z.
+        face_to_delta = {
+            "FRONT":  ( 1,  0,  0),
+            "BACK":   (-1,  0,  0),
+            "RIGHT":  ( 0,  1,  0),
+            "LEFT":   ( 0, -1,  0),
+            "TOP":    ( 0,  0,  1),
+            "BOTTOM": ( 0,  0, -1),
+        }
+        pos: dict[Any, tuple[int, int, int]] = {root: (0, 0, 0)}
+        queue = [root]
+        while queue:
+            node = queue.pop(0)
+            for child in graph.successors(node):
+                if child in pos:
+                    continue
+                face = (graph.get_edge_data(node, child) or {}).get("face", "FRONT")
+                dx, dy, dz = face_to_delta.get(face, (1, 0, 0))
+                px, py, pz = pos[node]
+                pos[child] = (px + dx, py + dy, pz + dz)
+                queue.append(child)
+
+        def node_type(n: Any) -> str:
+            return graph.nodes[n].get("type", "UNKNOWN")
+
+        # Build lookup: (x, y, z) -> type
+        grid: dict[tuple[int, int, int], str] = {p: node_type(n) for n, p in pos.items()}
+
+        num_symmetrical = 0
+        num_off_midline = 0
+        seen: set[tuple[int, int, int]] = set()
+        for (x, y, z), t in grid.items():
+            if y == 0:
+                continue  # midline module, skip
+            if (x, y, z) in seen:
+                continue
+            seen.add((x, y, z))
+            seen.add((x, -y, z))
+            num_off_midline += 1
+            mirror = grid.get((x, -y, z))
+            if mirror == t:
+                num_symmetrical += 1
+
+        return num_symmetrical / num_off_midline if num_off_midline > 0 else 0.0
     except Exception:
         return 0.0
 
@@ -434,6 +503,7 @@ def create_individual(num_modules: int, max_depth: int) -> Individual:
         if joint_count(genome) >= MIN_HINGES and validate_tree_depth(genome, max_depth):
             break
     ind = Individual()
+    ind.id = _next_ind_id()
     ind.genotype = {"morph": genome.to_dict()}
     ind.tags = {"ps": False, "valid": True, "best_brain": []}
     return ind
@@ -474,6 +544,7 @@ def make_offspring(
             attempts += 1
 
         child = Individual()
+        child.id = _next_ind_id()
         child.genotype = {"morph": child_morph.to_dict(), "parent_ids": parent_ids}
         child.tags = {"ps": False, "valid": valid, "best_brain": []}
         child.requires_eval = True
