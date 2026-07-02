@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-REPO=/home/jed/workspaces/ariel
+REPO=/home/jed/workspaces/ariel-symmetry/ariel
 VENV_PATH=$REPO/.venv
 SCRIPTS_DIR=$REPO/examples/symmetry_pressure
 
