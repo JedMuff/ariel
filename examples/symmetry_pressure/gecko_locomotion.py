@@ -16,12 +16,10 @@ Data saved per individual during evolution (run_data.jsonl):
 import argparse
 import gc
 import json
-import multiprocessing as mp
 import os
 import random
 import time
 import warnings
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,11 +44,11 @@ from shared import (
     fill_parameters,
     genome_hash,
     genome_input_dim,
-    init_worker,
     make_offspring,
     mutate_morph,
     nsga2_survivor_selection,
-    train_body_serial,
+    register_episode_fn,
+    train_body_parallel,
 )
 
 install()
@@ -114,6 +112,7 @@ def run_episode_locomotion(
     ctx: dict[str, Any],
     waypoints: Any,  # unused for locomotion; kept for uniform interface
     weights: np.ndarray,
+    record: bool = False,
 ) -> dict[str, Any]:
     model: mujoco.MjModel = ctx["model"]
     data: mujoco.MjData   = ctx["data"]
@@ -135,11 +134,11 @@ def run_episode_locomotion(
             current_action = network.forward(model, data, state)
 
         data.ctrl[:] = current_action
-        ctrl_history.append(current_action.copy())
+        if record:
+            ctrl_history.append(current_action.copy())
+            if step % control_step_freq == 0:
+                trajectory.append([float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2])])
         mujoco.mj_step(model, data)
-
-        if step % control_step_freq == 0:
-            trajectory.append([float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2])])
 
         step += 1
 
@@ -153,16 +152,18 @@ def run_episode_locomotion(
     }
 
 
-# ── Wrapper for ProcessPoolExecutor (locomotion) ──────────────────────────────
+_EPISODE_FN_NAME = "locomotion"
+register_episode_fn(_EPISODE_FN_NAME, run_episode_locomotion)
 
 
 def _train_locomotion_worker(task: dict[str, Any]) -> dict[str, Any]:
-    task["episode_fn"]   = run_episode_locomotion
-    task["use_vision"]   = False
-    task["waypoints"]    = None
-    task["reach_radius"] = 0.0
-    task["arena_radius"] = 1.0
-    return train_body_serial(task)
+    task["episode_fn"]      = run_episode_locomotion
+    task["episode_fn_name"] = _EPISODE_FN_NAME
+    task["use_vision"]      = False
+    task["waypoints"]       = None
+    task["reach_radius"]    = 0.0
+    task["arena_radius"]    = 1.0
+    return train_body_parallel(task)
 
 
 # ── BodyBrainEvolution ────────────────────────────────────────────────────────
@@ -178,7 +179,6 @@ class BodyBrainEvolution:
             db_file_name=f"database_{int(time.time())}.db",
             db_handling="delete",
         )
-        self.executor: Optional[ProcessPoolExecutor] = None
         self.outer_gen: int = 0
         self.best_seen_fitness:  float = float("inf")
         self.best_seen_genotype: Optional[dict] = None
@@ -221,15 +221,15 @@ class BodyBrainEvolution:
                 "rng_seed":     BASE_SEED + 1000 * self.outer_gen + idx,
                 "brain_budget": BRAIN_BUDGET,
                 "brain_pop":    BRAIN_POP,
+                "brain_workers": BRAIN_WORKERS,
                 "duration":     DURATION,
                 "num_evals":    NUM_EVALS,
             }
             for idx, ind in enumerate(to_eval)
         ]
 
-        assert self.executor is not None
         t0 = time.time()
-        results = list(self.executor.map(_train_locomotion_worker, tasks))
+        results = [_train_locomotion_worker(t) for t in tasks]
         wall_elapsed = time.time() - t0
 
         eval_times: list[float] = []
@@ -380,32 +380,24 @@ class BodyBrainEvolution:
         console.log("[yellow]Initialising population...[/yellow]")
         population = Population([create_individual(NUM_MODULES, MAX_DEPTH) for _ in range(MU)])
 
-        with ProcessPoolExecutor(
-            max_workers=BRAIN_WORKERS,
-            mp_context=mp.get_context("spawn"),
-            initializer=init_worker,
-            initargs=(BASE_SEED,),
-        ) as executor:
-            self.executor = executor
-            population = self.evaluate(population)
+        population = self.evaluate(population)
 
-            ops = [
-                EAOperation(self.parent_selection),
-                EAOperation(self.reproduction),
-                EAOperation(self.evaluate),
-                EAOperation(self.survivor_selection),
-            ]
-            ea = EA(
-                population,
-                operations=ops,
-                num_steps=BUDGET,
-                db_file_path=self.config.db_file_path,
-                db_handling=self.config.db_handling,
-                quiet=self.config.quiet,
-            )
-            ea.run()
-            self.executor = None
-            return ea.get_solution("best", only_alive=False)
+        ops = [
+            EAOperation(self.parent_selection),
+            EAOperation(self.reproduction),
+            EAOperation(self.evaluate),
+            EAOperation(self.survivor_selection),
+        ]
+        ea = EA(
+            population,
+            operations=ops,
+            num_steps=BUDGET,
+            db_file_path=self.config.db_file_path,
+            db_handling=self.config.db_handling,
+            quiet=self.config.quiet,
+        )
+        ea.run()
+        return ea.get_solution("best", only_alive=False)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

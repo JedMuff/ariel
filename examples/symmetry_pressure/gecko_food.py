@@ -121,6 +121,7 @@ def run_episode_food(
     ctx: dict[str, Any],
     waypoints: list[np.ndarray],
     weights: np.ndarray,
+    record: bool = False,
 ) -> dict[str, Any]:
     model: mujoco.MjModel  = ctx["model"]
     data: mujoco.MjData    = ctx["data"]
@@ -158,10 +159,12 @@ def run_episode_food(
             state = np.concatenate([robot_state, vision, phase, progress]).astype(np.float32)
             current_action = network.forward(model, data, state)
 
-            trajectory.append([float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2])])
+            if record:
+                trajectory.append([float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2])])
 
         data.ctrl[:] = current_action
-        ctrl_history.append(current_action.copy())
+        if record:
+            ctrl_history.append(current_action.copy())
         mujoco.mj_step(model, data)
         step += 1
 

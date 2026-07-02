@@ -9,6 +9,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import multiprocessing as mp
 import os
 import random
 import threading
@@ -555,30 +556,71 @@ def make_offspring(
     return offspring
 
 
-# ── Inner CMA-ES (train one body serially in worker) ─────────────────────────
+# ── Inner CMA-ES (train one body, candidates evaluated in parallel) ───────────
+
+# Registry so subprocess workers can look up episode functions by name without
+# pickling the callable itself.
+_EPISODE_FN_REGISTRY: dict[str, Any] = {}
 
 
-def train_body_serial(task: dict[str, Any]) -> dict[str, Any]:
-    """Run the full inner CMA-ES brain search in this process.
+def register_episode_fn(name: str, fn: Any) -> None:
+    _EPISODE_FN_REGISTRY[name] = fn
+
+
+def _eval_candidate_worker(job: dict[str, Any]) -> float:
+    """Evaluate one candidate weight vector in a subprocess.
+
+    Rebuilds (or reuses cached) ctx for the body, then runs the episode
+    function looked up by name from the registry.
+    """
+    body_hash    = job["body_hash"]
+    genome_dict  = job["genome_dict"]
+    weights      = job["weights"]
+    waypoints    = job["waypoints"]
+    reach_radius = job["reach_radius"]
+    arena_radius = job["arena_radius"]
+    use_vision   = job["use_vision"]
+    episode_fn_name = job["episode_fn_name"]
+    num_evals    = job["num_evals"]
+
+    episode_fn = _EPISODE_FN_REGISTRY[episode_fn_name]
+    try:
+        ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision)
+    except Exception:
+        return float("inf")
+
+    total_fit = 0.0
+    for _ in range(num_evals):
+        result = episode_fn(ctx, waypoints, weights)
+        total_fit += result["fitness"]
+    return total_fit / num_evals
+
+
+def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
+    """Run the full inner CMA-ES brain search with parallelised candidate evaluation.
 
     Returns dict with keys:
       fitness, weights, learning_curve, trajectory, control_cost
     """
-    body_hash    = task["body_hash"]
-    genome_dict  = task["genome_dict"]
-    waypoints    = task["waypoints"]     # list[np.ndarray] or None for locomotion
-    rng_seed     = task["rng_seed"]
-    brain_budget = task["brain_budget"]
-    brain_pop    = task["brain_pop"]
-    duration     = task["duration"]
-    reach_radius = task["reach_radius"]
-    arena_radius = task["arena_radius"]
-    episode_fn   = task["episode_fn"]   # callable(ctx, waypoints, weights) -> EpisodeResult
-    use_vision   = task["use_vision"]
-    num_evals    = task.get("num_evals", 1)
+    body_hash       = task["body_hash"]
+    genome_dict     = task["genome_dict"]
+    waypoints       = task["waypoints"]
+    rng_seed        = task["rng_seed"]
+    brain_budget    = task["brain_budget"]
+    brain_pop       = task["brain_pop"]
+    duration        = task["duration"]
+    reach_radius    = task["reach_radius"]
+    arena_radius    = task["arena_radius"]
+    episode_fn_name = task["episode_fn_name"]
+    episode_fn      = task["episode_fn"]
+    use_vision      = task["use_vision"]
+    num_evals       = task.get("num_evals", 1)
+    brain_workers   = task.get("brain_workers", 1)
 
     t_start = time.perf_counter()
 
+    # Build ctx in the main process to validate the body and get num_params,
+    # but each subprocess will build its own copy via ensure_ctx_for_body.
     try:
         ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision)
     except Exception:
@@ -605,50 +647,57 @@ def train_body_serial(task: dict[str, Any]) -> dict[str, Any]:
     optimizer = cma_config(
         parametrization=param,
         budget=brain_budget * pop_size,
-        num_workers=1,
+        num_workers=brain_workers,
     )
 
     best_fit: float = float("inf")
     best_w: Optional[np.ndarray] = None
-    best_trajectory: list[list[float]] = []
-    best_ctrl_cost: float = 0.0
     learning_curve: list[float] = []
 
-    for _ in range(brain_budget):
-        candidates = [optimizer.ask() for _ in range(pop_size)]
-        gen_best_fit = float("inf")
-        gen_best_w: Optional[np.ndarray] = None
-        gen_best_result: Optional[dict[str, Any]] = None
+    jobs_base = {
+        "body_hash":      body_hash,
+        "genome_dict":    genome_dict,
+        "waypoints":      waypoints,
+        "reach_radius":   reach_radius,
+        "arena_radius":   arena_radius,
+        "use_vision":     use_vision,
+        "episode_fn_name": episode_fn_name,
+        "num_evals":      num_evals,
+    }
 
-        for cand in candidates:
-            total_fit = 0.0
-            last_result: Optional[dict[str, Any]] = None
-            for _ev in range(num_evals):
-                result = episode_fn(ctx, waypoints, cand.value)
-                total_fit += result["fitness"]
-                last_result = result
-            avg_fit = total_fit / num_evals
+    with ProcessPoolExecutor(
+        max_workers=brain_workers,
+        mp_context=mp.get_context("spawn"),
+        initializer=init_worker,
+        initargs=(rng_seed,),
+    ) as pool:
+        for _ in range(brain_budget):
+            candidates = [optimizer.ask() for _ in range(pop_size)]
+            jobs = [{**jobs_base, "weights": cand.value} for cand in candidates]
+            fits = list(pool.map(_eval_candidate_worker, jobs))
 
-            optimizer.tell(cand, avg_fit)
-            if avg_fit < gen_best_fit:
-                gen_best_fit = avg_fit
-                gen_best_w = cand.value.copy()
-                gen_best_result = last_result
+            gen_best_fit = float("inf")
+            gen_best_w: Optional[np.ndarray] = None
+            for cand, avg_fit in zip(candidates, fits):
+                optimizer.tell(cand, avg_fit)
+                if avg_fit < gen_best_fit:
+                    gen_best_fit = avg_fit
+                    gen_best_w = cand.value.copy()
 
-        if gen_best_fit < best_fit:
-            best_fit = gen_best_fit
-            best_w = gen_best_w
-            if gen_best_result is not None:
-                best_trajectory = gen_best_result.get("trajectory", [])
-                best_ctrl_cost  = gen_best_result.get("control_cost", 0.0)
+            if gen_best_fit < best_fit:
+                best_fit = gen_best_fit
+                best_w = gen_best_w
 
-        learning_curve.append(best_fit)
+            learning_curve.append(best_fit)
+
+    # Single recording pass with the best weights found
+    final_result = episode_fn(ctx, waypoints, best_w if best_w is not None else np.zeros(num_params), record=True)
 
     return {
         "fitness":        best_fit,
         "weights":        best_w.tolist() if best_w is not None else None,
         "learning_curve": learning_curve,
-        "trajectory":     best_trajectory,
-        "control_cost":   best_ctrl_cost,
+        "trajectory":     final_result.get("trajectory", []),
+        "control_cost":   final_result.get("control_cost", 0.0),
         "eval_time_s":    time.perf_counter() - t_start,
     }
