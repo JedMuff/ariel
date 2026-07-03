@@ -2,18 +2,20 @@
 #
 # Symmetry-pressure investigation — integration test run.
 #
-# Four locomotion jobs (one per strategy), using the parameters from
-# INTEGRATION_TEST_PLAN.md.  Each runs for ~20-25 min on 32 CPUs.
+# Five locomotion jobs (one per strategy + new-fitness plus), using the
+# parameters from INTEGRATION_TEST_PLAN.md.  Each runs for ~20-25 min on
+# 32 CPUs.
 #
 # Submit:
 #   cd /home/jed/workspaces/ariel
 #   sbatch slurm/run_symmetry_integration_test.sh
 #
 # Array index → strategy:
-#   0 = plus
-#   1 = comma
-#   2 = nsga2-efficiency
-#   3 = nsga2-symmetry
+#   0 = plus               (original fitness)
+#   1 = comma              (original fitness)
+#   2 = nsga2-efficiency   (original fitness)
+#   3 = nsga2-symmetry     (original fitness)
+#   4 = plus-new-fitness   (new fitness: x_disp - init_height - 0.005*c_hinge)
 
 #SBATCH --job-name=ariel-sym-inttest
 #SBATCH --output=out_files/ariel-sym-inttest-%A_%a.out
@@ -21,7 +23,7 @@
 #SBATCH --time=4:00:00
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=31G
-#SBATCH --array=0-3
+#SBATCH --array=0-4
 #SBATCH --gres=gpu:1
 
 set -euo pipefail
@@ -30,15 +32,22 @@ REPO=/home/jed/workspaces/ariel-symmetry/ariel
 VENV_PATH=$REPO/.venv
 SCRIPTS_DIR=$REPO/examples/symmetry_pressure
 
-STRATEGIES=(plus comma nsga2-efficiency nsga2-symmetry)
-SEEDS=(42 43 44 45)
+STRATEGIES=(plus comma nsga2-efficiency nsga2-symmetry plus)
+SEEDS=(42 43 44 45 42)
 
 STRATEGY=${STRATEGIES[$SLURM_ARRAY_TASK_ID]}
 SEED=${SEEDS[$SLURM_ARRAY_TASK_ID]}
 
+# Tag distinguishes the new-fitness run from the original plus run
+if [ "$SLURM_ARRAY_TASK_ID" -eq 4 ]; then
+    RUN_LABEL=plus-new-fitness
+else
+    RUN_LABEL=$STRATEGY
+fi
+
 TMP_DIR=/tmp/${USER}/ariel_inttest_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}
 FINAL_DIR=/scratch/jed/ariel_symmetry_integration_test
-RUN_TAG=inttest_${STRATEGY}_${SLURM_JOB_ID}
+RUN_TAG=inttest_${RUN_LABEL}_${SLURM_JOB_ID}
 
 # ── Environment ───────────────────────────────────────────────────────────────
 
@@ -54,7 +63,7 @@ export MUJOCO_GL=egl
 echo "========================================================"
 echo "Node:           $(hostname)"
 echo "Job:            $SLURM_JOB_ID   Array: $SLURM_ARRAY_TASK_ID"
-echo "Strategy:       $STRATEGY"
+echo "Strategy:       $STRATEGY  (label: $RUN_LABEL)"
 echo "Seed:           $SEED"
 echo "CPUs:           $SLURM_CPUS_PER_TASK"
 echo "MUJOCO_GL:      $MUJOCO_GL"
