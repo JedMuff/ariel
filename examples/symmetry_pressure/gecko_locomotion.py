@@ -66,7 +66,7 @@ parser.add_argument("--lam",           type=int,   default=20,  help="lambda")
 parser.add_argument("--brain-budget",  type=int,   default=500, help="CMA inner generations")
 parser.add_argument("--brain-pop",     type=int,   default=20)
 parser.add_argument("--brain-workers", type=int,   default=max(1, os.cpu_count() or 1))
-parser.add_argument("--dur",           type=float, default=15.0, help="Episode duration (s)")
+parser.add_argument("--dur",           type=float, default=30.0, help="Episode duration (s)")
 parser.add_argument("--max-modules",   type=int,   default=25)
 parser.add_argument("--max-depth",     type=int,   default=25)
 parser.add_argument("--seed",          type=int,   default=42)
@@ -74,8 +74,8 @@ parser.add_argument("--strategy-type",
                     choices=["plus", "comma", "nsga2-efficiency", "nsga2-symmetry"],
                     default="plus",
                     help="Survivor selection strategy")
-parser.add_argument("--num-evals",     type=int,   default=1,
-                    help="Evaluations per individual per generation (>1 = re-evaluation)")
+parser.add_argument("--repeat-evals",  action="store_true",
+                    help="Re-evaluate parents each generation (plus strategy only)")
 parser.add_argument("--no-video",      action="store_true")
 args = parser.parse_args()
 
@@ -90,7 +90,7 @@ NUM_MODULES   = args.max_modules
 MAX_DEPTH     = args.max_depth
 BASE_SEED     = args.seed
 STRATEGY      = args.strategy_type
-NUM_EVALS     = args.num_evals
+REPEAT_EVALS  = args.repeat_evals
 
 SCRIPT_NAME = Path(__file__).stem
 DATA = Path.cwd() / "__data__" / SCRIPT_NAME
@@ -108,8 +108,9 @@ with (DATA / "run_config.json").open("w") as _fh:
 # ── Episode runner (locomotion) ───────────────────────────────────────────────
 
 SETTLE_DURATION = 3.0   # seconds of zero-action settling before the episode starts
-HINGE_CONTACT_LIMIT = 200  # c_hinge threshold above which fitness = -1 (glitch penalty)
+HINGE_CONTACT_LIMIT = 200  # c_hinge threshold above which glitch penalty applies
 HINGE_CONTACT_PENALTY = 0.005  # per hinge-floor contact step
+HINGE_GLITCH_FITNESS = 1.0  # penalty fitness for glitched morphologies (must be > any real fitness)
 
 
 def _build_hinge_geom_ids(model: mujoco.MjModel) -> set[int]:
@@ -187,7 +188,7 @@ def run_episode_locomotion(
     x_displacement = x_final - x0
 
     if c_hinge >= HINGE_CONTACT_LIMIT:
-        fitness = -1.0
+        fitness = HINGE_GLITCH_FITNESS
     else:
         # Maximise: x_displacement - initial_height - contact_penalty
         # Negated here because the framework minimises
@@ -248,7 +249,7 @@ class BodyBrainEvolution:
             parents = list(population)
         offspring = make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH)
 
-        if NUM_EVALS > 1:
+        if STRATEGY == "plus" and REPEAT_EVALS:
             for ind in parents:
                 ind.requires_eval = True
 
@@ -272,7 +273,6 @@ class BodyBrainEvolution:
                 "brain_pop":    BRAIN_POP,
                 "brain_workers": BRAIN_WORKERS,
                 "duration":     DURATION,
-                "num_evals":    NUM_EVALS,
             }
             for idx, ind in enumerate(to_eval)
         ]
@@ -470,7 +470,7 @@ def main() -> None:
     console.log(
         f"strategy={STRATEGY}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
         f"brain_budget={BRAIN_BUDGET}  brain_pop={BRAIN_POP}  "
-        f"num_evals={NUM_EVALS}  seed={BASE_SEED}"
+        f"repeat_evals={REPEAT_EVALS}  seed={BASE_SEED}"
     )
 
     start = time.time()

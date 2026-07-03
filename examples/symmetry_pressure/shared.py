@@ -581,19 +581,14 @@ def _eval_candidate_worker(job: dict[str, Any]) -> float:
     arena_radius = job["arena_radius"]
     use_vision   = job["use_vision"]
     episode_fn_name = job["episode_fn_name"]
-    num_evals    = job["num_evals"]
-
     episode_fn = _EPISODE_FN_REGISTRY[episode_fn_name]
     try:
         ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision)
     except Exception:
         return float("inf")
 
-    total_fit = 0.0
-    for _ in range(num_evals):
-        result = episode_fn(ctx, waypoints, weights)
-        total_fit += result["fitness"]
-    return total_fit / num_evals
+    result = episode_fn(ctx, waypoints, weights)
+    return result["fitness"]
 
 
 def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
@@ -614,7 +609,6 @@ def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
     episode_fn_name = task["episode_fn_name"]
     episode_fn      = task["episode_fn"]
     use_vision      = task["use_vision"]
-    num_evals       = task.get("num_evals", 1)
     brain_workers   = task.get("brain_workers", 1)
 
     t_start = time.perf_counter()
@@ -662,7 +656,7 @@ def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
         "arena_radius":   arena_radius,
         "use_vision":     use_vision,
         "episode_fn_name": episode_fn_name,
-        "num_evals":      num_evals,
+
     }
 
     with ProcessPoolExecutor(

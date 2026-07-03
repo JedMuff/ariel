@@ -6,7 +6,7 @@ Outer loop:  (mu+lambda | mu,lambda | nsga2-efficiency | nsga2-symmetry) ES
 Inner loop:  CMA-ES (nevergrad) over neural-network brain weights.
 Task:        Collect food items (waypoints) in sequence. Proprioception + camera.
 Fitness:     -(waypoints_reached + d_norm - initial_height - 0.005*c_hinge)
-             or -1 if c_hinge >= 200 (glitch penalty).
+             or +1 if c_hinge >= 200 (glitch penalty; worse than any real score).
              d_norm = clamp((RING_R_MAX - min_dist) / RING_R_MAX, 0, 1).
              3-second zero-action settling phase precedes the active episode;
              initial_height is the core z-height measured after settling.
@@ -84,7 +84,8 @@ parser.add_argument("--seed",          type=int,   default=42)
 parser.add_argument("--strategy-type",
                     choices=["plus", "comma", "nsga2-efficiency", "nsga2-symmetry"],
                     default="plus")
-parser.add_argument("--num-evals",     type=int,   default=1)
+parser.add_argument("--repeat-evals",  action="store_true",
+                    help="Re-evaluate parents each generation (plus strategy only)")
 parser.add_argument("--no-video",      action="store_true")
 args = parser.parse_args()
 
@@ -102,7 +103,7 @@ NUM_MODULES   = args.max_modules
 MAX_DEPTH     = args.max_depth
 BASE_SEED     = args.seed
 STRATEGY      = args.strategy_type
-NUM_EVALS     = args.num_evals
+REPEAT_EVALS  = args.repeat_evals
 
 SCRIPT_NAME = Path(__file__).stem
 DATA = Path.cwd() / "__data__" / SCRIPT_NAME
@@ -120,8 +121,9 @@ with (DATA / "run_config.json").open("w") as _fh:
 # ── Episode runner (food collection) ─────────────────────────────────────────
 
 SETTLE_DURATION     = 3.0   # seconds of zero-action settling before the episode
-HINGE_CONTACT_LIMIT = 200   # c_hinge threshold above which fitness = -1
+HINGE_CONTACT_LIMIT = 200   # c_hinge threshold above which glitch penalty applies
 HINGE_CONTACT_PENALTY = 0.005
+HINGE_GLITCH_FITNESS = 1.0  # penalty fitness for glitched morphologies (must be > any real fitness)
 
 
 def _build_hinge_geom_ids(model: mujoco.MjModel) -> set[int]:
@@ -240,7 +242,7 @@ def run_episode_food(
     d_norm = float(np.clip((RING_R_MAX - final_dist) / RING_R_MAX, 0.0, 1.0))
 
     if c_hinge >= HINGE_CONTACT_LIMIT:
-        fitness = -1.0
+        fitness = HINGE_GLITCH_FITNESS
     else:
         fitness = -(waypoints_reached + d_norm - initial_height - HINGE_CONTACT_PENALTY * c_hinge)
 
@@ -297,7 +299,7 @@ class BodyBrainEvolution:
             parents = list(population)
         offspring = make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH)
 
-        if STRATEGY == "comma" or NUM_EVALS > 1:
+        if STRATEGY == "plus" and REPEAT_EVALS:
             for ind in parents:
                 ind.requires_eval = True
 
@@ -328,7 +330,6 @@ class BodyBrainEvolution:
                 "duration":     DURATION,
                 "reach_radius": REACH_RADIUS,
                 "arena_radius": ARENA_RADIUS,
-                "num_evals":    NUM_EVALS,
             }
             for idx, ind in enumerate(to_eval)
         ]
@@ -538,7 +539,7 @@ def main() -> None:
     console.log(
         f"strategy={STRATEGY}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
         f"brain_budget={BRAIN_BUDGET}  brain_pop={BRAIN_POP}  "
-        f"num_evals={NUM_EVALS}  waypoints={NUM_WAYPOINTS}  seed={BASE_SEED}"
+        f"repeat_evals={REPEAT_EVALS}  waypoints={NUM_WAYPOINTS}  seed={BASE_SEED}"
     )
 
     start = time.time()
