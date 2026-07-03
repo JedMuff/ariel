@@ -6,24 +6,25 @@
 #   task           × [locomotion, food]                              = 2
 #   strategy-type  × [plus, comma, nsga2-efficiency, nsga2-symmetry] = 4
 #   brain-budget   × [200, 500, 1000]                                = 3
-#   repeat-eval    × [off (1), on (3)]                               = 2
+#   repeat-eval    × [off, on]                                        = 2
 #   ─────────────────────────────────────────────────────────────────
 #   unique conditions = 2 × 4 × 3 × 2 = 48
 #   × 5 reps = 240 total jobs
 #
-# Array index encoding (little-endian):
-#   REP          = SLURM_ARRAY_TASK_ID % 5              (0–4)
-#   TASK_IDX     = (SLURM_ARRAY_TASK_ID / 5) % 2        (0–1)
-#   STRATEGY_IDX = (SLURM_ARRAY_TASK_ID / 10) % 4       (0–3)
-#   BUDGET_IDX   = (SLURM_ARRAY_TASK_ID / 40) % 3       (0–2)
-#   REEVAL_IDX   = (SLURM_ARRAY_TASK_ID / 120) % 2      (0–1)
+# Array index encoding — rep is slowest so one pass over all conditions
+# completes before any condition gets its second rep:
+#   TASK_IDX     = SLURM_ARRAY_TASK_ID % 2              (0–1)
+#   STRATEGY_IDX = (SLURM_ARRAY_TASK_ID / 2) % 4        (0–3)
+#   BUDGET_IDX   = (SLURM_ARRAY_TASK_ID / 8) % 3        (0–2)
+#   REEVAL_IDX   = (SLURM_ARRAY_TASK_ID / 24) % 2       (0–1)
+#   REP          = (SLURM_ARRAY_TASK_ID / 48) % 5       (0–4)
 
 #SBATCH --job-name=ariel-sym
 #SBATCH --output=out_files/ariel-sym-%A_%a.out
 #SBATCH --error=out_files/ariel-sym-%A_%a.err
 #SBATCH --time=100:00:00
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=31G
+#SBATCH --mem=20G
 #SBATCH --array=0-239
 # MuJoCo's EGL renderer requires /dev/dri/renderD* nodes (only exposed when
 # a GPU is allocated), even though we do no GPU compute.
@@ -43,21 +44,21 @@ RUN_TAG=sym_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}
 
 ID=$SLURM_ARRAY_TASK_ID
 
-REP=$(( ID % 5 ))
-TASK_IDX=$(( (ID / 5) % 2 ))
-STRATEGY_IDX=$(( (ID / 10) % 4 ))
-BUDGET_IDX=$(( (ID / 40) % 3 ))
-REEVAL_IDX=$(( (ID / 120) % 2 ))
+TASK_IDX=$(( ID % 2 ))
+STRATEGY_IDX=$(( (ID / 2) % 4 ))
+BUDGET_IDX=$(( (ID / 8) % 3 ))
+REEVAL_IDX=$(( (ID / 24) % 2 ))
+REP=$(( (ID / 48) % 5 ))
 
 TASKS=(gecko_locomotion.py gecko_food.py)
 STRATEGIES=(plus comma nsga2-efficiency nsga2-symmetry)
 BUDGETS=(200 500 1000)
-REEVALS=(1 3)   # 1 = off (single eval), 3 = on (three evals, parents included)
+REEVALS=(0 1)   # 0 = off, 1 = on (re-evaluate parents each generation)
 
 SCRIPT=${TASKS[$TASK_IDX]}
 STRATEGY=${STRATEGIES[$STRATEGY_IDX]}
 BRAIN_BUDGET=${BUDGETS[$BUDGET_IDX]}
-NUM_EVALS=${REEVALS[$REEVAL_IDX]}
+REPEAT_EVALS=${REEVALS[$REEVAL_IDX]}
 SEED=$((42 + REP))
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ echo "Job:            $SLURM_JOB_ID   Array: $SLURM_ARRAY_TASK_ID"
 echo "Script:         $SCRIPT"
 echo "Strategy:       $STRATEGY"
 echo "Brain budget:   $BRAIN_BUDGET"
-echo "Num evals:      $NUM_EVALS"
+echo "Repeat evals:   $REPEAT_EVALS"
 echo "Rep / Seed:     $REP / $SEED"
 echo "CPUs:           $SLURM_CPUS_PER_TASK"
 echo "MUJOCO_GL:      $MUJOCO_GL"
@@ -111,13 +112,13 @@ srun bash -c "
     cd \"$TMP_DIR\"
     python \"$SCRIPTS_DIR/$SCRIPT\" \
         --strategy-type $STRATEGY \
-        --budget 40 \
+        --budget 30 \
         --pop 20 --lam 20 \
         --brain-budget $BRAIN_BUDGET \
         --brain-pop 20 \
         --brain-workers $SLURM_CPUS_PER_TASK \
         --max-modules 25 --max-depth 25 \
-        --num-evals $NUM_EVALS \
+        $([ "$REPEAT_EVALS" = "1" ] && echo "--repeat-evals") \
         --seed $SEED \
         --no-video
 "
