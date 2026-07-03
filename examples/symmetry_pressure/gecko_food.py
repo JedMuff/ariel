@@ -5,12 +5,15 @@ Outer loop:  (mu+lambda | mu,lambda | nsga2-efficiency | nsga2-symmetry) ES
              over TreeGenome bodies using the ariel.ec engine.
 Inner loop:  CMA-ES (nevergrad) over neural-network brain weights.
 Task:        Collect food items (waypoints) in sequence. Proprioception + camera.
-Fitness:     -(waypoints_reached + d_normalised)  [lower = more food collected]
-             d_normalised = clamp((RING_R_MAX - min_dist) / RING_R_MAX, 0, 1)
+Fitness:     -(waypoints_reached + d_norm - initial_height - 0.005*c_hinge)
+             or -1 if c_hinge >= 200 (glitch penalty).
+             d_norm = clamp((RING_R_MAX - min_dist) / RING_R_MAX, 0, 1).
+             3-second zero-action settling phase precedes the active episode;
+             initial_height is the core z-height measured after settling.
 
 Data saved per individual during evolution (run_data.jsonl):
   gen, ind_id, parent_ids, fitness, learning_curve, trajectory,
-  food_positions, control_cost, yz_symmetry
+  food_positions, control_cost, yz_symmetry, c_hinge, initial_height
 """
 
 import argparse
@@ -116,6 +119,23 @@ with (DATA / "run_config.json").open("w") as _fh:
 
 # ── Episode runner (food collection) ─────────────────────────────────────────
 
+SETTLE_DURATION     = 3.0   # seconds of zero-action settling before the episode
+HINGE_CONTACT_LIMIT = 200   # c_hinge threshold above which fitness = -1
+HINGE_CONTACT_PENALTY = 0.005
+
+
+def _build_hinge_geom_ids(model: mujoco.MjModel) -> set[int]:
+    ids: set[int] = set()
+    for i in range(model.ngeom):
+        name = model.geom(i).name
+        if name.endswith("-stator") or name.endswith("-rotor"):
+            ids.add(i)
+    return ids
+
+
+def _floor_geom_id(model: mujoco.MjModel) -> int:
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+
 
 def run_episode_food(
     ctx: dict[str, Any],
@@ -133,6 +153,9 @@ def run_episode_food(
     fill_parameters(network, weights)
     mujoco.mj_resetData(model, data)
 
+    hinge_geom_ids = _build_hinge_geom_ids(model)
+    floor_id       = _floor_geom_id(model)
+
     num_wps = len(waypoints)
     current_wp_idx = 0
     waypoints_reached = 0
@@ -140,13 +163,35 @@ def run_episode_food(
     data.mocap_pos[target_mocap_id] = current_target
     min_dist_to_current = float("inf")
 
+    # ── Settling phase: no actions ────────────────────────────────────────────
+    while data.time < SETTLE_DURATION:
+        mujoco.mj_step(model, data)
+
+        # Allow waypoint collection during settling
+        if current_wp_idx < num_wps:
+            dist = float(np.linalg.norm(np.array(data.qpos[:2]) - current_target[:2]))
+            min_dist_to_current = min(min_dist_to_current, dist)
+            if dist <= REACH_RADIUS:
+                waypoints_reached += 1
+                current_wp_idx    += 1
+                if current_wp_idx < num_wps:
+                    current_target = waypoints[current_wp_idx]
+                    data.mocap_pos[target_mocap_id] = current_target
+                    min_dist_to_current = float("inf")
+
+    # Reference state taken after settling
+    core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
+    initial_height = float(data.xpos[core_id, 2])
+
     control_step_freq = 50
     step = 0
     current_action = np.zeros(model.nu)
     trajectory: list[list[float]] = []
     ctrl_history: list[np.ndarray] = []
+    c_hinge = 0
 
-    while data.time < DURATION and current_wp_idx < num_wps:
+    episode_end = SETTLE_DURATION + DURATION
+    while data.time < episode_end and current_wp_idx < num_wps:
         if step % control_step_freq == 0:
             renderer.update_scene(data, camera=cam_name)
             img    = renderer.render()
@@ -168,30 +213,43 @@ def run_episode_food(
         mujoco.mj_step(model, data)
         step += 1
 
-        dist = float(np.linalg.norm(np.array(data.qpos[:2]) - current_target[:2]))
-        min_dist_to_current = min(min_dist_to_current, dist)
+        # Hinge-floor contact counting
+        for k in range(data.ncon):
+            c = data.contact[k]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if (g1 == floor_id and g2 in hinge_geom_ids) or \
+               (g2 == floor_id and g1 in hinge_geom_ids):
+                c_hinge += 1
 
-        if dist <= REACH_RADIUS:
-            waypoints_reached += 1
-            current_wp_idx    += 1
-            if current_wp_idx < num_wps:
-                current_target = waypoints[current_wp_idx]
-                data.mocap_pos[target_mocap_id] = current_target
-                min_dist_to_current = float("inf")
+        if current_wp_idx < num_wps:
+            dist = float(np.linalg.norm(np.array(data.qpos[:2]) - current_target[:2]))
+            min_dist_to_current = min(min_dist_to_current, dist)
+            if dist <= REACH_RADIUS:
+                waypoints_reached += 1
+                current_wp_idx    += 1
+                if current_wp_idx < num_wps:
+                    current_target = waypoints[current_wp_idx]
+                    data.mocap_pos[target_mocap_id] = current_target
+                    min_dist_to_current = float("inf")
 
     if waypoints_reached >= num_wps:
         final_dist = 0.0
     else:
         final_dist = min_dist_to_current
 
-    # Normalised closeness: 1 when right at the target, 0 when ring-radius away
     d_norm = float(np.clip((RING_R_MAX - final_dist) / RING_R_MAX, 0.0, 1.0))
-    fitness = -(waypoints_reached + d_norm)
+
+    if c_hinge >= HINGE_CONTACT_LIMIT:
+        fitness = -1.0
+    else:
+        fitness = -(waypoints_reached + d_norm - initial_height - HINGE_CONTACT_PENALTY * c_hinge)
 
     return {
-        "fitness":      fitness,
-        "trajectory":   trajectory,
-        "control_cost": action_control_cost(ctrl_history),
+        "fitness":        fitness,
+        "trajectory":     trajectory,
+        "control_cost":   action_control_cost(ctrl_history),
+        "c_hinge":        c_hinge,
+        "initial_height": initial_height,
     }
 
 
@@ -291,24 +349,32 @@ class BodyBrainEvolution:
             ind.fitness = best_fit if np.isfinite(best_fit) else float("inf")
             ind.tags = {
                 **ind.tags,
-                "best_brain":     best_w_lst or [],
-                "learning_curve": res.get("learning_curve", []),
-                "trajectory":     res.get("trajectory", []),
-                "control_cost":   res.get("control_cost", 0.0),
-                "yz_symmetry":    bilateral_symmetry_score(ind.genotype["morph"]),
-                "food_positions": food_positions,
-                "eval_time_s":    eval_time,
+                "best_brain":      best_w_lst or [],
+                "learning_curve":  res.get("learning_curve", []),
+                "trajectory":      res.get("trajectory", []),
+                "control_cost":    res.get("control_cost", 0.0),
+                "yz_symmetry":     bilateral_symmetry_score(ind.genotype["morph"]),
+                "food_positions":  food_positions,
+                "eval_time_s":     eval_time,
+                "c_hinge":         res.get("c_hinge", 0),
+                "initial_height":  res.get("initial_height", 0.0),
             }
             ind.requires_eval = False
 
             self._write_jsonl(ind, food_positions)
+            self._save_checkpoint(
+                tag=f"gen{self.outer_gen:03d}_body{idx:02d}",
+                genotype=dict(ind.genotype["morph"]),
+                weights=best_w,
+                fitness=best_fit,
+                waypoints=list(self.gen_waypoints),
+            )
 
             if best_fit < self.best_seen_fitness and best_w is not None:
                 self.best_seen_fitness   = best_fit
                 self.best_seen_genotype  = dict(ind.genotype["morph"])
                 self.best_seen_weights   = best_w.copy()
                 self.best_seen_waypoints = list(self.gen_waypoints)
-                self._save_checkpoint(tag=f"gen{self.outer_gen:03d}_body{idx:02d}")
 
         finite = [r["fitness"] for r in results if np.isfinite(r["fitness"])]
         stats = (f"min={np.min(finite):.3f}  avg={np.mean(finite):.3f}"
@@ -381,6 +447,8 @@ class BodyBrainEvolution:
             "yz_symmetry":    ind.tags.get("yz_symmetry", 0.0),
             "genome_hash":    genome_hash(ind.genotype["morph"]),
             "eval_time_s":    ind.tags.get("eval_time_s", 0.0),
+            "c_hinge":        ind.tags.get("c_hinge", 0),
+            "initial_height": ind.tags.get("initial_height", 0.0),
         }
         with JSONL_PATH.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
@@ -399,30 +467,30 @@ class BodyBrainEvolution:
         with TIMING_PATH.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
 
-    def _save_checkpoint(self, tag: str) -> None:
-        if self.best_seen_weights is None or self.best_seen_genotype is None:
+    def _save_checkpoint(self, tag: str, genotype: dict, weights: Optional[np.ndarray],
+                         fitness: float, waypoints: Optional[list] = None) -> None:
+        if weights is None or not np.isfinite(fitness):
             return
         sub = CHECKPOINTS / tag
         sub.mkdir(exist_ok=True, parents=True)
-        np.save(sub / "best_weights.npy", self.best_seen_weights)
-        if self.best_seen_waypoints is not None:
-            np.save(sub / "best_waypoints.npy", np.array(self.best_seen_waypoints))
+        np.save(sub / "best_weights.npy", weights)
+        if waypoints is not None:
+            np.save(sub / "best_waypoints.npy", np.array(waypoints))
         with (sub / "best_genome.json").open("w") as fh:
-            json.dump(self.best_seen_genotype, fh, indent=2)
+            json.dump(genotype, fh, indent=2)
         from shared import bilateral_symmetry_score as _bss
         from ariel.ec.genotypes.tree.tree_genome import TreeGenome as _TG
         try:
-            num_mods = len(_TG.from_dict(self.best_seen_genotype).nodes)
+            num_mods = len(_TG.from_dict(genotype).nodes)
         except Exception:
             num_mods = 0
         with (sub / "meta.json").open("w") as fh:
             json.dump({
-                "gen":          self.outer_gen,
-                "fitness":      self.best_seen_fitness,
-                "yz_symmetry":  _bss(self.best_seen_genotype),
-                "num_modules":  num_mods,
+                "gen":         self.outer_gen,
+                "fitness":     fitness,
+                "yz_symmetry": _bss(genotype),
+                "num_modules": num_mods,
             }, fh, indent=2)
-        console.log(f"  [cyan]checkpoint → {sub}  fitness={self.best_seen_fitness:.3f}[/cyan]")
 
     # -- main -----------------------------------------------------------------
 

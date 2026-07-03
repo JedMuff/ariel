@@ -107,6 +107,24 @@ with (DATA / "run_config.json").open("w") as _fh:
 
 # ── Episode runner (locomotion) ───────────────────────────────────────────────
 
+SETTLE_DURATION = 3.0   # seconds of zero-action settling before the episode starts
+HINGE_CONTACT_LIMIT = 200  # c_hinge threshold above which fitness = -1 (glitch penalty)
+HINGE_CONTACT_PENALTY = 0.005  # per hinge-floor contact step
+
+
+def _build_hinge_geom_ids(model: mujoco.MjModel) -> set[int]:
+    """Return geom IDs belonging to hinge stator/rotor bodies."""
+    ids: set[int] = set()
+    for i in range(model.ngeom):
+        name = model.geom(i).name
+        if name.endswith("-stator") or name.endswith("-rotor"):
+            ids.add(i)
+    return ids
+
+
+def _floor_geom_id(model: mujoco.MjModel) -> int:
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+
 
 def run_episode_locomotion(
     ctx: dict[str, Any],
@@ -121,14 +139,28 @@ def run_episode_locomotion(
     fill_parameters(network, weights)
     mujoco.mj_resetData(model, data)
 
-    x0 = float(data.qpos[0])
+    hinge_geom_ids = _build_hinge_geom_ids(model)
+    floor_id       = _floor_geom_id(model)
+
+    # ── Settling phase: no actions, let the robot drop and stabilise ──────────
+    while data.time < SETTLE_DURATION:
+        mujoco.mj_step(model, data)
+
+    # Reference state is taken after settling
+    core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
+    x0             = float(data.qpos[0])
+    y0             = float(data.qpos[1])
+    initial_height = float(data.xpos[core_id, 2])  # z of core after settling
+
     trajectory: list[list[float]] = []
     ctrl_history: list[np.ndarray] = []
     control_step_freq = 50
     step = 0
     current_action = np.zeros(model.nu)
+    c_hinge = 0  # hinge-floor contact counter
 
-    while data.time < DURATION:
+    episode_end = SETTLE_DURATION + DURATION
+    while data.time < episode_end:
         if step % control_step_freq == 0:
             state = get_robot_state(data).astype(np.float32)
             current_action = network.forward(model, data, state)
@@ -140,15 +172,33 @@ def run_episode_locomotion(
                 trajectory.append([float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2])])
         mujoco.mj_step(model, data)
 
+        # Count hinge-floor contacts this step
+        for k in range(data.ncon):
+            c = data.contact[k]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if (g1 == floor_id and g2 in hinge_geom_ids) or \
+               (g2 == floor_id and g1 in hinge_geom_ids):
+                c_hinge += 1
+
         step += 1
 
     x_final = float(data.qpos[0])
-    fitness  = -(x_final - x0)  # lower = better, maximise forward X
+    y_final = float(data.qpos[1])
+    x_displacement = x_final - x0
+
+    if c_hinge >= HINGE_CONTACT_LIMIT:
+        fitness = -1.0
+    else:
+        # Maximise: x_displacement - initial_height - contact_penalty
+        # Negated here because the framework minimises
+        fitness = -(x_displacement - initial_height - HINGE_CONTACT_PENALTY * c_hinge)
 
     return {
         "fitness":      fitness,
         "trajectory":   trajectory,
         "control_cost": action_control_cost(ctrl_history),
+        "c_hinge":      c_hinge,
+        "initial_height": initial_height,
     }
 
 
@@ -198,8 +248,7 @@ class BodyBrainEvolution:
             parents = list(population)
         offspring = make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH)
 
-        # For (mu,lambda): mark parents for re-evaluation each generation too
-        if STRATEGY == "comma" or NUM_EVALS > 1:
+        if NUM_EVALS > 1:
             for ind in parents:
                 ind.requires_eval = True
 
@@ -243,22 +292,29 @@ class BodyBrainEvolution:
             ind.fitness = best_fit if np.isfinite(best_fit) else float("inf")
             ind.tags = {
                 **ind.tags,
-                "best_brain":     best_w_lst or [],
-                "learning_curve": res.get("learning_curve", []),
-                "trajectory":     res.get("trajectory", []),
-                "control_cost":   res.get("control_cost", 0.0),
-                "yz_symmetry":    bilateral_symmetry_score(ind.genotype["morph"]),
-                "eval_time_s":    eval_time,
+                "best_brain":      best_w_lst or [],
+                "learning_curve":  res.get("learning_curve", []),
+                "trajectory":      res.get("trajectory", []),
+                "control_cost":    res.get("control_cost", 0.0),
+                "yz_symmetry":     bilateral_symmetry_score(ind.genotype["morph"]),
+                "eval_time_s":     eval_time,
+                "c_hinge":         res.get("c_hinge", 0),
+                "initial_height":  res.get("initial_height", 0.0),
             }
             ind.requires_eval = False
 
             self._write_jsonl(ind, idx)
+            self._save_checkpoint(
+                tag=f"gen{self.outer_gen:03d}_body{idx:02d}",
+                genotype=dict(ind.genotype["morph"]),
+                weights=best_w,
+                fitness=best_fit,
+            )
 
             if best_fit < self.best_seen_fitness and best_w is not None:
                 self.best_seen_fitness  = best_fit
                 self.best_seen_genotype = dict(ind.genotype["morph"])
                 self.best_seen_weights  = best_w.copy()
-                self._save_checkpoint(tag=f"gen{self.outer_gen:03d}_body{idx:02d}")
 
         finite = [r["fitness"] for r in results if np.isfinite(r["fitness"])]
         stats = (f"min={np.min(finite):.3f}  avg={np.mean(finite):.3f}"
@@ -333,6 +389,8 @@ class BodyBrainEvolution:
             "yz_symmetry":    ind.tags.get("yz_symmetry", 0.0),
             "genome_hash":    genome_hash(ind.genotype["morph"]),
             "eval_time_s":    ind.tags.get("eval_time_s", 0.0),
+            "c_hinge":        ind.tags.get("c_hinge", 0),
+            "initial_height": ind.tags.get("initial_height", 0.0),
         }
         with JSONL_PATH.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
@@ -351,28 +409,28 @@ class BodyBrainEvolution:
         with TIMING_PATH.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
 
-    def _save_checkpoint(self, tag: str) -> None:
-        if self.best_seen_weights is None or self.best_seen_genotype is None:
+    def _save_checkpoint(self, tag: str, genotype: dict, weights: Optional[np.ndarray],
+                         fitness: float) -> None:
+        if weights is None or not np.isfinite(fitness):
             return
         sub = CHECKPOINTS / tag
         sub.mkdir(exist_ok=True, parents=True)
-        np.save(sub / "best_weights.npy", self.best_seen_weights)
+        np.save(sub / "best_weights.npy", weights)
         with (sub / "best_genome.json").open("w") as fh:
-            json.dump(self.best_seen_genotype, fh, indent=2)
+            json.dump(genotype, fh, indent=2)
         from shared import bilateral_symmetry_score as _bss
         from ariel.ec.genotypes.tree.tree_genome import TreeGenome as _TG
         try:
-            num_mods = len(_TG.from_dict(self.best_seen_genotype).nodes)
+            num_mods = len(_TG.from_dict(genotype).nodes)
         except Exception:
             num_mods = 0
         with (sub / "meta.json").open("w") as fh:
             json.dump({
-                "gen":          self.outer_gen,
-                "fitness":      self.best_seen_fitness,
-                "yz_symmetry":  _bss(self.best_seen_genotype),
-                "num_modules":  num_mods,
+                "gen":         self.outer_gen,
+                "fitness":     fitness,
+                "yz_symmetry": _bss(genotype),
+                "num_modules": num_mods,
             }, fh, indent=2)
-        console.log(f"  [cyan]checkpoint → {sub}  fitness={self.best_seen_fitness:.3f}[/cyan]")
 
     # -- main -----------------------------------------------------------------
 
