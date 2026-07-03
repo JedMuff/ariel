@@ -29,6 +29,7 @@
 # MuJoCo's EGL renderer requires /dev/dri/renderD* nodes (only exposed when
 # a GPU is allocated), even though we do no GPU compute.
 #SBATCH --gres=gpu:1
+#SBATCH --exclude=node01
 
 set -euo pipefail
 
