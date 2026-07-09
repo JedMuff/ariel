@@ -5,19 +5,19 @@
 # Design:
 #   task           × [locomotion, food]                              = 2
 #   strategy-type  × [plus, comma, nsga2-efficiency, nsga2-symmetry] = 4
-#   brain-budget   × [200, 500, 1000]                                = 3
+#   brain-budget   × [200, 500]                                      = 2
 #   repeat-eval    × [off, on]                                        = 2
 #   ─────────────────────────────────────────────────────────────────
-#   unique conditions = 2 × 4 × 3 × 2 = 48
-#   × 5 reps = 240 total jobs
+#   unique conditions = 2 × 4 × 2 × 2 = 32
+#   × 5 reps = 160 total jobs
 #
 # Array index encoding — rep is slowest so one pass over all conditions
 # completes before any condition gets its second rep:
 #   TASK_IDX     = SLURM_ARRAY_TASK_ID % 2              (0–1)
 #   STRATEGY_IDX = (SLURM_ARRAY_TASK_ID / 2) % 4        (0–3)
-#   BUDGET_IDX   = (SLURM_ARRAY_TASK_ID / 8) % 3        (0–2)
-#   REEVAL_IDX   = (SLURM_ARRAY_TASK_ID / 24) % 2       (0–1)
-#   REP          = (SLURM_ARRAY_TASK_ID / 48) % 5       (0–4)
+#   BUDGET_IDX   = (SLURM_ARRAY_TASK_ID / 8) % 2        (0–1)
+#   REEVAL_IDX   = (SLURM_ARRAY_TASK_ID / 16) % 2       (0–1)
+#   REP          = (SLURM_ARRAY_TASK_ID / 32) % 5       (0–4)
 
 #SBATCH --job-name=ariel-sym
 #SBATCH --output=out_files/ariel-sym-%A_%a.out
@@ -25,7 +25,7 @@
 #SBATCH --time=100:00:00
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=20G
-#SBATCH --array=0-239
+#SBATCH --array=0-159
 # MuJoCo's EGL renderer requires /dev/dri/renderD* nodes (only exposed when
 # a GPU is allocated), even though we do no GPU compute.
 #SBATCH --gres=gpu:1
@@ -47,13 +47,13 @@ ID=$SLURM_ARRAY_TASK_ID
 
 TASK_IDX=$(( ID % 2 ))
 STRATEGY_IDX=$(( (ID / 2) % 4 ))
-BUDGET_IDX=$(( (ID / 8) % 3 ))
-REEVAL_IDX=$(( (ID / 24) % 2 ))
-REP=$(( (ID / 48) % 5 ))
+BUDGET_IDX=$(( (ID / 8) % 2 ))
+REEVAL_IDX=$(( (ID / 16) % 2 ))
+REP=$(( (ID / 32) % 5 ))
 
 TASKS=(gecko_locomotion.py gecko_food.py)
 STRATEGIES=(plus comma nsga2-efficiency nsga2-symmetry)
-BUDGETS=(200 500 1000)
+BUDGETS=(200 500)
 REEVALS=(0 1)   # 0 = off, 1 = on (re-evaluate parents each generation)
 
 SCRIPT=${TASKS[$TASK_IDX]}
