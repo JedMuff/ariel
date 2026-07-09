@@ -19,12 +19,10 @@ Data saved per individual during evolution (run_data.jsonl):
 import argparse
 import gc
 import json
-import multiprocessing as mp
 import os
 import random
 import time
 import warnings
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,8 +53,9 @@ from shared import (
     isolate_green,
     make_offspring,
     nsga2_survivor_selection,
+    register_episode_fn,
     sample_waypoints,
-    train_body_serial,
+    train_body_parallel,
 )
 
 install()
@@ -255,13 +254,15 @@ def run_episode_food(
     }
 
 
-# ── Wrapper for ProcessPoolExecutor ──────────────────────────────────────────
+_EPISODE_FN_NAME = "food"
+register_episode_fn(_EPISODE_FN_NAME, run_episode_food)
 
 
 def _train_food_worker(task: dict[str, Any]) -> dict[str, Any]:
-    task["episode_fn"]   = run_episode_food
-    task["use_vision"]   = True
-    return train_body_serial(task)
+    task["episode_fn"]      = run_episode_food
+    task["episode_fn_name"] = _EPISODE_FN_NAME
+    task["use_vision"]      = True
+    return train_body_parallel(task)
 
 
 # ── BodyBrainEvolution ────────────────────────────────────────────────────────
@@ -277,7 +278,6 @@ class BodyBrainEvolution:
             db_file_name=f"database_{int(time.time())}.db",
             db_handling="delete",
         )
-        self.executor: Optional[ProcessPoolExecutor] = None
         self.outer_gen: int = 0
         self.gen_waypoints: list[np.ndarray] = []
         self.best_seen_fitness:  float = float("inf")
@@ -327,6 +327,7 @@ class BodyBrainEvolution:
                 "rng_seed":     BASE_SEED + 1000 * self.outer_gen + idx,
                 "brain_budget": BRAIN_BUDGET,
                 "brain_pop":    BRAIN_POP,
+                "brain_workers": BRAIN_WORKERS,
                 "duration":     DURATION,
                 "reach_radius": REACH_RADIUS,
                 "arena_radius": ARENA_RADIUS,
@@ -334,9 +335,8 @@ class BodyBrainEvolution:
             for idx, ind in enumerate(to_eval)
         ]
 
-        assert self.executor is not None
         t0 = time.time()
-        results = list(self.executor.map(_train_food_worker, tasks))
+        results = [_train_food_worker(t) for t in tasks]
         wall_elapsed = time.time() - t0
 
         eval_times: list[float] = []
@@ -499,32 +499,24 @@ class BodyBrainEvolution:
         console.log("[yellow]Initialising population...[/yellow]")
         population = Population([create_individual(NUM_MODULES, MAX_DEPTH) for _ in range(MU)])
 
-        with ProcessPoolExecutor(
-            max_workers=BRAIN_WORKERS,
-            mp_context=mp.get_context("spawn"),
-            initializer=init_worker,
-            initargs=(BASE_SEED,),
-        ) as executor:
-            self.executor = executor
-            population = self.evaluate(population)
+        population = self.evaluate(population)
 
-            ops = [
-                EAOperation(self.parent_selection),
-                EAOperation(self.reproduction),
-                EAOperation(self.evaluate),
-                EAOperation(self.survivor_selection),
-            ]
-            ea = EA(
-                population,
-                operations=ops,
-                num_steps=BUDGET,
-                db_file_path=self.config.db_file_path,
-                db_handling=self.config.db_handling,
-                quiet=self.config.quiet,
-            )
-            ea.run()
-            self.executor = None
-            return ea.get_solution("best", only_alive=False)
+        ops = [
+            EAOperation(self.parent_selection),
+            EAOperation(self.reproduction),
+            EAOperation(self.evaluate),
+            EAOperation(self.survivor_selection),
+        ]
+        ea = EA(
+            population,
+            operations=ops,
+            num_steps=BUDGET,
+            db_file_path=self.config.db_file_path,
+            db_handling=self.config.db_handling,
+            quiet=self.config.quiet,
+        )
+        ea.run()
+        return ea.get_solution("best", only_alive=False)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
