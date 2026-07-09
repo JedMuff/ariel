@@ -155,7 +155,7 @@ def run_episode_locomotion(
 
     trajectory: list[list[float]] = []
     ctrl_history: list[np.ndarray] = []
-    control_step_freq = 50
+    control_step_freq = 100
     step = 0
     current_action = np.zeros(model.nu)
     c_hinge = 0  # hinge-floor contact counter

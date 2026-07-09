@@ -171,7 +171,7 @@ def render_video(rec: dict, cp: Path) -> None:
     frames: list[np.ndarray] = []
     mujoco.mj_resetData(model, data)
 
-    control_step_freq = 50
+    control_step_freq = 100
     step = 0
     current_action = np.zeros(model.nu)
 

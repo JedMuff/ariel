@@ -185,7 +185,7 @@ def run_episode_food(
     core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
     initial_height = float(data.xpos[core_id, 2])
 
-    control_step_freq = 50
+    control_step_freq = 100
     step = 0
     current_action = np.zeros(model.nu)
     trajectory: list[list[float]] = []
