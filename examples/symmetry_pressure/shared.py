@@ -489,13 +489,8 @@ def mutate_morph(genome: TreeGenome, rng: np.random.Generator, num_modules: int)
 
 
 def joint_count(genome: TreeGenome) -> int:
-    spec = genome_to_spec(genome.to_dict())
-    if spec is None:
-        return 0
-    try:
-        return spec.compile().nu
-    except Exception:
-        return 0
+    """Count hinge joints by walking the genome graph — no MuJoCo compilation needed."""
+    return sum(1 for _, d in genome.nodes(data=True) if d.get("type") == "HINGE")
 
 
 def create_individual(num_modules: int, max_depth: int) -> Individual:
@@ -629,59 +624,30 @@ def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
                 "eval_time_s": time.perf_counter() - t_start}
 
     num_params: int = ctx["num_params"]
-    min_lambda = 4 + int(3 * np.log(max(num_params, 2)))
-    pop_size   = max(brain_pop, min_lambda)
-    if pop_size % 2 != 0:
-        pop_size += 1
 
     rng = np.random.default_rng(rng_seed)
     initial_guess = rng.uniform(-0.5, 0.5, size=num_params)
     param = ng.p.Array(init=initial_guess).set_mutation(sigma=0.3)
-    cma_config = ng.optimizers.ParametrizedCMA(popsize=pop_size)
-    optimizer = cma_config(
+    optimizer = ng.optimizers.CMA(
         parametrization=param,
-        budget=brain_budget * pop_size,
-        num_workers=brain_workers,
+        budget=brain_budget,
+        num_workers=1,
     )
 
     best_fit: float = float("inf")
     best_w: Optional[np.ndarray] = None
     learning_curve: list[float] = []
 
-    jobs_base = {
-        "body_hash":      body_hash,
-        "genome_dict":    genome_dict,
-        "waypoints":      waypoints,
-        "reach_radius":   reach_radius,
-        "arena_radius":   arena_radius,
-        "use_vision":     use_vision,
-        "episode_fn_name": episode_fn_name,
+    # Sequential evaluation: one candidate per CMA-ES step, matching WCCI.
+    # Parallelism happens at the outer level (one CPU per morphology).
+    for _ in range(brain_budget):
+        candidate = optimizer.ask()
+        fit = episode_fn(ctx, waypoints, candidate.value)["fitness"]
+        optimizer.tell(candidate, fit)
 
-    }
-
-    with ProcessPoolExecutor(
-        max_workers=brain_workers,
-        mp_context=mp.get_context("spawn"),
-        initializer=init_worker,
-        initargs=(rng_seed,),
-    ) as pool:
-        for _ in range(brain_budget):
-            candidates = [optimizer.ask() for _ in range(pop_size)]
-            jobs = [{**jobs_base, "weights": cand.value} for cand in candidates]
-            fits = list(pool.map(_eval_candidate_worker, jobs))
-
-            gen_best_fit = float("inf")
-            gen_best_w: Optional[np.ndarray] = None
-            for cand, avg_fit in zip(candidates, fits):
-                optimizer.tell(cand, avg_fit)
-                if avg_fit < gen_best_fit:
-                    gen_best_fit = avg_fit
-                    gen_best_w = cand.value.copy()
-
-            if gen_best_fit < best_fit:
-                best_fit = gen_best_fit
-                best_w = gen_best_w
-
+        if fit < best_fit:
+            best_fit = fit
+            best_w = candidate.value.copy()
             learning_curve.append(best_fit)
 
     # Single recording pass with the best weights found
