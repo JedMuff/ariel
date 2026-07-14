@@ -490,7 +490,7 @@ def mutate_morph(genome: TreeGenome, rng: np.random.Generator, num_modules: int)
 
 def joint_count(genome: TreeGenome) -> int:
     """Count hinge joints by walking the genome graph — no MuJoCo compilation needed."""
-    return sum(1 for _, d in genome.nodes(data=True) if d.get("type") == "HINGE")
+    return sum(1 for d in genome.nodes.values() if d.get("type") == "HINGE")
 
 
 def create_individual(num_modules: int, max_depth: int) -> Individual:
