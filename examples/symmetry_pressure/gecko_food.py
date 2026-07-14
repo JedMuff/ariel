@@ -5,8 +5,9 @@ Outer loop:  (mu+lambda | mu,lambda | nsga2-efficiency | nsga2-symmetry) ES
              over TreeGenome bodies using the ariel.ec engine.
 Inner loop:  CMA-ES (nevergrad) over neural-network brain weights.
 Task:        Collect food items (waypoints) in sequence. Proprioception + camera.
-Fitness:     -(waypoints_reached + d_norm - initial_height - 0.005*c_hinge)
-             or +1 if c_hinge >= 200 (glitch penalty; worse than any real score).
+Fitness:     -(waypoints_reached + d_norm - height_penalty - 0.005*c_hinge)
+             or +1 if c_hinge > 200 (glitch penalty; worse than any real score — framework minimises).
+             height_penalty = initial_height if initial_height > 0.21m else 0.
              d_norm = clamp((RING_R_MAX - min_dist) / RING_R_MAX, 0, 1).
              3-second zero-action settling phase precedes the active episode;
              initial_height is the core z-height measured after settling.
@@ -49,7 +50,6 @@ from shared import (
     fill_parameters,
     genome_hash,
     genome_input_dim,
-    init_worker,
     isolate_green,
     make_offspring,
     nsga2_survivor_selection,
@@ -120,16 +120,18 @@ with (DATA / "run_config.json").open("w") as _fh:
 # ── Episode runner (food collection) ─────────────────────────────────────────
 
 SETTLE_DURATION     = 3.0   # seconds of zero-action settling before the episode
-HINGE_CONTACT_LIMIT = 200   # c_hinge threshold above which glitch penalty applies
-HINGE_CONTACT_PENALTY = 0.005
-HINGE_GLITCH_FITNESS = 1.0  # penalty fitness for glitched morphologies (must be > any real fitness)
+HINGE_CONTACT_LIMIT = 200   # unique rotor-ground contact events above which glitch penalty applies
+HINGE_CONTACT_PENALTY = 0.005  # per unique rotor-ground contact event
+HINGE_GLITCH_FITNESS = 1.0  # penalty fitness for glitched morphologies (must be > any real score; framework minimises)
+CTRL_ALPHA = 0.5  # control blending factor (0=no change, 1=instant)
+HEIGHT_PENALTY_THRESHOLD = 0.21  # m — only penalise spawn height above this
 
 
-def _build_hinge_geom_ids(model: mujoco.MjModel) -> set[int]:
+def _build_rotor_geom_ids(model: mujoco.MjModel) -> set[int]:
+    """Return geom IDs belonging to hinge rotor bodies only."""
     ids: set[int] = set()
     for i in range(model.ngeom):
-        name = model.geom(i).name
-        if name.endswith("-stator") or name.endswith("-rotor"):
+        if model.geom(i).name.endswith("-rotor"):
             ids.add(i)
     return ids
 
@@ -154,7 +156,7 @@ def run_episode_food(
     fill_parameters(network, weights)
     mujoco.mj_resetData(model, data)
 
-    hinge_geom_ids = _build_hinge_geom_ids(model)
+    rotor_geom_ids = _build_rotor_geom_ids(model)
     floor_id       = _floor_geom_id(model)
 
     num_wps = len(waypoints)
@@ -190,6 +192,7 @@ def run_episode_food(
     trajectory: list[list[float]] = []
     ctrl_history: list[np.ndarray] = []
     c_hinge = 0
+    prev_rotor_contacts: set[int] = set()
 
     episode_end = SETTLE_DURATION + DURATION
     while data.time < episode_end and current_wp_idx < num_wps:
@@ -203,7 +206,12 @@ def run_episode_food(
                        2.0 * np.cos(data.time * 2.0 * np.pi)]
             progress = [current_wp_idx / max(num_wps - 1, 1)]
             state = np.concatenate([robot_state, vision, phase, progress]).astype(np.float32)
-            current_action = network.forward(model, data, state)
+            raw_action = network.forward(model, data, state)
+            # Alpha-blend towards new action and clip to servo range
+            current_action = np.clip(
+                current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
+                -np.pi / 2, np.pi / 2,
+            )
 
             if record:
                 trajectory.append([float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2])])
@@ -214,13 +222,17 @@ def run_episode_food(
         mujoco.mj_step(model, data)
         step += 1
 
-        # Hinge-floor contact counting
+        # Count unique rotor-ground contact events (transition into contact only)
+        curr_rotor_contacts: set[int] = set()
         for k in range(data.ncon):
             c = data.contact[k]
             g1, g2 = int(c.geom1), int(c.geom2)
-            if (g1 == floor_id and g2 in hinge_geom_ids) or \
-               (g2 == floor_id and g1 in hinge_geom_ids):
-                c_hinge += 1
+            if g1 == floor_id and g2 in rotor_geom_ids:
+                curr_rotor_contacts.add(g2)
+            elif g2 == floor_id and g1 in rotor_geom_ids:
+                curr_rotor_contacts.add(g1)
+        c_hinge += len(curr_rotor_contacts - prev_rotor_contacts)
+        prev_rotor_contacts = curr_rotor_contacts
 
         if current_wp_idx < num_wps:
             dist = float(np.linalg.norm(np.array(data.qpos[:2]) - current_target[:2]))
@@ -240,10 +252,11 @@ def run_episode_food(
 
     d_norm = float(np.clip((RING_R_MAX - final_dist) / RING_R_MAX, 0.0, 1.0))
 
-    if c_hinge >= HINGE_CONTACT_LIMIT:
+    if c_hinge > HINGE_CONTACT_LIMIT:
         fitness = HINGE_GLITCH_FITNESS
     else:
-        fitness = -(waypoints_reached + d_norm - initial_height - HINGE_CONTACT_PENALTY * c_hinge)
+        height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+        fitness = -(waypoints_reached + d_norm - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
 
     return {
         "fitness":        fitness,

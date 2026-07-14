@@ -108,17 +108,18 @@ with (DATA / "run_config.json").open("w") as _fh:
 # ── Episode runner (locomotion) ───────────────────────────────────────────────
 
 SETTLE_DURATION = 3.0   # seconds of zero-action settling before the episode starts
-HINGE_CONTACT_LIMIT = 200  # c_hinge threshold above which glitch penalty applies
-HINGE_CONTACT_PENALTY = 0.005  # per hinge-floor contact step
-HINGE_GLITCH_FITNESS = 1.0  # penalty fitness for glitched morphologies (must be > any real fitness)
+HINGE_CONTACT_LIMIT = 200  # unique rotor-ground contact events above which glitch penalty applies
+HINGE_CONTACT_PENALTY = 0.005  # per unique rotor-ground contact event
+HINGE_GLITCH_FITNESS = 1.0  # penalty fitness for glitched morphologies (must be > any real score; framework minimises)
+CTRL_ALPHA = 0.5  # control blending factor (0=no change, 1=instant)
+HEIGHT_PENALTY_THRESHOLD = 0.21  # m — only penalise spawn height above this
 
 
-def _build_hinge_geom_ids(model: mujoco.MjModel) -> set[int]:
-    """Return geom IDs belonging to hinge stator/rotor bodies."""
+def _build_rotor_geom_ids(model: mujoco.MjModel) -> set[int]:
+    """Return geom IDs belonging to hinge rotor bodies only."""
     ids: set[int] = set()
     for i in range(model.ngeom):
-        name = model.geom(i).name
-        if name.endswith("-stator") or name.endswith("-rotor"):
+        if model.geom(i).name.endswith("-rotor"):
             ids.add(i)
     return ids
 
@@ -140,7 +141,7 @@ def run_episode_locomotion(
     fill_parameters(network, weights)
     mujoco.mj_resetData(model, data)
 
-    hinge_geom_ids = _build_hinge_geom_ids(model)
+    rotor_geom_ids = _build_rotor_geom_ids(model)
     floor_id       = _floor_geom_id(model)
 
     # ── Settling phase: no actions, let the robot drop and stabilise ──────────
@@ -158,13 +159,19 @@ def run_episode_locomotion(
     control_step_freq = 100
     step = 0
     current_action = np.zeros(model.nu)
-    c_hinge = 0  # hinge-floor contact counter
+    c_hinge = 0  # unique rotor-ground contact event counter
+    prev_rotor_contacts: set[int] = set()
 
     episode_end = SETTLE_DURATION + DURATION
     while data.time < episode_end:
         if step % control_step_freq == 0:
             state = get_robot_state(data).astype(np.float32)
-            current_action = network.forward(model, data, state)
+            raw_action = network.forward(model, data, state)
+            # Alpha-blend towards new action and clip to servo range
+            current_action = np.clip(
+                current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
+                -np.pi / 2, np.pi / 2,
+            )
 
         data.ctrl[:] = current_action
         if record:
@@ -173,13 +180,17 @@ def run_episode_locomotion(
                 trajectory.append([float(data.qpos[0]), float(data.qpos[1]), float(data.qpos[2])])
         mujoco.mj_step(model, data)
 
-        # Count hinge-floor contacts this step
+        # Count unique rotor-ground contact events (transition into contact only)
+        curr_rotor_contacts: set[int] = set()
         for k in range(data.ncon):
             c = data.contact[k]
             g1, g2 = int(c.geom1), int(c.geom2)
-            if (g1 == floor_id and g2 in hinge_geom_ids) or \
-               (g2 == floor_id and g1 in hinge_geom_ids):
-                c_hinge += 1
+            if g1 == floor_id and g2 in rotor_geom_ids:
+                curr_rotor_contacts.add(g2)
+            elif g2 == floor_id and g1 in rotor_geom_ids:
+                curr_rotor_contacts.add(g1)
+        c_hinge += len(curr_rotor_contacts - prev_rotor_contacts)
+        prev_rotor_contacts = curr_rotor_contacts
 
         step += 1
 
@@ -187,12 +198,13 @@ def run_episode_locomotion(
     y_final = float(data.qpos[1])
     x_displacement = x_final - x0
 
-    if c_hinge >= HINGE_CONTACT_LIMIT:
+    if c_hinge > HINGE_CONTACT_LIMIT:
         fitness = HINGE_GLITCH_FITNESS
     else:
-        # Maximise: x_displacement - initial_height - contact_penalty
-        # Negated here because the framework minimises
-        fitness = -(x_displacement - initial_height - HINGE_CONTACT_PENALTY * c_hinge)
+        # Maximise x_displacement, penalise tall spawn heights and rotor contacts.
+        # Negated because the framework minimises.
+        height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+        fitness = -(x_displacement - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
 
     return {
         "fitness":      fitness,
