@@ -14,7 +14,7 @@
 #SBATCH --job-name=ariel-tune
 #SBATCH --output=out_files/tune-%j.out
 #SBATCH --error=out_files/tune-%j.err
-#SBATCH --time=12:00:00
+#SBATCH --time=18:00:00
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=32G
 # MuJoCo's EGL renderer requires /dev/dri/renderD* nodes (only exposed when
@@ -30,7 +30,8 @@ REPO=/home/jed/workspaces/ariel-symmetry/ariel
 VENV_PATH=$REPO/.venv
 SCRIPTS_DIR=$REPO/examples/symmetry_pressure
 
-DATA_DIR=$REPO/__data__/tune_cma_ann_${TASK}
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+DATA_DIR=$REPO/__data__/tune_cma_ann_${TASK}_${TIMESTAMP}
 
 # ── Environment ───────────────────────────────────────────────────────────────
 
@@ -64,6 +65,7 @@ srun python "$SCRIPTS_DIR/tune_cma_ann.py" \
     --n-trials 200 \
     --runs-per-trial 5 \
     --workers $SLURM_CPUS_PER_TASK \
+    --trial-time-limit 300 \
     --seed 42 \
     --dur 60.0 \
     $([ "$TASK" = "food" ] && echo "--num-waypoints 10 --reach-radius 0.20 --arena-radius 2.0") \

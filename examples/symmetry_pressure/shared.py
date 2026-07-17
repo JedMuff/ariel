@@ -189,10 +189,18 @@ def build_world_for_body(
     return model, data, target_mocap_id, cam_name
 
 
-def genome_input_dim(model: mujoco.MjModel, data: mujoco.MjData, use_vision: bool) -> int:
+def genome_input_dim(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    use_vision: bool,
+    use_phase: bool = False,
+) -> int:
     base = len(get_robot_state(data))
     if use_vision:
-        return base + 3 + 2 + 1  # 3 vision bins + 2 phase + 1 progress
+        n_phase = 2 if use_phase else 0
+        return base + 3 + n_phase + 1  # 3 vision bins + optional 2 phase + 1 progress
+    if use_phase:
+        return base + 2  # sin + cos
     return base
 
 

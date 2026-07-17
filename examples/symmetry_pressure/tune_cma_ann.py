@@ -32,6 +32,8 @@ import random
 import sys
 import time
 import warnings
+from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -82,24 +84,28 @@ RING_R_MAX               = 1.0
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser(description="Multi-objective HPO: CMA-ES + ANN on gecko tasks")
-parser.add_argument("--task",           choices=["food", "loco"], default="food")
-parser.add_argument("--n-trials",       type=int,   default=200)
-parser.add_argument("--runs-per-trial", type=int,   default=5)
-parser.add_argument("--seed",           type=int,   default=42)
-parser.add_argument("--workers",        type=int,   default=64)
+parser.add_argument("--task",             choices=["food", "loco"], default="food")
+parser.add_argument("--n-trials",         type=int,   default=200)
+parser.add_argument("--runs-per-trial",   type=int,   default=5)
+parser.add_argument("--seed",             type=int,   default=42)
+parser.add_argument("--workers",          type=int,   default=64,
+                    help="CPUs used to parallelise each CMA-ES generation (one per candidate)")
+parser.add_argument("--trial-time-limit", type=float, default=300.0,
+                    help="Wall-clock seconds allowed per individual CMA-ES run (default 300 = 5 min)")
 # food-task only
-parser.add_argument("--num-waypoints",  type=int,   default=10)
-parser.add_argument("--reach-radius",   type=float, default=0.20)
-parser.add_argument("--arena-radius",   type=float, default=2.0)
+parser.add_argument("--num-waypoints",    type=int,   default=10)
+parser.add_argument("--reach-radius",     type=float, default=0.20)
+parser.add_argument("--arena-radius",     type=float, default=2.0)
 # shared
-parser.add_argument("--dur",            type=float, default=60.0)
-parser.add_argument("--budget-max",     type=int,   default=None,
+parser.add_argument("--dur",              type=float, default=60.0)
+parser.add_argument("--budget-max",       type=int,   default=None,
                     help="Cap the budget search range (e.g. 50 for smoke tests)")
-parser.add_argument("--out-dir",        type=Path,  default=None,
+parser.add_argument("--out-dir",          type=Path,  default=None,
                     help="Output directory (defaults to __data__/tune_cma_ann_{task})")
 args = parser.parse_args()
 
-OUT_DIR: Path = args.out_dir if args.out_dir is not None else Path("__data__") / f"tune_cma_ann_{args.task}"
+_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+OUT_DIR: Path = args.out_dir if args.out_dir is not None else Path("__data__") / f"tune_cma_ann_{args.task}_{_timestamp}"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 STUDY_LOG  = OUT_DIR / "tune_study.log"
@@ -364,6 +370,52 @@ def _run_episode_loco(
 # ── Single CMA-ES run ─────────────────────────────────────────────────────────
 
 
+def _evaluate_candidate(
+    weights: np.ndarray,
+    task: str,
+    hidden_sizes: list[int],
+    num_waypoints: int,
+    reach_radius: float,
+    arena_radius: float,
+    dur: float,
+    seed: int,
+) -> float:
+    """Evaluate one CMA-ES candidate in a subprocess."""
+    torch.set_num_threads(1)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+
+    if task == "food":
+        model, data, target_mocap_id, cam_name = _build_gecko_food(reach_radius, arena_radius)
+        renderer  = mujoco.Renderer(model, height=96, width=128)
+        waypoints = sample_waypoints(rng, num_waypoints)
+        base_dim  = len(get_robot_state(data))
+        input_dim = base_dim + 3 + 1
+    else:
+        model, data = _build_gecko_loco()
+        renderer, target_mocap_id, cam_name, waypoints = None, -1, None, []
+        base_dim  = len(get_robot_state(data))
+        input_dim = base_dim
+
+    network        = FlexNetwork(input_size=input_dim, output_size=model.nu, hidden_sizes=hidden_sizes)
+    rotor_geom_ids = _build_rotor_geom_ids(model)
+    floor_id       = _floor_geom_id(model)
+
+    if task == "food":
+        assert renderer is not None
+        fit = _run_episode_food(
+            model, data, network, renderer, cam_name, target_mocap_id,
+            waypoints, weights, reach_radius, dur, rotor_geom_ids, floor_id,
+        )
+        renderer.close()
+    else:
+        fit = _run_episode_loco(model, data, network, weights, dur, rotor_geom_ids, floor_id)
+
+    return fit
+
+
 def run_single_trial(
     task: str,
     hidden_sizes: list[int],
@@ -376,8 +428,15 @@ def run_single_trial(
     reach_radius: float,
     arena_radius: float,
     dur: float,
+    workers: int = 1,
+    time_limit_s: float = 300.0,
 ) -> dict[str, Any]:
-    """Run one CMA-ES optimisation; returns best fitness and wall-clock time."""
+    """Run one CMA-ES optimisation with parallel generation evaluation.
+
+    Each generation's candidates are evaluated concurrently (up to `workers`
+    processes). The run stops early if `time_limit_s` wall-clock seconds elapse;
+    the number of completed evaluations is recorded alongside the result.
+    """
     torch.set_num_threads(1)
     random.seed(run_seed)
     np.random.seed(run_seed)
@@ -386,26 +445,17 @@ def run_single_trial(
     t_start = time.perf_counter()
     rng = np.random.default_rng(run_seed)
 
+    # Build one model just to count params and input dim.
     if task == "food":
-        model, data, target_mocap_id, cam_name = _build_gecko_food(reach_radius, arena_radius)
-        renderer  = mujoco.Renderer(model, height=96, width=128)
-        waypoints = sample_waypoints(rng, num_waypoints)
+        model, data, _, _ = _build_gecko_food(reach_radius, arena_radius)
         base_dim  = len(get_robot_state(data))
-        input_dim = base_dim + 3 + 1  # proprioception + 3 vision bins + 1 progress
+        input_dim = base_dim + 3 + 1
     else:
         model, data = _build_gecko_loco()
-        renderer     = None
-        target_mocap_id = -1
-        cam_name     = None
-        waypoints    = []
-        base_dim  = len(get_robot_state(data))
-        input_dim = base_dim  # proprioception only
+        input_dim = len(get_robot_state(data))
 
     network    = FlexNetwork(input_size=input_dim, output_size=model.nu, hidden_sizes=hidden_sizes)
     num_params = sum(p.numel() for p in network.parameters())
-
-    rotor_geom_ids = _build_rotor_geom_ids(model)
-    floor_id       = _floor_geom_id(model)
 
     initial_guess = rng.uniform(-init_scale, init_scale, size=num_params)
     param     = ng.p.Array(init=initial_guess).set_mutation(sigma=sigma)
@@ -416,41 +466,50 @@ def run_single_trial(
     )
 
     best_fit: float = float("inf")
-    best_w: np.ndarray | None = None
     learning_curve: list[float] = []
-
-    # Ask/tell in batches of `pop`; stop after `budget` total evaluations.
     evals = 0
-    while evals < budget:
-        batch_size = min(pop, budget - evals)
-        candidates = [optimizer.ask() for _ in range(batch_size)]
-        for candidate in candidates:
-            weights = np.array(candidate.value, dtype=np.float32)
-            if task == "food":
-                assert renderer is not None
-                fit = _run_episode_food(
-                    model, data, network, renderer, cam_name, target_mocap_id,
-                    waypoints, weights, reach_radius, dur, rotor_geom_ids, floor_id,
-                )
-            else:
-                fit = _run_episode_loco(
-                    model, data, network, weights, dur, rotor_geom_ids, floor_id,
-                )
-            optimizer.tell(candidate, fit)
-            evals += 1
-            if fit < best_fit:
-                best_fit = fit
-                best_w   = weights.copy()
-                learning_curve.append(best_fit)
+    timed_out = False
 
-    if renderer is not None:
-        renderer.close()
+    with ProcessPoolExecutor(max_workers=min(pop, workers)) as pool:
+        while evals < budget:
+            if time.perf_counter() - t_start >= time_limit_s:
+                timed_out = True
+                break
+
+            batch_size = min(pop, budget - evals)
+            candidates = [optimizer.ask() for _ in range(batch_size)]
+
+            futures = {
+                pool.submit(
+                    _evaluate_candidate,
+                    np.array(c.value, dtype=np.float32),
+                    task, hidden_sizes, num_waypoints,
+                    reach_radius, arena_radius, dur,
+                    run_seed + evals + i,
+                ): (i, c)
+                for i, c in enumerate(candidates)
+            }
+
+            for future in as_completed(futures):
+                _, candidate = futures[future]
+                fit = future.result()
+                optimizer.tell(candidate, fit)
+                evals += 1
+                if fit < best_fit:
+                    best_fit = fit
+                    learning_curve.append(best_fit)
+
+                if time.perf_counter() - t_start >= time_limit_s:
+                    timed_out = True
+                    break
 
     return {
         "fitness":        best_fit,
         "wall_time_s":    time.perf_counter() - t_start,
         "learning_curve": learning_curve,
         "num_params":     num_params,
+        "evals_completed": evals,
+        "timed_out":      timed_out,
     }
 
 
@@ -466,6 +525,8 @@ def make_objective(
     arena_radius: float,
     dur: float,
     max_budget: int = 1000,
+    workers: int = 1,
+    time_limit_s: float = 300.0,
 ):
     def objective(trial: optuna.Trial) -> tuple[float, float]:
         n_layers   = trial.suggest_int("n_layers", 1, 3)
@@ -484,8 +545,10 @@ def make_objective(
         else:
             hidden_sizes = [hidden_1, hidden_2, hidden_3]
 
-        fitnesses:  list[float] = []
-        wall_times: list[float] = []
+        fitnesses:    list[float] = []
+        wall_times:   list[float] = []
+        evals_done:   list[int]   = []
+        timed_out_flags: list[bool] = []
 
         for run_idx in range(runs_per_trial):
             run_seed = base_seed + trial.number * 1000 + run_idx
@@ -501,29 +564,35 @@ def make_objective(
                 reach_radius=reach_radius,
                 arena_radius=arena_radius,
                 dur=dur,
+                workers=workers,
+                time_limit_s=time_limit_s,
             )
             fitnesses.append(result["fitness"])
             wall_times.append(result["wall_time_s"])
+            evals_done.append(result["evals_completed"])
+            timed_out_flags.append(result["timed_out"])
 
         mean_fitness = float(np.mean(fitnesses))
         mean_time    = float(np.mean(wall_times))
 
         record = {
-            "task":          task,
-            "trial":         trial.number,
-            "n_layers":      n_layers,
-            "hidden_sizes":  hidden_sizes,
-            "sigma":         sigma,
-            "pop":           pop,
-            "budget":        budget,
-            "init_scale":    init_scale,
-            "mean_fitness":  mean_fitness,
-            "std_fitness":   float(np.std(fitnesses)),
-            "min_fitness":   float(np.min(fitnesses)),
-            "max_fitness":   float(np.max(fitnesses)),
-            "mean_time_s":   mean_time,
-            "per_run_fitness": fitnesses,
-            "per_run_time_s":  wall_times,
+            "task":              task,
+            "trial":             trial.number,
+            "n_layers":          n_layers,
+            "hidden_sizes":      hidden_sizes,
+            "sigma":             sigma,
+            "pop":               pop,
+            "budget":            budget,
+            "init_scale":        init_scale,
+            "mean_fitness":      mean_fitness,
+            "std_fitness":       float(np.std(fitnesses)),
+            "min_fitness":       float(np.min(fitnesses)),
+            "max_fitness":       float(np.max(fitnesses)),
+            "mean_time_s":       mean_time,
+            "per_run_fitness":   fitnesses,
+            "per_run_time_s":    wall_times,
+            "per_run_evals":     evals_done,
+            "per_run_timed_out": timed_out_flags,
         }
         _append_jsonl(JSONL_PATH, record)
 
@@ -586,7 +655,7 @@ def main() -> None:
     console.rule(f"[bold magenta]CMA-ES + ANN HPO — Gecko {args.task}[/bold magenta]")
     console.log(
         f"task={args.task}  n_trials={args.n_trials}  runs_per_trial={args.runs_per_trial}  "
-        f"workers={args.workers}  dur={args.dur}s"
+        f"workers={args.workers}  dur={args.dur}s  trial_time_limit={args.trial_time_limit}s"
     )
     if args.task == "food":
         console.log(f"arena_radius={args.arena_radius}m  num_waypoints={args.num_waypoints}")
@@ -611,12 +680,15 @@ def main() -> None:
         arena_radius=args.arena_radius,
         dur=args.dur,
         max_budget=max_budget,
+        workers=args.workers,
+        time_limit_s=args.trial_time_limit,
     )
 
+    # Trials run sequentially; parallelism is inside each trial across CMA-ES candidates.
     study.optimize(
         objective,
         n_trials=args.n_trials,
-        n_jobs=args.workers,
+        n_jobs=1,
         show_progress_bar=True,
     )
 
