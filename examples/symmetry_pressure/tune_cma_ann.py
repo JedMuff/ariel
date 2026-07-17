@@ -37,8 +37,8 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import cma
 import mujoco
-import nevergrad as ng
 import numpy as np
 import optuna
 import torch
@@ -460,12 +460,11 @@ def run_single_trial(
     network    = FlexNetwork(input_size=input_dim, output_size=model.nu, hidden_sizes=hidden_sizes)
     num_params = sum(p.numel() for p in network.parameters())
 
-    initial_guess = rng.uniform(-init_scale, init_scale, size=num_params)
-    param     = ng.p.Array(init=initial_guess).set_mutation(sigma=sigma)
-    optimizer = ng.optimizers.CMA(
-        parametrization=param,
-        budget=budget,
-        num_workers=pop,
+    initial_guess = rng.uniform(-init_scale, init_scale, size=num_params).tolist()
+    es = cma.CMAEvolutionStrategy(
+        initial_guess,
+        sigma,
+        {"popsize": pop, "seed": run_seed, "verbose": -9, "maxiter": 10**9},
     )
 
     best_fit: float = float("inf")
@@ -478,29 +477,25 @@ def run_single_trial(
             if time.perf_counter() - t_start >= time_limit_s:
                 timed_out = True
                 break
+            if es.stop():
+                break
 
-            # Always ask a full generation of `pop` candidates — never a partial
-            # batch. CMA's TPA step-size adaptation calls es.ask() on the first
-            # optimizer.ask() of each generation and expects es.tell() to be called
-            # with all `pop` results before the next es.ask(). A partial batch
-            # leaves _to_be_told below popsize so es.tell() never fires, breaking
-            # TPA on the following generation.
-            candidates = [optimizer.ask() for _ in range(pop)]
+            candidates = es.ask()  # returns exactly pop candidate vectors
 
             futures = [
                 pool.submit(
                     _evaluate_candidate,
-                    np.array(c.value, dtype=np.float32),
+                    np.array(w, dtype=np.float32),
                     task, hidden_sizes, num_waypoints,
                     reach_radius, arena_radius, dur,
                     run_seed + evals + i,
                 )
-                for i, c in enumerate(candidates)
+                for i, w in enumerate(candidates)
             ]
 
             fits = [f.result() for f in futures]
-            for candidate, fit in zip(candidates, fits):
-                optimizer.tell(candidate, fit)
+            es.tell(candidates, fits)
+            for fit in fits:
                 evals += 1
                 if fit < best_fit:
                     best_fit = fit
