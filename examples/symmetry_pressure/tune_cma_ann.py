@@ -479,10 +479,13 @@ def run_single_trial(
                 timed_out = True
                 break
 
-            batch_size = min(pop, budget - evals)
-            # Ask for the whole generation before submitting any work — CMA's
-            # TPA step-size adaptation requires all asks to precede all tells.
-            candidates = [optimizer.ask() for _ in range(batch_size)]
+            # Always ask a full generation of `pop` candidates — never a partial
+            # batch. CMA's TPA step-size adaptation calls es.ask() on the first
+            # optimizer.ask() of each generation and expects es.tell() to be called
+            # with all `pop` results before the next es.ask(). A partial batch
+            # leaves _to_be_told below popsize so es.tell() never fires, breaking
+            # TPA on the following generation.
+            candidates = [optimizer.ask() for _ in range(pop)]
 
             futures = [
                 pool.submit(
@@ -495,8 +498,6 @@ def run_single_trial(
                 for i, c in enumerate(candidates)
             ]
 
-            # Wait for all candidates in the generation, then tell all results.
-            # This preserves the ask-all → tell-all contract CMA requires.
             fits = [f.result() for f in futures]
             for candidate, fit in zip(candidates, fits):
                 optimizer.tell(candidate, fit)
