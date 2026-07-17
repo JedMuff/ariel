@@ -33,7 +33,7 @@ import sys
 import time
 import warnings
 from datetime import datetime
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -477,31 +477,34 @@ def run_single_trial(
                 break
 
             batch_size = min(pop, budget - evals)
+            # Ask for the whole generation before submitting any work — CMA's
+            # TPA step-size adaptation requires all asks to precede all tells.
             candidates = [optimizer.ask() for _ in range(batch_size)]
 
-            futures = {
+            futures = [
                 pool.submit(
                     _evaluate_candidate,
                     np.array(c.value, dtype=np.float32),
                     task, hidden_sizes, num_waypoints,
                     reach_radius, arena_radius, dur,
                     run_seed + evals + i,
-                ): (i, c)
+                )
                 for i, c in enumerate(candidates)
-            }
+            ]
 
-            for future in as_completed(futures):
-                _, candidate = futures[future]
-                fit = future.result()
+            # Wait for all candidates in the generation, then tell all results.
+            # This preserves the ask-all → tell-all contract CMA requires.
+            fits = [f.result() for f in futures]
+            for candidate, fit in zip(candidates, fits):
                 optimizer.tell(candidate, fit)
                 evals += 1
                 if fit < best_fit:
                     best_fit = fit
                     learning_curve.append(best_fit)
 
-                if time.perf_counter() - t_start >= time_limit_s:
-                    timed_out = True
-                    break
+            if time.perf_counter() - t_start >= time_limit_s:
+                timed_out = True
+                break
 
     return {
         "fitness":        best_fit,
