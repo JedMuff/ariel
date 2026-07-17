@@ -87,7 +87,8 @@ parser = argparse.ArgumentParser(description="Multi-objective HPO: CMA-ES + ANN 
 parser.add_argument("--task",             choices=["food", "loco"], default="food")
 parser.add_argument("--n-trials",         type=int,   default=200)
 parser.add_argument("--runs-per-trial",   type=int,   default=5)
-parser.add_argument("--seed",             type=int,   default=42)
+parser.add_argument("--seed",             type=int,   default=None,
+                    help="Random seed (default: random)")
 parser.add_argument("--workers",          type=int,   default=64,
                     help="CPUs used to parallelise each CMA-ES generation (one per candidate)")
 parser.add_argument("--trial-time-limit", type=float, default=300.0,
@@ -103,6 +104,8 @@ parser.add_argument("--budget-max",       type=int,   default=None,
 parser.add_argument("--out-dir",          type=Path,  default=None,
                     help="Output directory (defaults to __data__/tune_cma_ann_{task})")
 args = parser.parse_args()
+if args.seed is None:
+    args.seed = random.randint(0, 2**31 - 1)
 
 _timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 OUT_DIR: Path = args.out_dir if args.out_dir is not None else Path("__data__") / f"tune_cma_ann_{args.task}_{_timestamp}"

@@ -66,7 +66,6 @@ srun python "$SCRIPTS_DIR/tune_cma_ann.py" \
     --runs-per-trial 5 \
     --workers $SLURM_CPUS_PER_TASK \
     --trial-time-limit 300 \
-    --seed 42 \
     --dur 60.0 \
     $([ "$TASK" = "food" ] && echo "--num-waypoints 10 --reach-radius 0.20 --arena-radius 2.0") \
     --out-dir "$DATA_DIR"
