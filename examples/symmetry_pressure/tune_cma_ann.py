@@ -5,9 +5,9 @@ Tunes CMA-ES parameters (sigma, population size, budget, weight init scale) and
 ANN architecture (number of hidden layers 1-3, size of each layer 1-64) using
 Optuna's multi-objective NSGA-II sampler.
 
-Two objectives (both minimised):
-  - mean_fitness:     mean best-fitness over N runs
-  - mean_wall_time_s: mean wall-clock seconds per run
+Two objectives:
+  - mean_fitness:     mean best-fitness over N runs        (maximised)
+  - mean_wall_time_s: mean wall-clock seconds per run      (minimised)
 
 Tasks:
   food  — collect waypoints; input = [robot_state, vision (3 bins), progress]
@@ -667,7 +667,7 @@ def main() -> None:
     study = optuna.create_study(
         study_name=f"tune_cma_ann_{args.task}",
         storage=storage,
-        directions=["minimize", "minimize"],
+        directions=["maximize", "minimize"],
         load_if_exists=True,
         sampler=optuna.samplers.NSGAIISampler(seed=args.seed),
     )
