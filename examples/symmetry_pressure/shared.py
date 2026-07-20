@@ -50,6 +50,8 @@ from ariel.simulation.environments import SimpleFlatWorld
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
+# HPO-tuned defaults (see HPO_FINDINGS.md): 1 hidden layer, 32 units, σ=0.35,
+# pop=20, budget=900, init_scale=1.3 — Pareto-optimal for ≤100 s/run on both tasks.
 HIDDEN_SIZE = 32
 MIN_HINGES = 4
 RING_R_MIN = 0.5
@@ -322,6 +324,7 @@ def ensure_ctx_for_body(
     reach_radius: float,
     arena_radius: float,
     use_vision: bool,
+    use_phase: bool = False,
 ) -> dict[str, Any]:
     global _process_local_ctx  # noqa: PLW0603
     if _process_local_ctx is not None and _process_local_ctx.get("body_hash") == body_hash:
@@ -335,7 +338,7 @@ def ensure_ctx_for_body(
     model, data, target_mocap_id, cam_name = build_world_for_body(
         genome_dict, reach_radius, arena_radius, add_food_target=use_vision
     )
-    input_dim = genome_input_dim(model, data, use_vision)
+    input_dim = genome_input_dim(model, data, use_vision, use_phase=use_phase)
     network = Network(input_size=input_dim, output_size=model.nu)
 
     renderer: Optional[mujoco.Renderer] = None
@@ -583,10 +586,11 @@ def _eval_candidate_worker(job: dict[str, Any]) -> float:
     reach_radius = job["reach_radius"]
     arena_radius = job["arena_radius"]
     use_vision   = job["use_vision"]
+    use_phase    = job.get("use_phase", False)
     episode_fn_name = job["episode_fn_name"]
     episode_fn = _EPISODE_FN_REGISTRY[episode_fn_name]
     try:
-        ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision)
+        ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision, use_phase)
     except Exception:
         return float("inf")
 
@@ -612,6 +616,7 @@ def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
     episode_fn_name = task["episode_fn_name"]
     episode_fn      = task["episode_fn"]
     use_vision      = task["use_vision"]
+    use_phase       = task.get("use_phase", False)
     brain_workers   = task.get("brain_workers", 1)
 
     t_start = time.perf_counter()
@@ -619,7 +624,7 @@ def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
     # Build ctx in the main process to validate the body and get num_params,
     # but each subprocess will build its own copy via ensure_ctx_for_body.
     try:
-        ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision)
+        ctx = ensure_ctx_for_body(body_hash, genome_dict, reach_radius, arena_radius, use_vision, use_phase)
     except Exception:
         return {"fitness": float("inf"), "weights": None,
                 "learning_curve": [], "trajectory": [], "control_cost": 0.0,
@@ -634,8 +639,8 @@ def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
     num_params: int = ctx["num_params"]
 
     rng = np.random.default_rng(rng_seed)
-    initial_guess = rng.uniform(-0.5, 0.5, size=num_params)
-    param = ng.p.Array(init=initial_guess).set_mutation(sigma=0.3)
+    initial_guess = rng.uniform(-1.3, 1.3, size=num_params)
+    param = ng.p.Array(init=initial_guess).set_mutation(sigma=0.35)
     optimizer = ng.optimizers.CMA(
         parametrization=param,
         budget=brain_budget,
