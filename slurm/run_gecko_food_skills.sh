@@ -92,7 +92,7 @@ srun bash -c "
         --max-modules 25 --max-depth 25 \
         --seed $SEED \
         --no-video \
-        --time-limit 100
+        --time-limit 259200
 "
 
 echo "Finished: $(date)"

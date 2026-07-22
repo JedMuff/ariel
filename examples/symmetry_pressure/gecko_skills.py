@@ -38,6 +38,7 @@ from shared import (
     SPAWN_POSITION,
     Network,
     fill_parameters,
+    signed_vertical_yaw_delta,
 )
 
 install()
@@ -184,9 +185,8 @@ def run_turn_episode(
     core_id        = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
     initial_height = float(data.xpos[core_id, 2])
 
-    # Yaw from rotation matrix after settling
-    xmat     = data.xmat[core_id]
-    yaw_prev = math.atan2(float(xmat[3]), float(xmat[0]))  # atan2(R[1,0], R[0,0])
+    # Rotation matrix after settling, for tracking incremental turning
+    r_prev = np.array(data.xmat[core_id]).reshape(3, 3).copy()
 
     accumulated    = 0.0
     step           = 0
@@ -207,15 +207,10 @@ def run_turn_episode(
         data.ctrl[:] = current_action
         mujoco.mj_step(model, data)
 
-        xmat     = data.xmat[core_id]
-        yaw_curr = math.atan2(float(xmat[3]), float(xmat[0]))
-        delta    = yaw_curr - yaw_prev
-        delta    = (delta + math.pi) % (2 * math.pi) - math.pi  # wrap to [-π, π]
-        if direction == +1:
-            accumulated += max(0.0, delta)
-        else:
-            accumulated += max(0.0, -delta)
-        yaw_prev = yaw_curr
+        r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
+        delta  = signed_vertical_yaw_delta(r_prev, r_curr)
+        accumulated += max(0.0, delta * direction)
+        r_prev = r_curr.copy()
 
         curr_rotor_contacts: set[int] = set()
         for k in range(data.ncon):

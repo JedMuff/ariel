@@ -9,6 +9,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import math
 import multiprocessing as mp
 import os
 import random
@@ -288,6 +289,36 @@ def action_control_cost(ctrl_history: list[np.ndarray]) -> float:
         return 0.0
     arr = np.stack(ctrl_history)
     return float(np.mean(arr ** 2))
+
+
+def signed_vertical_yaw_delta(r_prev: np.ndarray, r_curr: np.ndarray) -> float:
+    """Signed rotation-about-world-Z component of the incremental rotation
+    r_prev -> r_curr (each a flattened row-major 3x3, e.g. mujoco's xmat).
+
+    Convention-free: does not assume which local body axis is "up" or
+    "forward", unlike atan2(xmat[3], xmat[0]) (which is only a valid yaw
+    reading if the body's core happens to stay aligned with the "standard"
+    spawn orientation). A body whose core is rotated relative to that
+    orientation, or that tumbles, can make atan2(xmat[3], xmat[0]) swing
+    through large fake "yaw" deltas from roll/pitch alone -- evolved bodies
+    have been found exploiting exactly this to rack up huge fake turn-skill
+    fitness while barely moving. This measures the true geodesic rotation
+    between frames and keeps only its vertical-axis component, so tumbling
+    or rotation about a horizontal axis contributes ~0.
+    """
+    r_prev_mat = np.asarray(r_prev, dtype=np.float64).reshape(3, 3)
+    r_curr_mat = np.asarray(r_curr, dtype=np.float64).reshape(3, 3)
+    r_rel = r_curr_mat @ r_prev_mat.T
+    cos_theta = float(np.clip((np.trace(r_rel) - 1.0) / 2.0, -1.0, 1.0))
+    angle = math.acos(cos_theta)
+    if angle < 1e-9:
+        return 0.0
+    # Rotation axis from the antisymmetric part: (R - R^T) = 2 sin(theta) [axis]_x
+    sin_theta = math.sin(angle)
+    if abs(sin_theta) < 1e-9:
+        return 0.0
+    axis_z = (r_rel[1, 0] - r_rel[0, 1]) / (2.0 * sin_theta)
+    return angle * axis_z
 
 
 # ── Waypoint sampling ─────────────────────────────────────────────────────────

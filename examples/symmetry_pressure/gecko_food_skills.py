@@ -64,6 +64,7 @@ from shared import (
     make_offspring,
     nsga2_survivor_selection,
     sample_waypoints,
+    signed_vertical_yaw_delta,
 )
 
 install()
@@ -271,8 +272,7 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
         x0       = float(data.qpos[0])
         duration = LOCO_DURATION
     else:
-        xmat        = data.xmat[core_id]
-        yaw_prev    = math.atan2(float(xmat[3]), float(xmat[0]))
+        r_prev      = np.array(data.xmat[core_id]).reshape(3, 3).copy()
         accumulated = 0.0
         direction   = +1 if skill == "left" else -1
         duration    = TURN_DURATION
@@ -301,11 +301,10 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
         prev_contacts = curr
 
         if skill != "loco":
-            xmat     = data.xmat[core_id]
-            yaw_curr = math.atan2(float(xmat[3]), float(xmat[0]))
-            delta    = (yaw_curr - yaw_prev + math.pi) % (2 * math.pi) - math.pi
+            r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
+            delta  = signed_vertical_yaw_delta(r_prev, r_curr)
             accumulated += max(0.0, delta * direction)
-            yaw_prev = yaw_curr
+            r_prev = r_curr.copy()
 
         step += 1
 
