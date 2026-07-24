@@ -20,6 +20,8 @@ N_NEIGHBORS = 6
 HINGE_CONTACT_LIMIT = 200
 HINGE_CONTACT_PENALTY = 0.005
 JERK_PENALTY_WEIGHT = 0.01   # penalty per unit of mean absolute ctrl delta
+CTRL_ALPHA = 0.5   # control blending factor (0=no change, 1=instant) — damps resonant ground-jitter exploit
+HEIGHT_PENALTY_THRESHOLD = 0.21  # m — only penalise spawn height above this
 
 
 def _scale_actions(raw: np.ndarray) -> np.ndarray:
@@ -67,11 +69,11 @@ def evaluate_individual(args: tuple) -> dict:
         model = world.spec.compile()
         data = mujoco.MjData(model)
 
-        # Build hinge and floor geom ID sets once per model
+        # Build rotor (not stator) and floor geom ID sets once per model
         hinge_geom_ids: set[int] = set()
         for i in range(model.ngeom):
             name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i)
-            if name and ("stator" in name or "rotor" in name):
+            if name and name.endswith("-rotor"):
                 hinge_geom_ids.add(i)
         floor_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
 
@@ -109,7 +111,13 @@ def evaluate_individual(args: tuple) -> dict:
                 if sim_step % CTRL_EVERY == 0:
                     node_inputs, t = adapter.get_node_inputs(model, data, ctrl_step)
                     raw = brain.forward_all(node_inputs, t)
-                    new_ctrl = _scale_actions(raw)
+                    target_ctrl = _scale_actions(raw)
+                    # Alpha-blend towards new action and clip to servo range
+                    # to prevent resonant ground-jitter exploitation.
+                    new_ctrl = np.clip(
+                        prev_ctrl * (1.0 - CTRL_ALPHA) + target_ctrl * CTRL_ALPHA,
+                        -np.pi / 2, np.pi / 2,
+                    ).astype(np.float32)
                     if ctrl_step > 0:
                         jerk_sum += float(np.mean(np.abs(new_ctrl - prev_ctrl)))
                     prev_ctrl = new_ctrl.copy()
@@ -135,9 +143,10 @@ def evaluate_individual(args: tuple) -> dict:
             if c_hinge > HINGE_CONTACT_LIMIT or not np.isfinite(d):
                 fitness = -1.0
             else:
+                height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
                 fitness = (
                     d
-                    - core_height
+                    - height_penalty
                     - HINGE_CONTACT_PENALTY * c_hinge
                     - JERK_PENALTY_WEIGHT * mean_jerk
                 )
