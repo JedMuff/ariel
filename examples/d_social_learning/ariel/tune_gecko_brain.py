@@ -6,15 +6,23 @@ and DistributedMLP hidden-layer width. Always uses inner-parallelization
 (one trial's CMA-ES generations evaluated in parallel across --workers);
 trials themselves run sequentially so each gets the full worker pool.
 
-Study state is persisted to a sqlite database (resumable via --study-name /
---storage with the same path). Each trial's learned weights, learning curve,
-and hyperparameters are additionally saved to an .npz file immediately after
-that trial completes, since Optuna's storage does not keep arbitrary arrays.
+Study state is persisted to a sqlite database (resumable by passing the same
+--study-name / --storage back in). Each trial's learned weights, learning
+curve, and hyperparameters are additionally saved to an .npz file immediately
+after that trial completes, since Optuna's storage does not keep arbitrary
+arrays.
+
+--study-name defaults to a timestamp (gecko_nsga2_<YYYYmmdd_HHMMSS>), and
+--storage / --weights-dir default to paths derived from --study-name, so a
+plain rerun always starts a fresh study instead of resuming/overwriting a
+previous one. Pass --study-name explicitly (optionally with --storage) to
+resume a specific prior study.
 
 Usage:
     uv run examples/d_social_learning/ariel/tune_gecko_brain.py \
-        --n-trials 100 --workers 16 [--study-name gecko_nsga2] \
-        [--storage sqlite:///__data__/tuning/gecko_nsga2.db] [--seed 0]
+        --n-trials 100 --workers 16 [--study-name gecko_nsga2_20260725_120000] \
+        [--storage sqlite:///__data__/tuning/gecko_nsga2_20260725_120000.db] \
+        [--weights-dir __data__/tuning/gecko_nsga2_20260725_120000_weights] [--seed 0]
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -43,10 +52,8 @@ import gecko_evaluator as ge
 
 console = Console()
 
-WEIGHTS_DIR = Path("__data__/tuning/weights")
 
-
-def make_objective(workers: int, duration: float, ctrl_every: int):
+def make_objective(workers: int, duration: float, ctrl_every: int, weights_dir: Path):
     def objective(trial: optuna.trial.Trial) -> tuple[float, float]:
         sigma = trial.suggest_float("sigma", 0.1, 1.0, log=True)
         pop_size = trial.suggest_int("pop_size", 4, 32)
@@ -69,9 +76,9 @@ def make_objective(workers: int, duration: float, ctrl_every: int):
             ctrl_every=ctrl_every,
         )
 
-        WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+        weights_dir.mkdir(parents=True, exist_ok=True)
         np.savez(
-            WEIGHTS_DIR / f"trial_{trial.number}.npz",
+            weights_dir / f"trial_{trial.number}.npz",
             theta=result.best_theta,
             fitness=result.best_fitness,
             time_s=result.wall_time_s,
@@ -98,26 +105,34 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--duration", type=float, default=ge.DURATION)
     parser.add_argument("--ctrl-every", type=int, default=ge.CTRL_EVERY)
-    parser.add_argument("--study-name", type=str, default="gecko_nsga2")
-    parser.add_argument("--storage", type=str, default="sqlite:///__data__/tuning/gecko_nsga2.db")
+    default_study_name = f"gecko_nsga2_{datetime.now():%Y%m%d_%H%M%S}"
+    parser.add_argument("--study-name", type=str, default=default_study_name)
+    parser.add_argument("--storage", type=str, default=None)
+    parser.add_argument("--weights-dir", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    storage_path = args.storage.removeprefix("sqlite:///")
+    # Default storage/weights-dir are derived from --study-name (whether it
+    # was passed explicitly or defaulted to the timestamp above), so a run
+    # never collides with or silently resumes/overwrites a previous one.
+    storage = args.storage or f"sqlite:///__data__/tuning/{args.study_name}.db"
+    weights_dir = args.weights_dir or Path(f"__data__/tuning/{args.study_name}_weights")
+
+    storage_path = storage.removeprefix("sqlite:///")
     if storage_path:
         Path(storage_path).parent.mkdir(parents=True, exist_ok=True)
 
-    console.rule(f"[bold cyan]Tune gecko brain | trials={args.n_trials} workers={args.workers}")
+    console.rule(f"[bold cyan]Tune gecko brain | trials={args.n_trials} workers={args.workers} study={args.study_name}")
 
     study = optuna.create_study(
         directions=["minimize", "maximize"],
         sampler=optuna.samplers.NSGAIISampler(seed=args.seed),
         study_name=args.study_name,
-        storage=args.storage,
+        storage=storage,
         load_if_exists=True,
     )
 
-    objective = make_objective(args.workers, args.duration, args.ctrl_every)
+    objective = make_objective(args.workers, args.duration, args.ctrl_every, weights_dir)
     study.optimize(objective, n_trials=args.n_trials, n_jobs=1)
 
     console.log(f"Completed {len(study.trials)} total trials.")

@@ -33,8 +33,9 @@ cd "$REPO_ROOT"
 
 N_TRIALS=100
 WORKERS=$SLURM_CPUS_PER_TASK
-STUDY_NAME=gecko_nsga2
-STORAGE="sqlite:///__data__/tuning/gecko_nsga2.db"
+STUDY_NAME="gecko_nsga2_$(date +%Y%m%d_%H%M%S)"
+STORAGE="sqlite:///__data__/tuning/${STUDY_NAME}.db"
+WEIGHTS_DIR="__data__/tuning/${STUDY_NAME}_weights"
 
 echo "Trials: $N_TRIALS  Workers: $WORKERS  Study: $STUDY_NAME"
 
@@ -46,7 +47,8 @@ srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/tune_gecko_brain.p
     --n-trials "$N_TRIALS" \
     --workers "$WORKERS" \
     --study-name "$STUDY_NAME" \
-    --storage "$STORAGE"
+    --storage "$STORAGE" \
+    --weights-dir "$WEIGHTS_DIR"
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
