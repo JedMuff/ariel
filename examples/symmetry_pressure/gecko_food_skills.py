@@ -141,7 +141,7 @@ LOCO_BUDGET          = 100     # CMA-ES generations
 TURN_BUDGET          = 100     # CMA-ES generations (per direction)
 COMMIT_STEPS         = 40
 CENTRE_FWD_THRESH    = 0.4
-CONTROL_STEP_FREQ    = 50      # Hz (was 100 Hz for the monolithic-brain variant)
+CONTROL_STEP_FREQ    = 100     # Hz
 CMA_INIT_SCALE       = 1.3
 
 SETTLE_DURATION       = 3.0
