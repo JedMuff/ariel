@@ -65,6 +65,7 @@ from shared import (
     nsga2_survivor_selection,
     sample_waypoints,
     signed_vertical_yaw_delta,
+    symmetry_axis_from_cli,
 )
 
 install()
@@ -89,6 +90,11 @@ parser.add_argument("--num-waypoints", type=int,   default=10)
 parser.add_argument("--arena-radius",  type=float, default=3.0)
 parser.add_argument("--max-modules",   type=int,   default=25)
 parser.add_argument("--max-depth",     type=int,   default=25)
+parser.add_argument("--symmetry-axis",
+                    choices=["none", "y_zero", "x_equals_y"],
+                    default="none",
+                    help="Enforce bilateral symmetry of generated/mutated/crossed-over "
+                         "bodies about this axis before construction ('none' disables)")
 parser.add_argument("--seed",          type=int,   default=42)
 parser.add_argument("--strategy-type",
                     choices=["plus", "comma", "nsga2-efficiency", "nsga2-symmetry"],
@@ -113,6 +119,7 @@ NUM_WAYPOINTS  = args.num_waypoints
 ARENA_RADIUS   = max(1.0, args.arena_radius)
 NUM_MODULES    = args.max_modules
 MAX_DEPTH      = args.max_depth
+SYMMETRY_AXIS  = symmetry_axis_from_cli(args.symmetry_axis)
 BASE_SEED      = args.seed
 STRATEGY       = args.strategy_type
 REPEAT_EVALS   = args.repeat_evals
@@ -658,7 +665,7 @@ class BodyBrainEvolution:
         parents = [ind for ind in population if ind.tags.get("ps", False)]
         if not parents:
             parents = list(population)
-        offspring = make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH)
+        offspring = make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH, symmetry_axis=SYMMETRY_AXIS)
 
         if STRATEGY == "plus" and REPEAT_EVALS:
             for ind in parents:
@@ -870,7 +877,9 @@ class BodyBrainEvolution:
 
     def evolve(self) -> Optional[Individual]:
         console.log("[yellow]Initialising population...[/yellow]")
-        population = Population([create_individual(NUM_MODULES, MAX_DEPTH) for _ in range(MU)])
+        population = Population([
+            create_individual(NUM_MODULES, MAX_DEPTH, symmetry_axis=SYMMETRY_AXIS) for _ in range(MU)
+        ])
 
         population = self.evaluate(population)
 

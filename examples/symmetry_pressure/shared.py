@@ -37,13 +37,16 @@ from ariel.ec import Individual, Population
 from ariel.ec.genotypes.tree.operators import (
     _prune_invalid_edges,
     crossover_subtree,
+    crossover_subtree_symmetric,
     mutate_hoist,
     mutate_replace_node,
     mutate_shrink,
     mutate_subtree_replacement,
     random_tree,
+    random_tree_symmetric,
     validate_tree_depth,
 )
+from ariel.ec.genotypes.tree.symmetry import MirrorAxis, symmetrize_genome
 from ariel.ec.genotypes.tree.tree_genome import TreeGenome
 from ariel.ec.genotypes.tree.validation import validate_genome_dict
 from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
@@ -214,68 +217,74 @@ def genome_hash(genome_dict: dict) -> str:
 # ── Morphological metrics ─────────────────────────────────────────────────────
 
 
-def bilateral_symmetry_score(genome_dict: dict) -> float:
-    """Left-right (XZ-plane) bilateral symmetry of a TreeGenome.
+def bilateral_symmetry_score(genome_dict: dict, axis: str = "y_zero") -> float:
+    """Bilateral symmetry of a TreeGenome about ``axis`` ("y_zero" or "x_equals_y").
 
-    Computes positions of all modules relative to the root via BFS, then
-    counts how many modules at (x, y, z) have a mirror at (x, -y, z) of
-    the same type. Returns fraction of non-midline modules that are matched,
-    in [0, 1]. Returns 0.0 on failure.
+    Identifies each module by its path of faces from the root (rather than a
+    collapsed integer (x, y, z) grid position, which can alias distinct
+    branches onto the same cell on deep/branchy trees and produce false
+    mismatches). Two modules are mirror partners if one's root-path is the
+    other's root-path with faces mirrored per ``axis`` — using the same rule
+    `ariel.ec.genotypes.tree.symmetry.symmetrize_genome` enforces: for
+    "y_zero", RIGHT<->LEFT at every hop; for "x_equals_y", FRONT<->RIGHT and
+    BACK<->LEFT at the first hop off the root only, RIGHT<->LEFT at every hop
+    after that. Returns the fraction of off-midline modules that have a
+    same-type mirror partner, in [0, 1]. Returns 0.0 on failure.
     """
     try:
+        from ariel.ec.genotypes.tree.symmetry import MirrorAxis, mirror_face
+
+        mirror_axis = MirrorAxis.Y_ZERO if axis == "y_zero" else MirrorAxis.X_EQUALS_Y
+
         graph = TreeGenome.from_dict(genome_dict).to_networkx()
         if graph.number_of_nodes() == 0:
             return 0.0
 
-        # Find root (no predecessors)
         roots = [n for n in graph.nodes() if graph.in_degree(n) == 0]
         if not roots:
             return 0.0
         root = roots[0]
 
-        # BFS to assign integer (x, y, z) grid positions.
-        # Edge attribute 'face' encodes direction: FRONT=+x, BACK=-x,
-        # RIGHT=+y, LEFT=-y, TOP=+z, BOTTOM=-z.
-        face_to_delta = {
-            "FRONT":  ( 1,  0,  0),
-            "BACK":   (-1,  0,  0),
-            "RIGHT":  ( 0,  1,  0),
-            "LEFT":   ( 0, -1,  0),
-            "TOP":    ( 0,  0,  1),
-            "BOTTOM": ( 0,  0, -1),
-        }
-        pos: dict[Any, tuple[int, int, int]] = {root: (0, 0, 0)}
+        # BFS to assign each node its path of faces from the root.
+        paths: dict[Any, tuple[str, ...]] = {root: ()}
         queue = [root]
         while queue:
             node = queue.pop(0)
             for child in graph.successors(node):
-                if child in pos:
+                if child in paths:
                     continue
                 face = (graph.get_edge_data(node, child) or {}).get("face", "FRONT")
-                dx, dy, dz = face_to_delta.get(face, (1, 0, 0))
-                px, py, pz = pos[node]
-                pos[child] = (px + dx, py + dy, pz + dz)
+                paths[child] = (*paths[node], face)
                 queue.append(child)
+
+        def mirror_path(path: tuple[str, ...]) -> tuple[str, ...]:
+            mirrored = []
+            for i, face in enumerate(path):
+                mirrored.append(mirror_face(face, mirror_axis, is_outer=(i == 0)))
+            return tuple(mirrored)
+
+        def is_off_midline(path: tuple[str, ...]) -> bool:
+            return path != mirror_path(path)
 
         def node_type(n: Any) -> str:
             return graph.nodes[n].get("type", "UNKNOWN")
 
-        # Build lookup: (x, y, z) -> type
-        grid: dict[tuple[int, int, int], str] = {p: node_type(n) for n, p in pos.items()}
+        # Lookup: path -> type (paths are unique per node by construction).
+        by_path: dict[tuple[str, ...], str] = {p: node_type(n) for n, p in paths.items()}
 
         num_symmetrical = 0
         num_off_midline = 0
-        seen: set[tuple[int, int, int]] = set()
-        for (x, y, z), t in grid.items():
-            if y == 0:
+        seen: set[tuple[str, ...]] = set()
+        for path, t in by_path.items():
+            if not is_off_midline(path):
                 continue  # midline module, skip
-            if (x, y, z) in seen:
+            if path in seen:
                 continue
-            seen.add((x, y, z))
-            seen.add((x, -y, z))
+            mpath = mirror_path(path)
+            seen.add(path)
+            seen.add(mpath)
             num_off_midline += 1
-            mirror = grid.get((x, -y, z))
-            if mirror == t:
+            if by_path.get(mpath) == t:
                 num_symmetrical += 1
 
         return num_symmetrical / num_off_midline if num_off_midline > 0 else 0.0
@@ -502,6 +511,13 @@ def nsga2_survivor_selection(
 # ── Body mutation + generation ────────────────────────────────────────────────
 
 
+def symmetry_axis_from_cli(value: Optional[str]) -> Optional[MirrorAxis]:
+    """Map a ``--symmetry-axis`` CLI value ("none"/"y_zero"/"x_equals_y"/None) to a MirrorAxis."""
+    if value is None or value == "none":
+        return None
+    return MirrorAxis(value)
+
+
 def mutate_morph(genome: TreeGenome, rng: np.random.Generator, num_modules: int) -> TreeGenome:
     new = copy.deepcopy(genome)
     mutation_type = rng.choice(["point", "subtree", "shrink", "hoist"], p=[0.45, 0.35, 0.1, 0.1])
@@ -530,14 +546,33 @@ def mutate_morph(genome: TreeGenome, rng: np.random.Generator, num_modules: int)
     return new
 
 
+def mutate_morph_symmetric(
+    genome: TreeGenome, rng: np.random.Generator, num_modules: int, axis: MirrorAxis
+) -> TreeGenome:
+    """Like `mutate_morph`, but guarantees the result stays symmetric about ``axis``.
+
+    Applies the ordinary (potentially symmetry-breaking) mutation, then
+    re-symmetrizes — reusing all four existing mutation operators unchanged.
+    Assumes ``genome`` is already symmetric about ``axis``.
+    """
+    mutated = mutate_morph(genome, rng, num_modules)
+    return symmetrize_genome(mutated, axis)
+
+
 def joint_count(genome: TreeGenome) -> int:
     """Count hinge joints by walking the genome graph — no MuJoCo compilation needed."""
     return sum(1 for d in genome.nodes.values() if d.get("type") == "HINGE")
 
 
-def create_individual(num_modules: int, max_depth: int) -> Individual:
+def create_individual(
+    num_modules: int, max_depth: int, symmetry_axis: Optional[MirrorAxis] = None
+) -> Individual:
     while True:
-        genome = random_tree(num_modules)
+        genome = (
+            random_tree_symmetric(num_modules, symmetry_axis)
+            if symmetry_axis is not None
+            else random_tree(num_modules)
+        )
         if joint_count(genome) >= MIN_HINGES and validate_tree_depth(genome, max_depth):
             break
     ind = Individual()
@@ -553,6 +588,7 @@ def make_offspring(
     rng: np.random.Generator,
     num_modules: int,
     max_depth: int,
+    symmetry_axis: Optional[MirrorAxis] = None,
 ) -> list[Individual]:
     """Generate lam offspring via subtree crossover + mutation."""
     offspring: list[Individual] = []
@@ -562,7 +598,10 @@ def make_offspring(
             p1, p2 = random.sample(parents, 2)
             t1 = TreeGenome.from_dict(p1.genotype["morph"])
             t2 = TreeGenome.from_dict(p2.genotype["morph"])
-            c1, c2 = crossover_subtree(t1, t2)
+            if symmetry_axis is not None:
+                c1, c2 = crossover_subtree_symmetric(t1, t2, symmetry_axis)
+            else:
+                c1, c2 = crossover_subtree(t1, t2)
             child_morph = c1 if rng.random() < 0.5 else c2
             parent_ids = [p1.id, p2.id]
         else:
@@ -570,7 +609,10 @@ def make_offspring(
             child_morph = TreeGenome.from_dict(p.genotype["morph"])
             parent_ids = [p.id]
 
-        child_morph = mutate_morph(child_morph, rng, num_modules)
+        if symmetry_axis is not None:
+            child_morph = mutate_morph_symmetric(child_morph, rng, num_modules, symmetry_axis)
+        else:
+            child_morph = mutate_morph(child_morph, rng, num_modules)
 
         attempts = 0
         valid = False
@@ -578,7 +620,10 @@ def make_offspring(
             if joint_count(child_morph) >= MIN_HINGES and validate_tree_depth(child_morph, max_depth):
                 valid = True
                 break
-            child_morph = mutate_morph(child_morph, rng, num_modules)
+            if symmetry_axis is not None:
+                child_morph = mutate_morph_symmetric(child_morph, rng, num_modules, symmetry_axis)
+            else:
+                child_morph = mutate_morph(child_morph, rng, num_modules)
             attempts += 1
 
         child = Individual()

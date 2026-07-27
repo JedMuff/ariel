@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import copy
 import random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
@@ -19,6 +19,9 @@ from ariel.body_phenotypes.robogen_lite.config import (
 
 from .tree_genome import TreeGenome
 from .validation import validate_genome_dict
+
+if TYPE_CHECKING:
+    from .symmetry import MirrorAxis
 
 
 def add_node(genome: TreeGenome, parent: int, face: str, node_id: int, mtype: str, rotation: str) -> None:
@@ -166,6 +169,23 @@ def crossover_subtree(a: TreeGenome, b: TreeGenome) -> tuple[TreeGenome, TreeGen
         # If validation fails, return copies of parents
         return copy.deepcopy(a), copy.deepcopy(b)
     return child1, child2
+
+
+def crossover_subtree_symmetric(
+    a: TreeGenome, b: TreeGenome, axis: MirrorAxis
+) -> tuple[TreeGenome, TreeGenome]:
+    """Like `crossover_subtree`, but guarantees both children stay symmetric.
+
+    Runs the ordinary (potentially symmetry-breaking) subtree crossover, then
+    re-symmetrizes each child about ``axis``. Reuses `crossover_subtree`
+    unchanged, so parents are expected to already be symmetric about the same
+    axis (as produced by `random_tree_symmetric`/this function/
+    `mutate_morph_symmetric`).
+    """
+    from .symmetry import symmetrize_genome
+
+    child1, child2 = crossover_subtree(a, b)
+    return symmetrize_genome(child1, axis), symmetrize_genome(child2, axis)
 
 
 def mutate_replace_node(genome: TreeGenome) -> None:
@@ -458,6 +478,59 @@ def random_tree(max_modules: int) -> TreeGenome:
         add_node(g, parent, face, next_id, mtype, rot)
         next_id += 1
     return g
+
+
+def random_tree_symmetric(max_modules: int, axis: MirrorAxis) -> TreeGenome:
+    """Generate a random tree genome that is bilaterally symmetric about ``axis``.
+
+    Grows a tree exactly like `random_tree`, but only ever attaches new
+    modules on the "canonical" side of a mirrored face pair (e.g. never RIGHT
+    when growing under a LEFT-rooted arm for the y=0 axis) — midline faces
+    and primary-side faces are grown freely. Since mirroring roughly doubles
+    the non-midline part of the tree, growth is capped at half the budget so
+    the final symmetric tree stays close to ``max_modules`` total nodes
+    (matching what `random_tree(max_modules)` produces for non-symmetric
+    genomes). Once growth stops, `symmetrize_genome` mirrors the canonical
+    half onto the other side.
+    """
+    from .symmetry import MirrorAxis, is_on_midline, is_primary_face, symmetrize_genome
+
+    def branch_is_canonical(pid: int, face: str) -> bool:
+        """Whether growing on ``face`` under node ``pid`` stays on the side
+        that will be treated as the mirror source (i.e. not pruned/overwritten
+        by symmetrize_genome)."""
+        is_outer = pid == IDX_OF_CORE
+        if is_on_midline(face, axis, is_outer=is_outer):
+            return True
+        return is_primary_face(face, axis, is_outer=is_outer)
+
+    growth_budget = max(1, max_modules // 2)
+
+    g = TreeGenome()
+    g.nodes = {IDX_OF_CORE: {"type": "CORE", "rotation": "DEG_0"}}
+    g.edges = []
+
+    next_id = 1
+    while next_id <= growth_budget:
+        free = []
+        for pid, pdata in g.nodes.items():
+            ptype = ModuleType[pdata["type"]]
+            allowed_faces = [f.name for f in ALLOWED_FACES[ptype]]
+            used = {e["face"] for e in g.edges if e["parent"] == pid}
+            for face in allowed_faces:
+                if face not in used and branch_is_canonical(pid, face):
+                    free.append((pid, face))
+        if not free:
+            break
+        parent, face = random.choice(free)
+        types = [t for t in ModuleType if t not in (ModuleType.CORE, ModuleType.NONE)]
+        mtype = random.choice(types).name
+        rotations = [r.name for r in ALLOWED_ROTATIONS[ModuleType[mtype]]]
+        rot = random.choice(rotations) if rotations else "DEG_0"
+        add_node(g, parent, face, next_id, mtype, rot)
+        next_id += 1
+
+    return symmetrize_genome(g, axis)
 
 
 def get_tree_depth(genome: TreeGenome) -> int:

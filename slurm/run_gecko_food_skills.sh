@@ -36,6 +36,7 @@ FINAL_DIR=/scratch/jed/ariel_food_skills
 RUN_TAG=food_skills_${TIMESTAMP}_${SLURM_JOB_ID}
 
 STRATEGY=plus
+SYMMETRY_AXIS=none  # none | y_zero | x_equals_y
 SEED=$RANDOM$RANDOM
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -54,6 +55,7 @@ echo "========================================================"
 echo "Node:           $(hostname)"
 echo "Job:            $SLURM_JOB_ID"
 echo "Strategy:       $STRATEGY"
+echo "Symmetry axis:  $SYMMETRY_AXIS"
 echo "Seed:           $SEED"
 echo "CPUs:           $SLURM_CPUS_PER_TASK"
 echo "MUJOCO_GL:      $MUJOCO_GL"
@@ -91,6 +93,7 @@ srun bash -c "
         --repeat-evals \
         --brain-workers $SLURM_CPUS_PER_TASK \
         --max-modules 25 --max-depth 25 \
+        --symmetry-axis $SYMMETRY_AXIS \
         --seed $SEED \
         --no-video \
         --time-limit 259200
