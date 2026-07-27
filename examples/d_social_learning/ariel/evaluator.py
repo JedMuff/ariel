@@ -35,7 +35,7 @@ def evaluate_individual(args: tuple) -> dict:
     Parameters
     ----------
     args : tuple
-        (genome_dict, init_mean_list, donor_ids, inner_gens, pop_size)
+        (genome_dict, init_mean_list, donor_ids, inner_gens, pop_size, sigma, hidden)
 
     Returns
     -------
@@ -55,7 +55,7 @@ def evaluate_individual(args: tuple) -> dict:
     from ariel.simulation.controllers.morphology_adapter import MorphologyAdapter
     from ariel.simulation.environments import SimpleFlatWorld
 
-    genome_dict, init_mean_list, donor_ids, inner_gens, pop_size = args
+    genome_dict, init_mean_list, donor_ids, inner_gens, pop_size, sigma, hidden = args
 
     _empty = {"distance": 0.0, "best_theta": [], "init_fitness": 0.0, "learning_curve": [], "donor_ids": donor_ids}
 
@@ -78,7 +78,7 @@ def evaluate_individual(args: tuple) -> dict:
         floor_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
 
         adapter = MorphologyAdapter.from_graph(graph)
-        brain = DistributedMLP(n_neighbors=N_NEIGHBORS)
+        brain = DistributedMLP(n_neighbors=N_NEIGHBORS, hidden=hidden)
 
         init_mean = (
             np.asarray(init_mean_list, dtype=np.float64)
@@ -165,7 +165,7 @@ def evaluate_individual(args: tuple) -> dict:
         learner = CMAESLearner(
             n_params=brain.n_params,
             init_mean=init_mean,
-            sigma=0.5,
+            sigma=sigma,
             pop_size=pop_size,
         )
 

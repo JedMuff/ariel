@@ -3,7 +3,7 @@
 Usage:
     uv run examples/d_social_learning/ariel/experiment.py \
         --scheme lamarckian --x 0.5 --rep 0 [--gens 100] [--pop 20] [--lam 100] \
-        [--inner-gens 20] [--inner-pop 16] [--workers N]
+        [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N]
 """
 
 import argparse
@@ -97,6 +97,8 @@ def build_ops(
     inner_gens: int,
     inner_pop: int,
     num_workers: int,
+    sigma: float,
+    hidden: int,
 ) -> list[EAOperation]:
     """Return the ordered list of EAOperation steps for the outer EA."""
     @EAOperation
@@ -157,7 +159,7 @@ def build_ops(
             scheme_fn = SCHEMES[scheme_name]
 
             from ariel.simulation.controllers.distributed_mlp import DistributedMLP
-            n_params = DistributedMLP(n_neighbors=N_NEIGHBORS).n_params
+            n_params = DistributedMLP(n_neighbors=N_NEIGHBORS, hidden=hidden).n_params
 
             worker_args = []
             for i, ind in enumerate(all_alive):
@@ -168,6 +170,8 @@ def build_ops(
                     donor_ids,
                     inner_gens,
                     inner_pop,
+                    sigma,
+                    hidden,
                 ))
 
             if num_workers > 1:
@@ -236,6 +240,8 @@ def main() -> None:
     parser.add_argument("--lam", type=int, default=100)
     parser.add_argument("--inner-gens", type=int, default=20)
     parser.add_argument("--inner-pop", type=int, default=16)
+    parser.add_argument("--sigma", type=float, default=0.5, help="CMA-ES initial step size")
+    parser.add_argument("--hidden", type=int, default=32, help="DistributedMLP hidden width")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--resume", action="store_true",
                         help="Resume from existing database.db at the last saved generation")
@@ -255,6 +261,8 @@ def main() -> None:
         inner_gens=args.inner_gens,
         inner_pop=args.inner_pop,
         num_workers=args.workers,
+        sigma=args.sigma,
+        hidden=args.hidden,
     )
 
     db_path = out_dir / "database.db"

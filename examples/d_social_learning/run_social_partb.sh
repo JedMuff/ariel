@@ -34,12 +34,14 @@ REP="$3"
 GENS=20
 POP=20
 LAM=20
-INNER_GENS=50
+INNER_GENS=25
 INNER_POP=20
+SIGMA=0.45
+HIDDEN=16
 WORKERS=20
 
 echo "Scheme: $SCHEME  x=$X  rep=$REP"
-echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP workers=$WORKERS"
+echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS"
 
 mkdir -p out_files
 
@@ -49,6 +51,7 @@ srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/experiment.py \
     --scheme "$SCHEME" --x "$X" --rep "$REP" \
     --gens "$GENS" --pop "$POP" --lam "$LAM" \
     --inner-gens "$INNER_GENS" --inner-pop "$INNER_POP" \
+    --sigma "$SIGMA" --hidden "$HIDDEN" \
     --workers "$WORKERS" \
     --resume
 
