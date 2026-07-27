@@ -36,7 +36,10 @@ FINAL_DIR=/scratch/jed/ariel_food_skills
 RUN_TAG=food_skills_${TIMESTAMP}_${SLURM_JOB_ID}
 
 STRATEGY=plus
-SYMMETRY_AXIS=none  # none | y_zero | x_equals_y
+# y_zero mirrors RIGHT<->LEFT (true left-right bilateral symmetry, the
+# biologically correct axis for a walking gecko); x_equals_y is a 45-degree
+# diagonal mirror with no locomotion relevance.
+SYMMETRY_AXIS=y_zero  # none | y_zero | x_equals_y
 SEED=$RANDOM$RANDOM
 
 # ── Environment ───────────────────────────────────────────────────────────────
