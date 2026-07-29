@@ -161,6 +161,16 @@ HINGE_GLITCH_FITNESS  = 1.0
 HEIGHT_PENALTY_THRESHOLD = 0.21
 CTRL_ALPHA            = 0.5
 
+# The core-mounted camera's local mount (euler + position) is fixed in
+# core.py and never rotated relative to the world, since every body here
+# spawns with rotation=None (SimpleFlatWorld default = no rotation). Its
+# world-frame forward direction is therefore this constant for every
+# individual, not something that needs re-measuring per body: confirmed via
+# data.cam_xmat at spawn (camera looks down world -Y, not +X). The loco skill
+# must reward displacement along this same axis so "forward" for locomotion
+# and "forward" for the vision-driven SkillController agree.
+FORWARD_AXIS = np.array([0.0, -1.0])
+
 SPAWN_POSITION = (0.0, 0.0, 0.1)
 GATE_HALF_HEIGHT = 0.15
 
@@ -276,7 +286,7 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
     prev_contacts: set[int] = set()
 
     if skill == "loco":
-        x0       = float(data.qpos[0])
+        xy0      = np.array([data.qpos[0], data.qpos[1]])
         duration = LOCO_DURATION
     else:
         r_prev      = np.array(data.xmat[core_id]).reshape(3, 3).copy()
@@ -320,8 +330,9 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
 
     height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
     if skill == "loco":
-        x_disp = float(data.qpos[0]) - x0
-        return -(x_disp - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
+        xy_now   = np.array([data.qpos[0], data.qpos[1]])
+        fwd_disp = float(np.dot(xy_now - xy0, FORWARD_AXIS))
+        return -(fwd_disp - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
     else:
         return -(accumulated - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
 
@@ -676,7 +687,13 @@ class BodyBrainEvolution:
 
     def evaluate(self, population: Population) -> Population:
         gen_rng = np.random.default_rng(BASE_SEED + self.outer_gen)
-        self.gen_waypoints = sample_waypoints(gen_rng, n=NUM_WAYPOINTS)
+        # First food is always 1.5 m directly ahead of spawn, so bodies must
+        # master forward locomotion before turning is needed for later foods.
+        # The core camera looks down world -Y at spawn (verified: core.py's
+        # camera euler + the core module never being rotated by the genome),
+        # so "ahead" for the vision-driven SkillController is -Y, not +X.
+        self.gen_waypoints = [np.array([0.0, -1.5, GATE_HALF_HEIGHT])]
+        self.gen_waypoints += sample_waypoints(gen_rng, n=NUM_WAYPOINTS - 1)
         food_positions = [[float(w[0]), float(w[1]), float(w[2])] for w in self.gen_waypoints]
 
         wp_str = "  ".join(f"({w[0]:.1f},{w[1]:.1f})" for w in self.gen_waypoints)

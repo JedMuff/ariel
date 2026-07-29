@@ -39,8 +39,13 @@ console = Console()
 
 SPAWN_POSITION        = (0.0, 0.0, 0.1)
 GATE_HALF_HEIGHT       = 0.15
+# Must match gecko_food_skills.py's FORWARD_AXIS: the core-mounted camera
+# looks down world -Y for every body (no spawn rotation is ever applied), so
+# the loco skill's reward — and this overlay's displacement readout — are
+# both measured along that axis, not world +X.
+FORWARD_AXIS           = np.array([0.0, -1.0])
 HIDDEN_SIZES           = [32]
-CONTROL_STEP_FREQ      = 50
+CONTROL_STEP_FREQ      = 100
 CTRL_ALPHA             = 0.5
 SETTLE_DURATION        = 3.0
 FOOD_EVAL_DURATION     = 120.0
@@ -123,7 +128,7 @@ def _make_tracking_camera(core_pos: np.ndarray) -> mujoco.MjvCamera:
     cam = mujoco.MjvCamera()
     cam.type = mujoco.mjtCamera.mjCAMERA_FREE
     cam.lookat[:] = core_pos
-    cam.distance = 2.2
+    cam.distance = 4.5
     cam.azimuth = 225.0
     cam.elevation = -35.0
     return cam
@@ -341,7 +346,7 @@ def render_skill_only(
     while data.time < SETTLE_DURATION:
         mujoco.mj_step(model, data)
 
-    x0 = float(data.qpos[0])
+    xy0 = np.array([data.qpos[0], data.qpos[1]])
     r_prev = np.array(data.xmat[core_id]).reshape(3, 3).copy()
     yaw_total = 0.0
     direction = {"loco": 0, "left": +1, "right": -1}[skill]
@@ -392,7 +397,9 @@ def render_skill_only(
 
             active_time = max(0.0, data.time - SETTLE_DURATION)
             if skill == "loco":
-                metric_line = f"X displacement: {float(data.qpos[0]) - x0:+.3f} m"
+                xy_now = np.array([data.qpos[0], data.qpos[1]])
+                fwd_disp = float(np.dot(xy_now - xy0, FORWARD_AXIS))
+                metric_line = f"Forward-axis displacement: {fwd_disp:+.3f} m"
             else:
                 direction_label = "CCW (left)" if direction == +1 else "CW (right)"
                 metric_line = f"Yaw accumulated ({direction_label}): {math.degrees(yaw_total):.1f} deg"
@@ -423,7 +430,10 @@ def render_skill_only(
         "skill": skill,
         "video": str(out_path),
         "yaw_accumulated_deg": math.degrees(yaw_total) if skill != "loco" else None,
-        "x_displacement_m": float(data.qpos[0]) - x0 if skill == "loco" else None,
+        "forward_displacement_m": (
+            float(np.dot(np.array([data.qpos[0], data.qpos[1]]) - xy0, FORWARD_AXIS))
+            if skill == "loco" else None
+        ),
         "c_hinge": c_hinge,
         "meta_fitness": meta.get("fitness"),
     }
