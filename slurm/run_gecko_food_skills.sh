@@ -92,7 +92,7 @@ srun bash -c "
     python \"$SCRIPTS_DIR/gecko_food_skills.py\" \
         --strategy-type $STRATEGY \
         --budget 30 \
-        --pop 10 --lam 10 \
+        --pop 10 --lam 20 \
         --repeat-evals \
         --brain-workers $SLURM_CPUS_PER_TASK \
         --max-modules 25 --max-depth 25 \

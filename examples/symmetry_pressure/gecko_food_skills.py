@@ -17,6 +17,11 @@ With --loco-only, the left/right turn training and the food-task evaluation are
 skipped entirely: only the loco skill is trained and fitness is its own
 (negative) forward-displacement score.
 
+Independently of --loco-only, every individual is first gated on its own loco
+fitness: if the loco skill isn't fast enough (fitness > LOCO_GATE_THRESH), the
+turn skills and food-task evaluation are skipped for that individual too, and
+its loco fitness is used as-is as the final fitness.
+
 Data saved per individual during evolution (run_data.jsonl):
   gen, ind_id, parent_ids, fitness, loco_only,
   loco_learning_curve, left_learning_curve, right_learning_curve,
@@ -150,6 +155,7 @@ COMMIT_STEPS         = 40
 CENTRE_FWD_THRESH    = 0.4
 CONTROL_STEP_FREQ    = 100     # Hz
 CMA_INIT_SCALE       = 1.3
+LOCO_GATE_THRESH     = -1.0    # loco fitness must be <= this to train turn skills
 
 SETTLE_DURATION       = 3.0
 LOCO_DURATION         = 30.0
@@ -560,7 +566,10 @@ def _run_food_episode(
         fitness = HINGE_GLITCH_FITNESS
     else:
         height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-        fitness = -(waypoints_reached + d_norm - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
+        # Baseline shift: reaching the food eval at all (i.e. clearing the loco
+        # gate) is worth -1, matching LOCO_GATE_THRESH so a gated-in individual
+        # is never scored worse than one that was gated out.
+        fitness = -1.0 - (waypoints_reached + d_norm - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
 
     total_ctrl_steps = len(skill_log)
     skill_pct = {
@@ -590,10 +599,11 @@ def _train_pipeline_for_body(
     loco_w, loco_curve, loco_time = _train_skill_for_body(
         "loco", genome_dict, LOCO_BUDGET, BRAIN_WORKERS, seed,
     )
+    loco_fitness = float(min(loco_curve)) if loco_curve else float("inf")
 
-    if LOCO_ONLY:
+    if LOCO_ONLY or loco_fitness > LOCO_GATE_THRESH:
         return {
-            "fitness":             float(min(loco_curve)) if loco_curve else float("inf"),
+            "fitness":             loco_fitness,
             "loco_weights":        loco_w,
             "left_weights":        None,
             "right_weights":       None,
@@ -934,7 +944,8 @@ def main() -> None:
     console.rule("[bold magenta]Symmetry-Pressure — Food Collection (Skill Controller)[/bold magenta]")
     console.log(
         f"strategy={STRATEGY}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
-        f"loco_only={LOCO_ONLY}  loco_budget={LOCO_BUDGET}  turn_budget={TURN_BUDGET}  "
+        f"loco_only={LOCO_ONLY}  loco_gate_thresh={LOCO_GATE_THRESH}  "
+        f"loco_budget={LOCO_BUDGET}  turn_budget={TURN_BUDGET}  "
         f"cma_sigma={CMA_SIGMA}  cma_pop={CMA_POPSIZE}  commit_steps={COMMIT_STEPS}  "
         f"centre_fwd_thresh={CENTRE_FWD_THRESH}  brain_workers={BRAIN_WORKERS}  "
         f"repeat_evals={REPEAT_EVALS}  waypoints={NUM_WAYPOINTS}  seed={BASE_SEED}"
