@@ -21,7 +21,7 @@
 #SBATCH --time=00:45:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=13G
-#SBATCH --array=0-119
+#SBATCH --array=0-79
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -31,8 +31,8 @@ REPO_ROOT=/home/jed/workspaces/ariel
 VENV_PATH=$REPO_ROOT/.venv
 
 # TODO: fill in before submitting.
-SCRATCH_IN="/scratch-shared/jed/social/ariel"      # holds {scheme}/x{XX}/rep_{N}/database.db
-SCRATCH_OUT="/scratch-shared/jed/social/behavior"  # mirrors the same layout
+SCRATCH_IN="/scratch/jed/social/ariel"      # holds {scheme}/x{XX}/rep_{N}/database.db
+SCRATCH_OUT="/scratch/jed/social/behavior"  # mirrors the same layout
 
 WORKERS=16
 RECORD_EVERY_N=10
@@ -54,7 +54,7 @@ cd "$REPO_ROOT"
 # ---------------------------------------------------------------------------
 
 SCHEMES=(darwinian lamarckian random random_many best best_many similar similar_many)
-X_DIRS=(x00 x05 x10)
+X_DIRS=(x05 x10)
 N_REPS=5
 
 combos=()
