@@ -1,11 +1,13 @@
 #!/bin/bash
 #
-# Array job: run behavior_extract.py over all 120 social-learning experiments
-# (8 schemes x 3 x-values x 5 reps), one array task per experiment.
+# Array job: run behavior_extract.py over all 80 social-learning experiments
+# with behaviour (8 schemes x 2 x-values [x05, x10] x 5 reps), one array task
+# per experiment. x00 is excluded: with no social learning, there's no
+# behaviour to extract.
 #
 # Reads each experiment's database.db from $SCRATCH_IN and writes
-# joint_angles.db / module_trajectory.db / ann_io.db back to $SCRATCH_OUT,
-# mirroring the scheme/xVV/rep_N directory layout.
+# behavior.npz back to $SCRATCH_OUT, mirroring the scheme/xVV/rep_N
+# directory layout.
 #
 # Fill in SCRATCH_IN / SCRATCH_OUT below before submitting.
 #
@@ -35,7 +37,7 @@ SCRATCH_IN="/scratch/jed/social/ariel"      # holds {scheme}/x{XX}/rep_{N}/datab
 SCRATCH_OUT="/scratch/jed/social/behavior"  # mirrors the same layout
 
 WORKERS=16
-RECORD_EVERY_N=10
+RECORD_EVERY_N=100
 
 echo "Node:       $(hostname)"
 echo "Job ID:     $SLURM_ARRAY_JOB_ID"

@@ -4,25 +4,33 @@ For individuals in a single ``database.db`` (one experiment: one scheme /
 x-value / rep), rebuilds the MuJoCo model, re-runs the exact same rollout
 loop as ``ariel/evaluator.py::run_episode``, and records:
 
-  - joint angles/velocities per module, every sim step
+  - joint angles/velocities per module, every ``record_every_n``-th sim step
   - module world poses (position + quaternion) and floor-contact state,
-    every sim step
+    every ``record_every_n``-th sim step
   - ANN inputs/outputs per actuator, every control step
 
-into three SQLite databases (``joint_angles.db``, ``module_trajectory.db``,
-``ann_io.db``), plus a small ``episode_meta`` table (written into all three)
-recording the recomputed fitness alongside the originally stored fitness.
+into a single compressed ``behavior.npz`` per experiment (one call to
+``numpy.savez_compressed``), aggregating all individuals in that experiment
+into flat arrays keyed by ``{table}__{field}`` and disambiguated by an
+``individual_id`` column, plus an ``episode_meta`` table (also inside the
+same file) recording the recomputed fitness alongside the originally stored
+fitness. Trajectory fields (angles, velocities, positions, quaternions, ANN
+I/O) are stored as float16 -- all observed value ranges are within roughly
+[-3.3, 3.3], well inside float16's range, giving ~3-4 significant decimal
+digits of precision (relative eps ~1e-3). Scalar summary fields in
+``episode_meta`` (fitness, wall time, etc.) stay float32.
 
-At dt=0.002s, a 33s episode is ~16,500 sim steps; joint_angles/module_trajectory
-rows are written per-module per-step, so full resolution is expensive (~70MB
-per individual). ``--record-every-n`` (default 10, i.e. 50Hz) subsamples these
-two tables; ann_io.db is unaffected since it's already throttled to control
-steps (every 100 sim steps).
+At dt=0.002s, a 33s episode is ~16,500 sim steps. ``--record-every-n``
+(default 100, i.e. 5Hz) subsamples the joint_angles/module_poses tables;
+ann_steps is unaffected since it's already throttled to control steps
+(every 100 sim steps). Measured on real data (620-individual experiment,
+5Hz + float16 + npz compression): ~24KB/individual, ~15MB/experiment
+(vs. ~8.4MB/individual, ~5.2GB/experiment at the previous 50Hz + float64 +
+SQLite settings) -- roughly a 350x reduction.
 
-Scope: single ``--db-path`` (one experiment) per invocation. A multi-db
-sweep and/or reduced recording density are deliberate follow-ups once the
-timing/size numbers from this script are in — see
-``--time-only`` for that measurement.
+Scope: single ``--db-path`` (one experiment) per invocation, producing one
+``behavior.npz`` in ``--out-dir``. See ``--time-only`` for a timing-only
+dry run that writes nothing.
 
 Usage:
     uv run examples/d_social_learning/analysis/behavior_extract.py \\
@@ -326,48 +334,15 @@ def load_individuals(db_path: Path, individual_ids=None, top_n=None, select_all=
 
 
 # --------------------------------------------------------------------------
-# SQLite output
+# npz output
 # --------------------------------------------------------------------------
-
-_JOINT_SCHEMA = """
-CREATE TABLE IF NOT EXISTS joint_angles (
-    source_db TEXT, individual_id INTEGER, sim_step INTEGER, time REAL,
-    module_idx INTEGER, angle REAL, velocity REAL
-)
-"""
-_POSE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS module_poses (
-    source_db TEXT, individual_id INTEGER, sim_step INTEGER, time REAL,
-    module_idx INTEGER,
-    pos_x REAL, pos_y REAL, pos_z REAL,
-    quat_w REAL, quat_x REAL, quat_y REAL, quat_z REAL,
-    in_contact INTEGER
-)
-"""
-_ANN_SCHEMA = """
-CREATE TABLE IF NOT EXISTS ann_steps (
-    source_db TEXT, individual_id INTEGER, ctrl_step INTEGER, sim_step INTEGER,
-    time REAL, actuator_idx INTEGER, module_idx INTEGER,
-    input_json TEXT, output_raw REAL, output_scaled REAL, output_applied REAL
-)
-"""
-_META_SCHEMA = """
-CREATE TABLE IF NOT EXISTS episode_meta (
-    source_db TEXT, individual_id INTEGER, morph_json TEXT, theta_len INTEGER,
-    hidden INTEGER, stored_fitness REAL, replayed_fitness REAL,
-    mean_jerk REAL, c_hinge INTEGER, wall_time_s REAL
-)
-"""
-
-
-def _open_db(path: Path, schema: str, index_sql: str | None = None) -> sqlite3.Connection:
-    con = sqlite3.connect(path)
-    con.execute(schema)
-    if index_sql:
-        con.execute(index_sql)
-    con.commit()
-    return con
-
+#
+# One compressed archive per experiment (``behavior.npz``), aggregating all
+# individuals' rows into flat typed arrays. Keys are named
+# ``{table}__{field}`` so a loader can group them back by table; every table
+# carries an ``individual_id`` column to disambiguate rows (replacing the
+# ``source_db`` string column from the old per-row SQLite schema, since
+# there's now exactly one source db per output file).
 
 def write_results(
     out_dir: Path,
@@ -378,45 +353,64 @@ def write_results(
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    joint_con = _open_db(
-        out_dir / "joint_angles.db", _JOINT_SCHEMA,
-        "CREATE INDEX IF NOT EXISTS idx_joint ON joint_angles(source_db, individual_id)",
-    )
-    pose_con = _open_db(
-        out_dir / "module_trajectory.db", _POSE_SCHEMA,
-        "CREATE INDEX IF NOT EXISTS idx_pose ON module_poses(source_db, individual_id)",
-    )
-    ann_con = _open_db(
-        out_dir / "ann_io.db", _ANN_SCHEMA,
-        "CREATE INDEX IF NOT EXISTS idx_ann ON ann_steps(source_db, individual_id)",
-    )
-    for con in (joint_con, pose_con, ann_con):
-        con.execute(_META_SCHEMA)
+    joint_rows = [row for r in results for row in r.joint_rows]
+    pose_rows = [row for r in results for row in r.pose_rows]
+    ann_rows = [row for r in results for row in r.ann_rows]
 
-    for r in results:
-        joint_con.executemany(
-            "INSERT INTO joint_angles VALUES (?,?,?,?,?,?,?)",
-            [(source_db, *row) for row in r.joint_rows],
-        )
-        pose_con.executemany(
-            "INSERT INTO module_poses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [(source_db, *row) for row in r.pose_rows],
-        )
-        ann_con.executemany(
-            "INSERT INTO ann_steps VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            [(source_db, *row) for row in r.ann_rows],
-        )
-        meta_row = (
-            source_db, r.individual_id, json.dumps(morph_by_id[r.individual_id]),
-            r.theta_len, r.hidden, stored_fitness_by_id[r.individual_id],
-            r.replayed_fitness, r.mean_jerk, r.c_hinge, r.wall_time_s,
-        )
-        for con in (joint_con, pose_con, ann_con):
-            con.execute("INSERT INTO episode_meta VALUES (?,?,?,?,?,?,?,?,?,?)", meta_row)
+    arrays: dict[str, np.ndarray] = {}
 
-    for con in (joint_con, pose_con, ann_con):
-        con.commit()
-        con.close()
+    if joint_rows:
+        # row: (individual_id, sim_step, time, module_idx, angle, velocity)
+        j = np.array(joint_rows, dtype=np.float64)
+        arrays["joint_angles__individual_id"] = j[:, 0].astype(np.int32)
+        arrays["joint_angles__sim_step"] = j[:, 1].astype(np.int32)
+        arrays["joint_angles__time"] = j[:, 2].astype(np.float32)
+        arrays["joint_angles__module_idx"] = j[:, 3].astype(np.int16)
+        arrays["joint_angles__angle"] = j[:, 4].astype(np.float16)
+        arrays["joint_angles__velocity"] = j[:, 5].astype(np.float16)
+
+    if pose_rows:
+        # row: (individual_id, sim_step, time, module_idx, pos_x, pos_y,
+        #       pos_z, quat_w, quat_x, quat_y, quat_z, in_contact)
+        p = np.array(pose_rows, dtype=np.float64)
+        arrays["module_poses__individual_id"] = p[:, 0].astype(np.int32)
+        arrays["module_poses__sim_step"] = p[:, 1].astype(np.int32)
+        arrays["module_poses__time"] = p[:, 2].astype(np.float32)
+        arrays["module_poses__module_idx"] = p[:, 3].astype(np.int16)
+        arrays["module_poses__pos"] = p[:, 4:7].astype(np.float16)
+        arrays["module_poses__quat"] = p[:, 7:11].astype(np.float16)
+        arrays["module_poses__in_contact"] = p[:, 11].astype(np.int8)
+
+    if ann_rows:
+        # row: (individual_id, ctrl_step, sim_step, time, actuator_idx,
+        #       module_idx, input_json, output_raw, output_scaled, output_applied)
+        arrays["ann_steps__individual_id"] = np.array([row[0] for row in ann_rows], dtype=np.int32)
+        arrays["ann_steps__ctrl_step"] = np.array([row[1] for row in ann_rows], dtype=np.int32)
+        arrays["ann_steps__sim_step"] = np.array([row[2] for row in ann_rows], dtype=np.int32)
+        arrays["ann_steps__time"] = np.array([row[3] for row in ann_rows], dtype=np.float32)
+        arrays["ann_steps__actuator_idx"] = np.array([row[4] for row in ann_rows], dtype=np.int16)
+        arrays["ann_steps__module_idx"] = np.array([row[5] for row in ann_rows], dtype=np.int16)
+        arrays["ann_steps__input_vec"] = np.array([json.loads(row[6]) for row in ann_rows], dtype=np.float16)
+        arrays["ann_steps__output_raw"] = np.array([row[7] for row in ann_rows], dtype=np.float16)
+        arrays["ann_steps__output_scaled"] = np.array([row[8] for row in ann_rows], dtype=np.float16)
+        arrays["ann_steps__output_applied"] = np.array([row[9] for row in ann_rows], dtype=np.float16)
+
+    arrays["episode_meta__individual_id"] = np.array([r.individual_id for r in results], dtype=np.int32)
+    arrays["episode_meta__morph_json"] = np.array(
+        [json.dumps(morph_by_id[r.individual_id]) for r in results]
+    )
+    arrays["episode_meta__theta_len"] = np.array([r.theta_len for r in results], dtype=np.int32)
+    arrays["episode_meta__hidden"] = np.array([r.hidden for r in results], dtype=np.int16)
+    arrays["episode_meta__stored_fitness"] = np.array(
+        [stored_fitness_by_id[r.individual_id] for r in results], dtype=np.float32
+    )
+    arrays["episode_meta__replayed_fitness"] = np.array([r.replayed_fitness for r in results], dtype=np.float32)
+    arrays["episode_meta__mean_jerk"] = np.array([r.mean_jerk for r in results], dtype=np.float32)
+    arrays["episode_meta__c_hinge"] = np.array([r.c_hinge for r in results], dtype=np.int32)
+    arrays["episode_meta__wall_time_s"] = np.array([r.wall_time_s for r in results], dtype=np.float32)
+    arrays["episode_meta__source_db"] = np.array([source_db])
+
+    np.savez_compressed(out_dir / "behavior.npz", **arrays)
 
 
 # --------------------------------------------------------------------------
@@ -465,13 +459,13 @@ def run_timing(individuals, workers: int, n_experiment: int, record_every_n: int
     console.print(f"\nExtrapolated for this db (~{n_experiment} individuals) at {workers} workers: "
                   f"{parallel_experiment_s:.0f}s ({parallel_experiment_s / 60:.1f} min)")
 
-    n_all = 120 * n_experiment
+    n_all = 80 * n_experiment
     console.print(
         f"\n[dim]Reference only — NOT executed by this script — if scaled to all "
-        f"120 experiments (~{n_all} individuals):[/dim]"
+        f"80 experiments (~{n_all} individuals):[/dim]"
     )
-    console.print(f"[dim]  serial:   {serial_experiment_s * 120 / 3600:.1f} h[/dim]")
-    console.print(f"[dim]  {workers} workers: {parallel_experiment_s * 120 / 3600:.1f} h[/dim]")
+    console.print(f"[dim]  serial:   {serial_experiment_s * 80 / 3600:.1f} h[/dim]")
+    console.print(f"[dim]  {workers} workers: {parallel_experiment_s * 80 / 3600:.1f} h[/dim]")
 
 
 # --------------------------------------------------------------------------
@@ -489,9 +483,9 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--time-only", action="store_true")
     parser.add_argument(
-        "--record-every-n", type=int, default=10,
-        help="Record joint_angles/module_trajectory rows every Nth sim step "
-             "(default 10, i.e. 50Hz at dt=0.002s). Use 1 for full resolution. "
+        "--record-every-n", type=int, default=100,
+        help="Record joint_angles/module_poses rows every Nth sim step "
+             "(default 100, i.e. 5Hz at dt=0.002s). Use 1 for full resolution. "
              "ANN I/O is unaffected (already throttled to control steps).",
     )
     args = parser.parse_args()
