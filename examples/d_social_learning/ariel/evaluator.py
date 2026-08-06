@@ -118,7 +118,7 @@ def evaluate_individual(args: tuple) -> dict:
                         prev_ctrl * (1.0 - CTRL_ALPHA) + target_ctrl * CTRL_ALPHA,
                         -np.pi / 2, np.pi / 2,
                     ).astype(np.float32)
-                    if ctrl_step > 0:
+                    if ctrl_step > 0 and model.nu > 0:
                         jerk_sum += float(np.mean(np.abs(new_ctrl - prev_ctrl)))
                     prev_ctrl = new_ctrl.copy()
                     data.ctrl[:] = new_ctrl

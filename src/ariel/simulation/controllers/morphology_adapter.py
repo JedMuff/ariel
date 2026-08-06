@@ -26,7 +26,11 @@ from typing import TYPE_CHECKING
 import mujoco as mj
 import numpy as np
 
-from ariel.body_phenotypes.robogen_lite.config import ModuleFaces, ModuleType
+from ariel.body_phenotypes.robogen_lite.config import (
+    IDX_OF_CORE,
+    ModuleFaces,
+    ModuleType,
+)
 from ariel.simulation.controllers.distributed_mlp import EMPTY_NODE, NodeObservation
 
 if TYPE_CHECKING:
@@ -79,6 +83,7 @@ class MorphologyAdapter:
     actuator_to_module: list[int]
     module_type: dict[int, int]
     face_neighbors: dict[int, list[int | None]]
+    module_to_body_name: dict[int, str] = field(default_factory=dict, repr=False)
     _joint_name_to_module: dict[str, int] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -133,12 +138,65 @@ class MorphologyAdapter:
             if ModuleType[graph.nodes[child]["type"]] == ModuleType.HINGE
         }
 
+        # construct_mjspec_from_graph attaches each child body with
+        # prefix="{parent}-{child}-{face_val}-", so the compiled body name is
+        # "{parent}-{child}-{face_val}-{type_name_lower}". The root core body
+        # is unprefixed (never attached as a child).
+        module_to_body_name: dict[int, str] = {
+            IDX_OF_CORE: ModuleType.CORE.name.lower(),
+        }
+        for parent, child in graph.edges:
+            child_type = ModuleType[graph.nodes[child]["type"]]
+            if child_type == ModuleType.NONE:
+                continue
+            face_val = ModuleFaces[graph.edges[(parent, child)]["face"]].value
+            module_to_body_name[child] = (
+                f"{parent}-{child}-{face_val}-{child_type.name.lower()}"
+            )
+
         return cls(
             actuator_to_module=actuator_to_module,
             module_type=module_type,
             face_neighbors=face_neighbors,
+            module_to_body_name=module_to_body_name,
             _joint_name_to_module=joint_name_to_module,
         )
+
+    def resolve_module_body_ids(self, model: mj.MjModel) -> dict[int, int]:
+        """Resolve ``module_to_body_name`` suffixes to body ids in ``model``.
+
+        World-spawn (e.g. ``SimpleFlatWorld.spawn``) prepends a robot-instance
+        prefix (e.g. ``"robot1_"``) to every body name, so bodies are matched
+        by suffix rather than exact name — mirroring ``_read_joint_states``'s
+        joint-name matching. Call once per compiled model; the mapping is
+        constant for the lifetime of that model.
+
+        Parameters
+        ----------
+        model:
+            Compiled MuJoCo model containing this morphology.
+
+        Returns
+        -------
+        dict[int, int]
+            Module index -> MuJoCo body id.
+        """
+        body_names = {
+            i: mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, i) or ""
+            for i in range(model.nbody)
+        }
+        module_to_body_id: dict[int, int] = {}
+        for mod_idx, suffix in self.module_to_body_name.items():
+            match = next(
+                (
+                    i for i, name in body_names.items()
+                    if name == suffix or name.endswith("_" + suffix)
+                ),
+                None,
+            )
+            if match is not None:
+                module_to_body_id[mod_idx] = match
+        return module_to_body_id
 
     def _read_joint_states(
         self, model: mj.MjModel, data: mj.MjData
