@@ -99,6 +99,7 @@ def build_ops(
     num_workers: int,
     sigma: float,
     hidden: int,
+    comma_selection: bool = False,
 ) -> list[EAOperation]:
     """Return the ordered list of EAOperation steps for the outer EA."""
     @EAOperation
@@ -202,8 +203,13 @@ def build_ops(
                 }
                 ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
 
-        combined = Population(all_alive)
-        survivors = combined.best(n=mu).to_list()
+        if comma_selection:
+            # (mu,lambda): survivors drawn only from offspring, parents always die.
+            selection_pool = Population(offspring)
+        else:
+            # (mu+lambda): survivors drawn from parents + offspring.
+            selection_pool = Population(all_alive)
+        survivors = selection_pool.best(n=mu).to_list()
         survivor_ids = {id(s) for s in survivors}
         for ind in all_alive:
             ind.alive = id(ind) in survivor_ids
@@ -238,6 +244,10 @@ def main() -> None:
     parser.add_argument("--gens", type=int, default=100)
     parser.add_argument("--pop", type=int, default=20, help="mu")
     parser.add_argument("--lam", type=int, default=100)
+    parser.add_argument("--comma-selection", action="store_true",
+                        help="Use (mu,lambda) selection (survivors from offspring only) "
+                             "instead of the default (mu+lambda) (survivors from parents+offspring). "
+                             "Requires --lam >= --pop.")
     parser.add_argument("--inner-gens", type=int, default=20)
     parser.add_argument("--inner-pop", type=int, default=16)
     parser.add_argument("--sigma", type=float, default=0.5, help="CMA-ES initial step size")
@@ -246,6 +256,9 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true",
                         help="Resume from existing database.db at the last saved generation")
     args = parser.parse_args()
+
+    if args.comma_selection and args.lam < args.pop:
+        parser.error("--comma-selection requires --lam >= --pop (not enough offspring to fill mu)")
 
     x_str = str(args.x).replace(".", "")
     out_dir = Path(f"__data__/social/ariel/{args.scheme}/x{x_str}/rep_{args.rep}")
@@ -263,6 +276,7 @@ def main() -> None:
         num_workers=args.workers,
         sigma=args.sigma,
         hidden=args.hidden,
+        comma_selection=args.comma_selection,
     )
 
     db_path = out_dir / "database.db"
