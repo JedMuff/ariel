@@ -142,6 +142,22 @@ def _overlay(frame_bgr: np.ndarray, lines: list[str]) -> None:
         )
 
 
+FPV_BORDER = 3  # white border thickness around the PiP inset
+
+
+def _pip_overlay_bottom(base_bgr: np.ndarray, fpv_bgr: np.ndarray, margin: int = 10) -> np.ndarray:
+    """Composite fpv_bgr as a picture-in-picture along the bottom of base_bgr."""
+    out = base_bgr.copy()
+    h, w = fpv_bgr.shape[:2]
+    bh, bw = base_bgr.shape[:2]
+    x0 = bw - w - margin - FPV_BORDER * 2
+    y0 = bh - h - margin - FPV_BORDER * 2
+    out[y0 : y0 + h + FPV_BORDER * 2, x0 : x0 + w + FPV_BORDER * 2] = 255
+    out[y0 + FPV_BORDER : y0 + FPV_BORDER + h,
+        x0 + FPV_BORDER : x0 + FPV_BORDER + w] = fpv_bgr
+    return out
+
+
 def render_checkpoint(
     ckpt_dir: Path,
     out_path: Path,
@@ -211,6 +227,9 @@ def render_checkpoint(
     frame_every = max(1, round(1.0 / (model.opt.timestep * render_fps)))
     skill_names = {1: "LOCO", 2: "LEFT", 3: "RIGHT"}
     skill_log: list[int] = []
+    fpv_scale = 1.5
+    fpv_w, fpv_h = round(128 * fpv_scale), round(96 * fpv_scale)
+    last_fpv_bgr = np.zeros((fpv_h, fpv_w, 3), dtype=np.uint8)
 
     episode_end = SETTLE_DURATION + FOOD_EVAL_DURATION
     while data.time < episode_end and cur_wp < num_wps:
@@ -221,6 +240,22 @@ def render_checkpoint(
             left_frac, centre_frac, right_frac = vision
             skill = controller.select(left_frac, centre_frac, right_frac)
             skill_log.append(skill)
+
+            fpv_bgr = cv2.cvtColor(img.copy(), cv2.COLOR_RGB2BGR)
+            last_fpv_bgr = cv2.resize(
+                fpv_bgr, (fpv_w, fpv_h), interpolation=cv2.INTER_NEAREST
+            )
+            # Section dividers (matches analyze_sections' 3-way vertical split).
+            third = fpv_w // 3
+            cv2.line(last_fpv_bgr, (third, 0), (third, fpv_h), (0, 255, 255), 1)
+            cv2.line(last_fpv_bgr, (2 * third, 0), (2 * third, fpv_h), (0, 255, 255), 1)
+            for i, pct in enumerate((left_frac, centre_frac, right_frac)):
+                cv2.putText(
+                    last_fpv_bgr, f"{100 * pct:.0f}%", (i * third + 4, fpv_h - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1, cv2.LINE_AA,
+                )
+            cv2.putText(last_fpv_bgr, "FPV", (4, 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             state = get_robot_state(data).astype(np.float32)
             net = {1: loco_net, 2: left_net, 3: right_net}[skill]
@@ -263,6 +298,7 @@ def render_checkpoint(
                 f"t={data.time:.1f}s  wp={reached}/{num_wps}  skill={skill_names.get(skill, '?')}",
                 f"c_hinge={c_hinge}",
             ])
+            frame_bgr = _pip_overlay_bottom(frame_bgr, last_fpv_bgr)
             frames.append(frame_bgr)
 
     vis_renderer.close()
