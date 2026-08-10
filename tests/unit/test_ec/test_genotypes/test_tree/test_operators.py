@@ -154,6 +154,23 @@ def test_random_tree_single_module() -> None:
     assert len(g.nodes) <= 2
 
 
+def _leaf_hinges(g: TreeGenome) -> list[int]:
+    """Return node ids of any HINGE node with no children."""
+    parents_with_children = {e["parent"] for e in g.edges}
+    return [
+        nid
+        for nid, data in g.nodes.items()
+        if data["type"] == "HINGE" and nid not in parents_with_children
+    ]
+
+
+def test_random_tree_never_leaves_terminal_hinge() -> None:
+    """random_tree never produces a leaf HINGE node."""
+    for _ in range(50):
+        g = random_tree(8)
+        assert _leaf_hinges(g) == []
+
+
 # ---------------------------------------------------------------------------
 # get_tree_depth / validate_tree_depth
 # ---------------------------------------------------------------------------
@@ -216,6 +233,15 @@ def test_mutate_replace_node_result_is_valid() -> None:
     validate_genome_dict(g.to_dict())
 
 
+def test_mutate_replace_node_never_leaves_terminal_hinge() -> None:
+    """mutate_replace_node never leaves a leaf HINGE node."""
+    for _ in range(20):
+        g = random_tree(5)
+        for _ in range(10):
+            mutate_replace_node(g)
+        assert _leaf_hinges(g) == []
+
+
 # ---------------------------------------------------------------------------
 # mutate_shrink
 # ---------------------------------------------------------------------------
@@ -243,6 +269,14 @@ def test_mutate_shrink_result_is_valid() -> None:
     validate_genome_dict(g.to_dict())
 
 
+def test_mutate_shrink_never_leaves_terminal_hinge() -> None:
+    """mutate_shrink never leaves a leaf HINGE node."""
+    for _ in range(20):
+        g = random_tree(6)
+        mutate_shrink(g)
+        assert _leaf_hinges(g) == []
+
+
 # ---------------------------------------------------------------------------
 # mutate_hoist
 # ---------------------------------------------------------------------------
@@ -261,6 +295,15 @@ def test_mutate_hoist_result_is_valid() -> None:
     for _ in range(5):
         mutate_hoist(g)
         validate_genome_dict(g.to_dict())
+
+
+def test_mutate_hoist_never_leaves_terminal_hinge() -> None:
+    """mutate_hoist never leaves a leaf HINGE node."""
+    for _ in range(20):
+        g = random_tree(6)
+        for _ in range(5):
+            mutate_hoist(g)
+        assert _leaf_hinges(g) == []
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +326,15 @@ def test_mutate_subtree_replacement_result_is_valid() -> None:
     validate_genome_dict(g.to_dict())
 
 
+def test_mutate_subtree_replacement_never_leaves_terminal_hinge() -> None:
+    """mutate_subtree_replacement never leaves a leaf HINGE node."""
+    for _ in range(20):
+        g = random_tree(5)
+        for _ in range(5):
+            mutate_subtree_replacement(g)
+        assert _leaf_hinges(g) == []
+
+
 # ---------------------------------------------------------------------------
 # subtree_swap
 # ---------------------------------------------------------------------------
@@ -298,6 +350,18 @@ def test_subtree_swap_core_preserved_in_both() -> None:
     subtree_swap(a, b, a_nid, b_nid)
     assert 0 in a.nodes
     assert 0 in b.nodes
+
+
+def test_subtree_swap_never_leaves_terminal_hinge() -> None:
+    """subtree_swap never leaves a leaf HINGE node in either genome."""
+    for _ in range(20):
+        a = random_tree(4)
+        b = random_tree(4)
+        a_nid = next(n for n in a.nodes if n != 0)
+        b_nid = next(n for n in b.nodes if n != 0)
+        subtree_swap(a, b, a_nid, b_nid)
+        assert _leaf_hinges(a) == []
+        assert _leaf_hinges(b) == []
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +386,16 @@ def test_crossover_subtree_children_valid() -> None:
         c1, c2 = crossover_subtree(a, b)
         validate_genome_dict(c1.to_dict())
         validate_genome_dict(c2.to_dict())
+
+
+def test_crossover_subtree_never_leaves_terminal_hinge() -> None:
+    """crossover_subtree never leaves a leaf HINGE node in either child."""
+    for _ in range(20):
+        a = random_tree(5)
+        b = random_tree(5)
+        c1, c2 = crossover_subtree(a, b)
+        assert _leaf_hinges(c1) == []
+        assert _leaf_hinges(c2) == []
 
 
 def test_crossover_subtree_parents_unchanged() -> None:

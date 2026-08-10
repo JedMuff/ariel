@@ -27,6 +27,22 @@ def add_node(genome: TreeGenome, parent: int, face: str, node_id: int, mtype: st
     genome.edges.append({"parent": parent, "child": node_id, "face": face})
 
 
+def _fix_terminal_hinges(genome: TreeGenome) -> None:
+    """Convert any leaf HINGE node into a BRICK.
+
+    A hinge with no child can rest directly on the ground and exploit
+    contact-driven propulsion instead of using its joint. Hinge chains
+    (hinge -> hinge -> ... -> brick) are unaffected since only leaf nodes
+    are considered.
+    """
+    parents_with_children = {e["parent"] for e in genome.edges}
+    for nid, data in genome.nodes.items():
+        if nid == IDX_OF_CORE:
+            continue
+        if data["type"] == "HINGE" and nid not in parents_with_children:
+            data["type"] = "BRICK"
+
+
 def remove_subtree(genome: TreeGenome, node_id: int) -> None:
     # remove node and all descendants
     g = genome.to_networkx()
@@ -128,6 +144,8 @@ def subtree_swap(a: TreeGenome, b: TreeGenome, a_node: int, b_node: int) -> None
     # clean up any now-invalid connections and perform final checks
     _prune_invalid_edges(a)
     _prune_invalid_edges(b)
+    _fix_terminal_hinges(a)
+    _fix_terminal_hinges(b)
     # Note: Validation moved to calling code to allow for temporary invalid states during crossover
 
 
@@ -209,6 +227,7 @@ def mutate_replace_node(genome: TreeGenome) -> None:
     # validate
     try:
         _prune_invalid_edges(genome)
+        _fix_terminal_hinges(genome)
         validate_genome_dict(genome.to_dict())
     except ValueError:
         genome.nodes = old_nodes
@@ -304,6 +323,7 @@ def mutate_subtree_replacement(genome: TreeGenome, max_modules: int = 10) -> Non
 
     # Clean up and validate
     _prune_invalid_edges(genome)
+    _fix_terminal_hinges(genome)
     try:
         validate_genome_dict(genome.to_dict())
     except ValueError:
@@ -354,6 +374,7 @@ def mutate_shrink(genome: TreeGenome) -> None:
 
     # Clean up and validate
     _prune_invalid_edges(genome)
+    _fix_terminal_hinges(genome)
     try:
         validate_genome_dict(genome.to_dict())
     except ValueError:
@@ -419,6 +440,7 @@ def mutate_hoist(genome: TreeGenome) -> None:
 
     # Clean up and validate
     _prune_invalid_edges(genome)
+    _fix_terminal_hinges(genome)
     try:
         validate_genome_dict(genome.to_dict())
     except ValueError:
@@ -457,6 +479,7 @@ def random_tree(max_modules: int) -> TreeGenome:
         rot = random.choice(rotations) if rotations else "DEG_0"
         add_node(g, parent, face, next_id, mtype, rot)
         next_id += 1
+    _fix_terminal_hinges(g)
     return g
 
 

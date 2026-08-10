@@ -75,7 +75,7 @@ console = Console()
 DURATION = 30.0
 SETTLE_TIME = 3.0
 SPAWN_POS = (-0.8, 0.0, 0.1)
-CTRL_EVERY = 100
+CTRL_EVERY = 25  # 500Hz physics / 25 = 20Hz control
 CTRL_ALPHA = 0.5
 N_NEIGHBORS = 6
 FEATURES_PER_NODE = 8

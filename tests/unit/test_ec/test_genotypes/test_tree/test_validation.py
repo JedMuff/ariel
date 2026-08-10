@@ -114,9 +114,32 @@ def test_validate_core_only_passes() -> None:
     validate_genome_dict(_core_only())
 
 
-def test_validate_core_hinge_passes() -> None:
-    """Core + hinge genome passes validation."""
-    validate_genome_dict(_core_hinge())
+def test_validate_core_hinge_raises() -> None:
+    """A bare terminal hinge (leaf) fails validation."""
+    with pytest.raises(ValueError, match="terminal HINGE"):
+        validate_genome_dict(_core_hinge())
+
+
+def test_validate_core_brick_hinge_raises() -> None:
+    """Core -> brick -> hinge fails: the hinge is still a leaf."""
+    with pytest.raises(ValueError, match="terminal HINGE"):
+        validate_genome_dict(_core_brick_hinge())
+
+
+def test_validate_hinge_with_brick_child_passes() -> None:
+    """A hinge that has a brick child (not a leaf) passes validation."""
+    genome = {
+        "nodes": {
+            "0": {"type": "CORE", "rotation": "DEG_0"},
+            "1": {"type": "HINGE", "rotation": "DEG_0"},
+            "2": {"type": "BRICK", "rotation": "DEG_0"},
+        },
+        "edges": [
+            {"parent": 0, "child": 1, "face": "FRONT"},
+            {"parent": 1, "child": 2, "face": "FRONT"},
+        ],
+    }
+    validate_genome_dict(genome)
 
 
 def test_validate_missing_core_raises() -> None:
