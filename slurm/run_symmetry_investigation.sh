@@ -121,7 +121,8 @@ srun bash -c "
         --max-modules 25 --max-depth 25 \
         $([ "$REPEAT_EVALS" = "1" ] && echo "--repeat-evals") \
         --seed $SEED \
-        --no-video
+        --no-video \
+        --time-limit 100
 "
 
 echo "Finished: $(date)"
