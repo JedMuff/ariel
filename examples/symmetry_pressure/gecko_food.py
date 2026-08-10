@@ -70,7 +70,7 @@ parser = argparse.ArgumentParser(description="Symmetry-pressure: food collection
 parser.add_argument("--budget",        type=int,   default=40)
 parser.add_argument("--pop",           type=int,   default=20,  help="mu")
 parser.add_argument("--lam",           type=int,   default=20,  help="lambda")
-parser.add_argument("--brain-budget",  type=int,   default=500)
+parser.add_argument("--brain-budget",  type=int,   default=900)
 parser.add_argument("--brain-pop",     type=int,   default=20)
 parser.add_argument("--brain-workers", type=int,   default=max(1, os.cpu_count() or 1))
 parser.add_argument("--dur",           type=float, default=60.0)
@@ -86,6 +86,8 @@ parser.add_argument("--strategy-type",
 parser.add_argument("--repeat-evals",  action="store_true",
                     help="Re-evaluate parents each generation (plus strategy only)")
 parser.add_argument("--no-video",      action="store_true")
+parser.add_argument("--time-limit",    type=float, default=None,
+                    help="Wall-clock seconds; stop after current generation completes")
 args = parser.parse_args()
 
 BUDGET        = args.budget
@@ -103,6 +105,7 @@ MAX_DEPTH     = args.max_depth
 BASE_SEED     = args.seed
 STRATEGY      = args.strategy_type
 REPEAT_EVALS  = args.repeat_evals
+TIME_LIMIT    = args.time_limit
 
 SCRIPT_NAME = Path(__file__).stem
 DATA = Path.cwd() / "__data__" / SCRIPT_NAME
@@ -275,6 +278,7 @@ def _train_food_worker(task: dict[str, Any]) -> dict[str, Any]:
     task["episode_fn"]      = run_episode_food
     task["episode_fn_name"] = _EPISODE_FN_NAME
     task["use_vision"]      = True
+    task["use_phase"]       = True
     return train_body_parallel(task)
 
 
@@ -528,7 +532,12 @@ class BodyBrainEvolution:
             db_handling=self.config.db_handling,
             quiet=self.config.quiet,
         )
-        ea.run()
+        t_start = time.time()
+        for _ in range(BUDGET):
+            if TIME_LIMIT is not None and time.time() - t_start >= TIME_LIMIT:
+                console.log(f"[yellow]Time limit {TIME_LIMIT:.0f}s reached — stopping early[/yellow]")
+                break
+            ea.step()
         return ea.get_solution("best", only_alive=False)
 
 
