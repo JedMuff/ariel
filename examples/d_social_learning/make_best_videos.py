@@ -40,14 +40,13 @@ from ariel.simulation.environments import SimpleFlatWorld
 console = Console()
 
 SPAWN_POS = (-0.8, 0.0, 0.1)
-CTRL_EVERY = 25  # 500Hz physics / 25 = 20Hz control
+CTRL_EVERY = 9  # 500Hz physics / 9 ≈ 55.6Hz control (closest integer divisor to 60Hz)
 CTRL_ALPHA = 0.5
 N_NEIGHBORS = 6
 FEATURES_PER_NODE = 8
-HINGE_CONTACT_LIMIT = 200
-HINGE_CONTACT_PENALTY = 0.005
-JERK_PENALTY_WEIGHT = 0.01
-HEIGHT_PENALTY_THRESHOLD = 0.21
+HEIGHT_PENALTY_THRESHOLD = 0.5
+JERK_PENALTY_WEIGHT = 2.0
+JERK_THRESHOLD = 0.15
 
 SCHEMES = [
     "darwinian", "lamarckian", "random", "random_many",
@@ -99,23 +98,12 @@ def _build_model(morph_dict: dict):
     return model, adapter
 
 
-def _geom_ids(model):
-    hinge_geom_ids: set[int] = set()
-    for i in range(model.ngeom):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i)
-        if name and ("stator" in name or "rotor" in name):
-            hinge_geom_ids.add(i)
-    floor_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-    return hinge_geom_ids, floor_geom_id
-
-
 def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float) -> float:
     """Re-score a theta under the current fitness function (mirrors
     ariel/evaluator.py::run_episode's settle/rollout structure, control
     blending, and fitness formula exactly)."""
     model, adapter = _build_model(morph_dict)
     data = mujoco.MjData(model)
-    hinge_geom_ids, floor_geom_id = _geom_ids(model)
 
     hidden = _infer_hidden(len(theta))
     brain = DistributedMLP(n_neighbors=N_NEIGHBORS, hidden=hidden)
@@ -129,9 +117,7 @@ def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float
         mujoco.mj_step(model, data)
         sim_step += 1
 
-    c_hinge = 0
     ctrl_step = 0
-    active_hinge_contacts: set[frozenset[int]] = set()
     prev_ctrl = np.zeros(model.nu, dtype=np.float32)
     jerk_sum = 0.0
     rollout_end = settle + duration
@@ -150,27 +136,13 @@ def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float
             data.ctrl[:] = new_ctrl
             ctrl_step += 1
         mujoco.mj_step(model, data)
-        current: set[frozenset[int]] = set()
-        for k in range(data.ncon):
-            c = data.contact[k]
-            if ((c.geom1 == floor_geom_id and c.geom2 in hinge_geom_ids) or
-                    (c.geom2 == floor_geom_id and c.geom1 in hinge_geom_ids)):
-                current.add(frozenset((c.geom1, c.geom2)))
-        c_hinge += len(current - active_hinge_contacts)
-        active_hinge_contacts = current
         sim_step += 1
 
     mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
     d = float(data.qpos[0])
-    if c_hinge > HINGE_CONTACT_LIMIT or not np.isfinite(d):
-        return -1.0
     height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-    return (
-        d
-        - height_penalty
-        - HINGE_CONTACT_PENALTY * c_hinge
-        - JERK_PENALTY_WEIGHT * mean_jerk
-    )
+    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+    return d - height_penalty - jerk_penalty
 
 
 def render_individual(

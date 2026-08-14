@@ -15,13 +15,12 @@ import numpy as np
 DURATION = 30.0
 SETTLE_TIME = 3.0
 SPAWN_POS = (-0.8, 0.0, 0.1)
-CTRL_EVERY = 25  # 500Hz physics / 25 = 20Hz control
+CTRL_EVERY = 9  # 500Hz physics / 9 ≈ 55.6Hz control (closest integer divisor to 60Hz)
 N_NEIGHBORS = 6
-HINGE_CONTACT_LIMIT = 200
-HINGE_CONTACT_PENALTY = 0.005
-JERK_PENALTY_WEIGHT = 0.01   # penalty per unit of mean absolute ctrl delta
 CTRL_ALPHA = 0.5   # control blending factor (0=no change, 1=instant) — damps resonant ground-jitter exploit
-HEIGHT_PENALTY_THRESHOLD = 0.21  # m — only penalise spawn height above this
+HEIGHT_PENALTY_THRESHOLD = 0.5  # m — only penalise spawn height above this
+JERK_PENALTY_WEIGHT = 2.0  # penalty per unit of mean absolute ctrl delta, applied above JERK_THRESHOLD
+JERK_THRESHOLD = 0.15  # hurdle: mean_jerk below this is free; at/above it, the full weight*mean_jerk applies
 
 
 def _scale_actions(raw: np.ndarray) -> np.ndarray:
@@ -140,16 +139,14 @@ def evaluate_individual(args: tuple) -> dict:
             mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
 
             d = float(data.qpos[0])
-            if c_hinge > HINGE_CONTACT_LIMIT or not np.isfinite(d):
-                fitness = -1.0
-            else:
-                height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-                fitness = (
-                    d
-                    - height_penalty
-                    - HINGE_CONTACT_PENALTY * c_hinge
-                    - JERK_PENALTY_WEIGHT * mean_jerk
-                )
+            height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+            # Hurdle penalty (see learn_gecko_gait.py's gecko sweep): a linear
+            # penalty from zero pushed CMA-ES toward a near-static "don't move
+            # at all" optimum instead of just suppressing high-frequency
+            # thrash. Giving a free jerk budget up to JERK_THRESHOLD before
+            # any penalty kicks in let it find gaits with real net distance.
+            jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+            fitness = d - height_penalty - jerk_penalty
 
             return {
                 "fitness": fitness,

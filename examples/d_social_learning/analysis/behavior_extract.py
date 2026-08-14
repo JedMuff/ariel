@@ -75,14 +75,13 @@ console = Console()
 DURATION = 30.0
 SETTLE_TIME = 3.0
 SPAWN_POS = (-0.8, 0.0, 0.1)
-CTRL_EVERY = 25  # 500Hz physics / 25 = 20Hz control
+CTRL_EVERY = 9  # 500Hz physics / 9 ≈ 55.6Hz control (closest integer divisor to 60Hz)
 CTRL_ALPHA = 0.5
 N_NEIGHBORS = 6
 FEATURES_PER_NODE = 8
-HINGE_CONTACT_LIMIT = 200
-HINGE_CONTACT_PENALTY = 0.005
-JERK_PENALTY_WEIGHT = 0.01
-HEIGHT_PENALTY_THRESHOLD = 0.21
+HEIGHT_PENALTY_THRESHOLD = 0.5
+JERK_PENALTY_WEIGHT = 2.0
+JERK_THRESHOLD = 0.15
 
 
 def _infer_hidden(theta_len: int) -> int:
@@ -275,15 +274,9 @@ def replay_individual(
 
     mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
     d = float(data.qpos[0])
-    if c_hinge > HINGE_CONTACT_LIMIT or not np.isfinite(d):
-        fitness = -1.0
-    else:
-        height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-        fitness = (
-            d - height_penalty
-            - HINGE_CONTACT_PENALTY * c_hinge
-            - JERK_PENALTY_WEIGHT * mean_jerk
-        )
+    height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+    fitness = d - height_penalty - jerk_penalty
 
     result.replayed_fitness = fitness
     result.mean_jerk = mean_jerk
