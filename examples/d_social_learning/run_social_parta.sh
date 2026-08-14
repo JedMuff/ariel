@@ -10,6 +10,12 @@
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=17G
 
+# Propagate experiment.py's exit code through the `| tee` pipe below (used to
+# capture the RUN_DIR= line), so this job's own exit status still reflects
+# whether the run actually succeeded -- part B's sbatch --dependency=afterok
+# relies on that.
+set -o pipefail
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -45,6 +51,11 @@ echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INN
 
 mkdir -p out_files
 
+# experiment.py now timestamps its own output directory per run (so re-runs
+# never clobber each other) and prints it as `RUN_DIR=<path>`. Part B doesn't
+# know that timestamp, so capture it here into a marker file part B reads.
+RUN_DIR_FILE="out_files/rundir_${SCHEME}_${X}_${REP}.txt"
+
 START_TIME=$(date +%s)
 
 srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/experiment.py \
@@ -52,12 +63,20 @@ srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/experiment.py \
     --gens "$GENS" --pop "$POP" --lam "$LAM" \
     --inner-gens "$INNER_GENS" --inner-pop "$INNER_POP" \
     --sigma "$SIGMA" --hidden "$HIDDEN" \
-    --workers "$WORKERS"
+    --workers "$WORKERS" \
+    | tee >(grep '^RUN_DIR=' | cut -d= -f2- > "$RUN_DIR_FILE")
+STATUS=${PIPESTATUS[0]}
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
 
+if [[ $STATUS -ne 0 ]]; then
+    echo ""
+    echo "experiment.py failed (exit $STATUS): scheme=$SCHEME x=$X rep=$REP"
+    exit $STATUS
+fi
+
 echo ""
-echo "Finished part A: scheme=$SCHEME x=$X rep=$REP"
+echo "Finished part A: scheme=$SCHEME x=$X rep=$REP -> $(cat "$RUN_DIR_FILE")"
 echo "Elapsed time: ${ELAPSED}s  ($(( ELAPSED / 60 ))m $(( ELAPSED % 60 ))s)"
 echo "done"

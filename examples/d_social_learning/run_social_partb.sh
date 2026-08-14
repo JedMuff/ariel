@@ -45,6 +45,17 @@ echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INN
 
 mkdir -p out_files
 
+# Part A wrote its (timestamped) output directory into this marker file --
+# see run_social_parta.sh -- since experiment.py can no longer derive it from
+# scheme/x/rep alone.
+RUN_DIR_FILE="out_files/rundir_${SCHEME}_${X}_${REP}.txt"
+if [[ ! -f "$RUN_DIR_FILE" ]]; then
+    echo "ERROR: no run-dir marker from part A: $RUN_DIR_FILE" >&2
+    exit 1
+fi
+RESUME_DIR=$(cat "$RUN_DIR_FILE")
+echo "Resuming: $RESUME_DIR"
+
 START_TIME=$(date +%s)
 
 srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/experiment.py \
@@ -53,7 +64,7 @@ srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/experiment.py \
     --inner-gens "$INNER_GENS" --inner-pop "$INNER_POP" \
     --sigma "$SIGMA" --hidden "$HIDDEN" \
     --workers "$WORKERS" \
-    --resume
+    --resume-dir "$RESUME_DIR"
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))

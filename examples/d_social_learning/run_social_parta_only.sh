@@ -5,6 +5,11 @@
 # NOT submit part B. Run part B yourself afterwards for whichever
 # scheme/x/rep combos you want to continue.
 #
+# experiment.py timestamps its own output directory per run (so re-runs never
+# clobber each other) and prints it as `RUN_DIR=<path>` in this job's log
+# (out_files/social-parta-<jobid>_<taskid>.out). To continue a run manually,
+# grep that file for RUN_DIR= and pass it to experiment.py's --resume-dir.
+#
 # Usage:
 #   sbatch examples/d_social_learning/run_social_parta_array.sh
 #
