@@ -97,6 +97,66 @@ def _compute_descriptors(individuals: list[Individual]) -> list[np.ndarray]:
     return descs
 
 
+def _timeout_result(donor_ids: list[int]) -> dict:
+    """Placeholder for an individual whose evaluation timed out.
+
+    ``distance`` is NaN (not e.g. 0.0) so it's visibly distinguishable from a
+    legitimate low-fitness individual in stored tags — see
+    analysis/curve_utils.py's ``np.isfinite`` filtering, which already treats
+    non-finite fitness as "simulator failure" and drops it from plots.
+    """
+    return {
+        "distance": float("nan"),
+        "best_theta": [],
+        "init_fitness": float("nan"),
+        "learning_curve": [],
+        "donor_ids": donor_ids,
+        "mean_jerk": float("nan"),
+        "c_hinge": 0,
+    }
+
+
+def _evaluate_with_timeout(
+    worker_args: list[tuple], num_workers: int, timeout_s: float,
+) -> list[dict]:
+    """Like ``pool.map(evaluate_individual, worker_args)``, but a task that
+    doesn't return within ``timeout_s`` is replaced with a NaN result instead
+    of blocking every remaining task forever.
+
+    A plain ``pool.map`` waits on every task unconditionally, so one worker
+    wedged in a hang (observed in practice: a whole generation frozen for
+    16+ hours with zero CPU usage across every worker, most likely a
+    native-level deadlock inside MuJoCo for some pathological morphology —
+    root cause unconfirmed, but reproduced both with and without
+    ``forkserver``) blocks the entire generation indefinitely. Submitting
+    each task individually and polling each with its own ``.get(timeout=)``
+    bounds the damage to one bad individual per generation.
+
+    A worker that's actually hung never returns to the pool for more work,
+    so the pool is unconditionally terminated at the end of this batch
+    (matching ``with Pool(...) as pool:``'s terminate-on-exit semantics) —
+    safe since a fresh Pool is created for every generation anyway.
+    """
+    pool = Pool(processes=num_workers)
+    try:
+        async_results = [pool.apply_async(evaluate_individual, (a,)) for a in worker_args]
+        results = []
+        for i, ar in enumerate(async_results):
+            try:
+                results.append(ar.get(timeout=timeout_s))
+            except multiprocessing.TimeoutError:
+                donor_ids = worker_args[i][2]
+                console.log(
+                    f"[red]individual {i} timed out after {timeout_s:.0f}s "
+                    f"-- marking NaN and moving on[/red]"
+                )
+                results.append(_timeout_result(donor_ids))
+        return results
+    finally:
+        pool.terminate()
+        pool.join()
+
+
 # ---------------------------------------------------------------------------
 # (mu+lambda) EA operations as EAOperation functions
 # ---------------------------------------------------------------------------
@@ -109,6 +169,7 @@ def build_ops(
     inner_gens: int,
     inner_pop: int,
     num_workers: int,
+    eval_timeout: float,
     sigma: float,
     hidden: int,
     comma_selection: bool = False,
@@ -188,8 +249,7 @@ def build_ops(
                 ))
 
             if num_workers > 1:
-                with Pool(processes=num_workers) as pool:
-                    results = pool.map(evaluate_individual, worker_args)
+                results = _evaluate_with_timeout(worker_args, num_workers, eval_timeout)
             else:
                 results = [evaluate_individual(a) for a in worker_args]
 
@@ -200,7 +260,13 @@ def build_ops(
                 novelty = float(novelties[i])
                 desc = descs[i]
                 prior = ind.tags_ or {}
-                ind.fitness = combined_fitness(distance, novelty, x_val)
+                computed_fitness = combined_fitness(distance, novelty, x_val)
+                # NaN (e.g. a timed-out individual's distance, see
+                # _evaluate_with_timeout) doesn't reliably sink to the bottom
+                # under Population.best()'s comparison-based sort the way
+                # -inf does (see _safe_attr) -- substitute -inf explicitly so
+                # a failed individual can never be selected as a survivor.
+                ind.fitness = computed_fitness if np.isfinite(computed_fitness) else float("-inf")
                 ind.tags = {
                     "parent_id": prior.get("parent_id"),
                     "distance": distance,
@@ -293,6 +359,14 @@ def main() -> None:
     parser.add_argument("--hidden", type=int, default=32, help="DistributedMLP hidden width")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument(
+        "--eval-timeout", type=float, default=1800.0,
+        help="Per-individual wall-clock timeout in seconds (default 1800 = 30min, "
+             "several times a typical individual's eval time). A worker that hangs "
+             "past this (e.g. a native-level MuJoCo deadlock on some pathological "
+             "morphology) is killed and that individual gets a NaN result instead "
+             "of blocking the whole generation forever.",
+    )
+    parser.add_argument(
         "--resume-dir", type=str, default=None,
         help="Continue an existing run from this exact directory (must contain "
              "database.db). Writes the continuation to the next "
@@ -331,6 +405,7 @@ def main() -> None:
         inner_gens=args.inner_gens,
         inner_pop=args.inner_pop,
         num_workers=args.workers,
+        eval_timeout=args.eval_timeout,
         sigma=args.sigma,
         hidden=args.hidden,
         comma_selection=args.comma_selection,
