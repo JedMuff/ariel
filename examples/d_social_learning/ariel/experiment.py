@@ -4,10 +4,22 @@ Usage:
     uv run examples/d_social_learning/ariel/experiment.py \
         --scheme lamarckian --x 0.5 --rep 0 [--gens 100] [--pop 20] [--lam 100] \
         [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N]
+
+Each invocation without --resume-dir creates a fresh, timestamped output
+directory (__data__/social/ariel/{scheme}/x{x}/rep_{rep}_{timestamp}) so
+re-running the same scheme/x/rep never clobbers a previous run, and prints
+that directory as `RUN_DIR=<path>` on its own stdout line. To continue a run,
+pass that exact directory back in:
+    uv run examples/d_social_learning/ariel/experiment.py \
+        --scheme lamarckian --x 0.5 --rep 0 --gens 20 \
+        --resume-dir __data__/social/ariel/lamarckian/x05/rep_0_20260813_143022
 """
 
 import argparse
+import datetime
+import multiprocessing
 import os
+import re
 import sys
 from multiprocessing import Pool
 from pathlib import Path
@@ -233,6 +245,33 @@ def make_initial_population(mu: int) -> Population:
 
 
 # ---------------------------------------------------------------------------
+# Resume helpers
+# ---------------------------------------------------------------------------
+
+def _numbered_db_parts(out_dir: Path) -> list[Path]:
+    """database_part{N}.db files in out_dir, sorted by N (database.db is
+    implicitly part 1 and isn't included here)."""
+    return sorted(
+        out_dir.glob("database_part*.db"),
+        key=lambda p: int(re.search(r"database_part(\d+)\.db", p.name).group(1)),
+    )
+
+
+def _latest_db_path(out_dir: Path) -> Path:
+    """The db file to restart from: the highest-numbered database_part{N}.db
+    if this run has already been resumed before, else database.db."""
+    parts = _numbered_db_parts(out_dir)
+    return parts[-1] if parts else out_dir / "database.db"
+
+
+def _next_db_path(out_dir: Path) -> Path:
+    """First free database_part{N}.db in out_dir (N starts at 2)."""
+    parts = _numbered_db_parts(out_dir)
+    next_n = int(re.search(r"database_part(\d+)\.db", parts[-1].name).group(1)) + 1 if parts else 2
+    return out_dir / f"database_part{next_n}.db"
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -253,18 +292,36 @@ def main() -> None:
     parser.add_argument("--sigma", type=float, default=0.5, help="CMA-ES initial step size")
     parser.add_argument("--hidden", type=int, default=32, help="DistributedMLP hidden width")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
-    parser.add_argument("--resume", action="store_true",
-                        help="Resume from existing database.db at the last saved generation")
+    parser.add_argument(
+        "--resume-dir", type=str, default=None,
+        help="Continue an existing run from this exact directory (must contain "
+             "database.db). Writes the continuation to the next "
+             "database_part{N}.db in that same directory. If omitted, a fresh "
+             "timestamped directory is created instead.",
+    )
     args = parser.parse_args()
 
     if args.comma_selection and args.lam < args.pop:
         parser.error("--comma-selection requires --lam >= --pop (not enough offspring to fill mu)")
 
-    x_str = str(args.x).replace(".", "")
-    out_dir = Path(f"__data__/social/ariel/{args.scheme}/x{x_str}/rep_{args.rep}")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.resume_dir:
+        out_dir = Path(args.resume_dir)
+        if not out_dir.is_dir():
+            parser.error(f"--resume-dir does not exist: {out_dir}")
+        if not (out_dir / "database.db").exists():
+            parser.error(f"--resume-dir has no database.db to resume from: {out_dir}")
+    else:
+        x_str = str(args.x).replace(".", "")
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = Path(f"__data__/social/ariel/{args.scheme}/x{x_str}/rep_{args.rep}_{timestamp}")
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    console.rule(f"[bold cyan]ARIEL | scheme={args.scheme} x={args.x} rep={args.rep}")
+    # Printed on its own line (not via `console`, whose rich markup/box-drawing
+    # would make this harder to grep) so calling scripts can pick up exactly
+    # which directory this run landed in — see run_social_parta.sh.
+    print(f"RUN_DIR={out_dir}")
+
+    console.rule(f"[bold cyan]ARIEL | scheme={args.scheme} x={args.x} rep={args.rep} dir={out_dir}")
 
     ops = build_ops(
         scheme_name=args.scheme,
@@ -279,15 +336,12 @@ def main() -> None:
         comma_selection=args.comma_selection,
     )
 
-    db_path = out_dir / "database.db"
-
-    if args.resume:
-        resume_db_path = out_dir / "database_part2.db"
+    if args.resume_dir:
         ea = EA(
-            restart=db_path,
+            restart=_latest_db_path(out_dir),
             operations=ops,
             num_steps=args.gens,
-            db_file_path=resume_db_path,
+            db_file_path=_next_db_path(out_dir),
             db_handling="delete",
         )
     else:
@@ -295,7 +349,7 @@ def main() -> None:
             population=make_initial_population(args.pop),
             operations=ops,
             num_steps=args.gens,
-            db_file_path=db_path,
+            db_file_path=out_dir / "database.db",
             db_handling="delete",
         )
     ea.run()
@@ -304,4 +358,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method("forkserver")
     main()
