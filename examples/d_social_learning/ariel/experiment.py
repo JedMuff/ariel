@@ -3,7 +3,8 @@
 Usage:
     uv run examples/d_social_learning/ariel/experiment.py \
         --scheme lamarckian --x 0.5 --rep 0 [--gens 100] [--pop 20] [--lam 100] \
-        [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N]
+        [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N] \
+        [--comma-selection] [--selection elitist|tournament] [--tournament-size 4]
 
 Each invocation without --resume-dir creates a fresh, timestamped output
 directory (__data__/social/ariel/{scheme}/x{x}/rep_{rep}_{timestamp}) so
@@ -19,6 +20,7 @@ import argparse
 import datetime
 import multiprocessing
 import os
+import random
 import re
 import sys
 from multiprocessing import Pool
@@ -157,6 +159,27 @@ def _evaluate_with_timeout(
         pool.join()
 
 
+def _tournament_select(
+    individuals: list[Individual], n: int, tournament_size: int,
+) -> list[Individual]:
+    """n survivor tournaments without replacement across tournaments (a
+    winner can't compete again), each picking the fittest of
+    tournament_size random contestants from what's left of `individuals`.
+
+    Without-replacement is required here (unlike typical parent-selection
+    tournaments): survivors are the literal Individual objects going on to
+    become alive, so the same individual can't "win" twice.
+    """
+    pool = list(individuals)
+    survivors = []
+    for _ in range(n):
+        contestants = random.sample(pool, k=min(tournament_size, len(pool)))
+        winner = max(contestants, key=lambda ind: ind.fitness_)
+        survivors.append(winner)
+        pool.remove(winner)
+    return survivors
+
+
 # ---------------------------------------------------------------------------
 # (mu+lambda) EA operations as EAOperation functions
 # ---------------------------------------------------------------------------
@@ -173,6 +196,8 @@ def build_ops(
     sigma: float,
     hidden: int,
     comma_selection: bool = False,
+    selection_method: str = "elitist",
+    tournament_size: int = 4,
 ) -> list[EAOperation]:
     """Return the ordered list of EAOperation steps for the outer EA."""
     @EAOperation
@@ -287,7 +312,13 @@ def build_ops(
         else:
             # (mu+lambda): survivors drawn from parents + offspring.
             selection_pool = Population(all_alive)
-        survivors = selection_pool.best(n=mu).to_list()
+
+        if selection_method == "tournament":
+            survivors = _tournament_select(
+                selection_pool.to_list(), n=mu, tournament_size=tournament_size,
+            )
+        else:
+            survivors = selection_pool.best(n=mu).to_list()
         survivor_ids = {id(s) for s in survivors}
         for ind in all_alive:
             ind.alive = id(ind) in survivor_ids
@@ -353,6 +384,11 @@ def main() -> None:
                         help="Use (mu,lambda) selection (survivors from offspring only) "
                              "instead of the default (mu+lambda) (survivors from parents+offspring). "
                              "Requires --lam >= --pop.")
+    parser.add_argument("--selection", choices=["elitist", "tournament"], default="elitist",
+                        help="Survivor selection algorithm applied to the pool chosen by "
+                             "--comma-selection: elitist (top-mu by fitness, default) or tournament.")
+    parser.add_argument("--tournament-size", type=int, default=4,
+                        help="Tournament size when --selection=tournament (ignored otherwise).")
     parser.add_argument("--inner-gens", type=int, default=20)
     parser.add_argument("--inner-pop", type=int, default=16)
     parser.add_argument("--sigma", type=float, default=0.5, help="CMA-ES initial step size")
@@ -378,6 +414,9 @@ def main() -> None:
     if args.comma_selection and args.lam < args.pop:
         parser.error("--comma-selection requires --lam >= --pop (not enough offspring to fill mu)")
 
+    if args.selection == "tournament" and args.tournament_size < 2:
+        parser.error("--tournament-size must be >= 2 when --selection=tournament")
+
     if args.resume_dir:
         out_dir = Path(args.resume_dir)
         if not out_dir.is_dir():
@@ -387,7 +426,21 @@ def main() -> None:
     else:
         x_str = str(args.x).replace(".", "")
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = Path(f"__data__/social/ariel/{args.scheme}/x{x_str}/rep_{args.rep}_{timestamp}")
+        # Non-default selection schemes get a label in the rep-dir name so
+        # runs of different schemes for the same (scheme, x, rep) don't get
+        # silently mixed together by analysis/curve_utils.py's discover_reps
+        # (which globs "rep_*/database.db"). The true default (mu+lambda,
+        # elitist) keeps the original unlabeled name so every other run
+        # script's output layout is unaffected.
+        sel_bits = []
+        if args.comma_selection:
+            sel_bits.append("comma")
+        if args.selection == "tournament":
+            sel_bits.append(f"tourn{args.tournament_size}")
+        sel_suffix = ("_" + "_".join(sel_bits)) if sel_bits else ""
+        out_dir = Path(
+            f"__data__/social/ariel/{args.scheme}/x{x_str}/rep_{args.rep}{sel_suffix}_{timestamp}"
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
 
     # Printed on its own line (not via `console`, whose rich markup/box-drawing
@@ -409,6 +462,8 @@ def main() -> None:
         sigma=args.sigma,
         hidden=args.hidden,
         comma_selection=args.comma_selection,
+        selection_method=args.selection,
+        tournament_size=args.tournament_size,
     )
 
     if args.resume_dir:
