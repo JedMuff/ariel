@@ -16,9 +16,11 @@ import random
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Literal, Optional, cast
 
+import cma
 import cv2
 import mujoco
 import nevergrad as ng
@@ -750,3 +752,248 @@ def train_body_parallel(task: dict[str, Any]) -> dict[str, Any]:
         "control_cost":   final_result.get("control_cost", 0.0),
         "eval_time_s":    time.perf_counter() - t_start,
     }
+
+
+# ── Single-skill CMA-ES trainer (loco / turn / directional skills) ────────────
+#
+# Generalizes the loco / turn-left / turn-right skill-training pipeline
+# originally written for gecko_food_skills.py's SkillController so it can be
+# shared by any task script that needs "train a small CMA-ES-optimized brain
+# whose reward is either forward-translation along some direction, or
+# rotation about the vertical axis" (gecko_food_skills.py's loco/left/right,
+# gecko_skill_tasks.py's forward/multidirection/turn_avg tasks).
+
+CMA_SIGMA          = 0.7
+CMA_POPSIZE        = 16
+CMA_INIT_SCALE     = 1.3
+CONTROL_STEP_FREQ  = 9       # steps between control recomputes; physics runs at
+                              # MuJoCo's default 500Hz (MujocoConfig.timestep is
+                              # dead code -- never applied to spec.option.timestep
+                              # in _base_world.py), so this is ~55.6Hz control
+                              # (500/9), the closest integer divisor to 60Hz.
+SETTLE_DURATION    = 3.0
+LOCO_DURATION      = 30.0
+TURN_DURATION      = 15.0
+CTRL_ALPHA               = 0.5
+HINGE_CONTACT_LIMIT       = 200
+HINGE_CONTACT_PENALTY     = 0.005
+HINGE_GLITCH_FITNESS      = 1.0
+HEIGHT_PENALTY_THRESHOLD  = 0.21
+JERK_PENALTY_WEIGHT       = 3.0   # penalty per unit of mean absolute ctrl delta, above JERK_THRESHOLD
+JERK_THRESHOLD            = 0.15  # hurdle: mean_jerk below this is free
+
+# The core-mounted camera's local mount (euler + position) is fixed in
+# core.py and never rotated relative to the world, since every body here
+# spawns with rotation=None (SimpleFlatWorld default = no rotation). Its
+# world-frame forward direction is therefore this constant for every
+# individual, not something that needs re-measuring per body: confirmed via
+# data.cam_xmat at spawn (camera looks down world -Y, not +X). angle_deg=0
+# on a SkillReward means "this same axis", so the vision-driven
+# SkillController's notion of forward and a 0-degree translation skill agree.
+FORWARD_AXIS = np.array([0.0, -1.0])
+
+
+@dataclass
+class SkillReward:
+    """What a single trained skill is rewarded for.
+
+    kind="translate": reward is displacement projected onto FORWARD_AXIS
+    rotated by angle_deg (degrees, counter-clockwise). angle_deg=0.0
+    reproduces the original "loco" skill exactly.
+    kind="rotate": reward is accumulated signed yaw in the direction
+    turn_sign (+1 = left, -1 = right), reproducing the original "left"/
+    "right" skills exactly.
+    """
+
+    kind: Literal["translate", "rotate"]
+    duration: float
+    angle_deg: float = 0.0
+    turn_sign: int = 1
+
+
+def _rotate_2d(v: np.ndarray, angle_deg: float) -> np.ndarray:
+    theta = math.radians(angle_deg)
+    c, s = math.cos(theta), math.sin(theta)
+    return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1]])
+
+
+def rotor_geom_ids(model: mujoco.MjModel) -> set[int]:
+    return {i for i in range(model.ngeom) if model.geom(i).name.endswith("-rotor")}
+
+
+def floor_id(model: mujoco.MjModel) -> int:
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+
+
+def build_loco_world_for_body(genome_dict: dict, to_spec_fn=genome_to_spec) -> tuple[mujoco.MjModel, mujoco.MjData]:
+    """Plain flat-world body, no food target/camera — used for skill training."""
+    spec = to_spec_fn(genome_dict)
+    if spec is None:
+        raise ValueError("Could not decode morphology")
+    world = SimpleFlatWorld()
+    try:
+        world.spawn(spec, position=SPAWN_POSITION, correct_collision_with_floor=True)
+    except Exception:
+        world = SimpleFlatWorld()
+        world.spawn(spec, position=SPAWN_POSITION, correct_collision_with_floor=False)
+    model = world.spec.compile()
+    data  = mujoco.MjData(model)
+    return model, data
+
+
+_skill_worker_ctx: Optional[dict[str, Any]] = None
+
+
+def _skill_worker_init(seed: int, reward: SkillReward, genome_dict: dict, to_spec_fn) -> None:
+    global _skill_worker_ctx  # noqa: PLW0603
+    torch.set_num_threads(1)
+    np.random.seed((seed + os.getpid()) % (2**32 - 1))
+    model, data = build_loco_world_for_body(genome_dict, to_spec_fn)
+    input_dim   = len(get_robot_state(data))
+    output_dim  = model.nu
+    network     = Network(input_size=input_dim, output_size=output_dim, hidden_size=HIDDEN_SIZE)
+    _skill_worker_ctx = {
+        "model": model, "data": data, "network": network,
+        "rotor_ids": rotor_geom_ids(model), "floor": floor_id(model), "reward": reward,
+    }
+
+
+def _skill_worker_eval(weights_list: list[float]) -> float:
+    assert _skill_worker_ctx is not None
+    ctx       = _skill_worker_ctx
+    model     = ctx["model"]
+    data      = ctx["data"]
+    network   = ctx["network"]
+    rotor_ids = ctx["rotor_ids"]
+    floor     = ctx["floor"]
+    reward: SkillReward = ctx["reward"]
+    weights   = np.array(weights_list, dtype=np.float32)
+    fill_parameters(network, weights)
+    mujoco.mj_resetData(model, data)
+
+    while data.time < SETTLE_DURATION:
+        mujoco.mj_step(model, data)
+
+    core_id        = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
+    initial_height = float(data.xpos[core_id, 2])
+    step           = 0
+    current_action = np.zeros(model.nu)
+    c_hinge        = 0
+    prev_contacts: set[int] = set()
+    prev_ctrl: Optional[np.ndarray] = None
+    jerk_sum       = 0.0
+    ctrl_step      = 0
+
+    if reward.kind == "translate":
+        xy0           = np.array([data.qpos[0], data.qpos[1]])
+        reward_axis   = _rotate_2d(FORWARD_AXIS, reward.angle_deg)
+    else:
+        r_prev      = np.array(data.xmat[core_id]).reshape(3, 3).copy()
+        accumulated = 0.0
+
+    episode_end = SETTLE_DURATION + reward.duration
+    while data.time < episode_end:
+        if step % CONTROL_STEP_FREQ == 0:
+            state      = get_robot_state(data).astype(np.float32)
+            raw_action = network.forward(model, data, state)
+            current_action = np.clip(
+                current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
+                -math.pi / 2, math.pi / 2,
+            )
+            if prev_ctrl is not None:
+                jerk_sum += float(np.mean(np.abs(current_action - prev_ctrl)))
+            prev_ctrl = current_action.copy()
+            ctrl_step += 1
+        data.ctrl[:] = current_action
+        mujoco.mj_step(model, data)
+
+        curr: set[int] = set()
+        for k in range(data.ncon):
+            c = data.contact[k]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if g1 == floor and g2 in rotor_ids:
+                curr.add(g2)
+            elif g2 == floor and g1 in rotor_ids:
+                curr.add(g1)
+        c_hinge += len(curr - prev_contacts)
+        prev_contacts = curr
+
+        if reward.kind == "rotate":
+            r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
+            delta  = signed_vertical_yaw_delta(r_prev, r_curr)
+            accumulated += max(0.0, delta * reward.turn_sign)
+            r_prev = r_curr.copy()
+
+        step += 1
+
+    if c_hinge > HINGE_CONTACT_LIMIT:
+        return HINGE_GLITCH_FITNESS
+
+    mean_jerk    = jerk_sum / max(ctrl_step - 1, 1)
+    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+
+    height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+    if reward.kind == "translate":
+        xy_now   = np.array([data.qpos[0], data.qpos[1]])
+        fwd_disp = float(np.dot(xy_now - xy0, reward_axis))
+        return -(fwd_disp - height_penalty - jerk_penalty)
+    else:
+        return -(accumulated - height_penalty - jerk_penalty)
+
+
+def train_skill_for_body(
+    reward: SkillReward,
+    genome_dict: dict,
+    budget: int,
+    workers: int,
+    seed: int,
+    to_spec_fn=genome_to_spec,
+) -> tuple[np.ndarray, list[float], float]:
+    """Train one skill via CMA-ES for a specific body.
+
+    Returns (best_weights, learning_curve, eval_time_s).
+    """
+    t_start = time.perf_counter()
+
+    model, data = build_loco_world_for_body(genome_dict, to_spec_fn)
+    input_dim   = len(get_robot_state(data))
+    output_dim  = model.nu
+    network     = Network(input_size=input_dim, output_size=output_dim, hidden_size=HIDDEN_SIZE)
+    num_params  = sum(p.numel() for p in network.parameters())
+
+    rng = np.random.default_rng(seed)
+    x0  = rng.uniform(-CMA_INIT_SCALE, CMA_INIT_SCALE, size=num_params).tolist()
+
+    es = cma.CMAEvolutionStrategy(
+        x0, CMA_SIGMA,
+        {"popsize": CMA_POPSIZE, "seed": seed, "verbose": -9, "maxiter": 10**9},
+    )
+
+    best_fit = float("inf")
+    best_w   = np.array(x0, dtype=np.float32)
+    learning_curve: list[float] = []
+
+    effective_workers = min(CMA_POPSIZE, workers)
+    with ProcessPoolExecutor(
+        max_workers=effective_workers,
+        initializer=_skill_worker_init,
+        initargs=(seed, reward, genome_dict, to_spec_fn),
+    ) as pool:
+        gen = 0
+        while gen < budget:
+            if es.stop():
+                break
+
+            solutions = es.ask()
+            fits      = list(pool.map(_skill_worker_eval, [s.tolist() for s in solutions]))
+            es.tell(solutions, fits)
+
+            gen_best = min(fits)
+            if gen_best < best_fit:
+                best_fit = gen_best
+                best_w   = np.array(solutions[fits.index(gen_best)], dtype=np.float32)
+                learning_curve.append(best_fit)
+
+            gen += 1
+
+    return best_w, learning_curve, time.perf_counter() - t_start
