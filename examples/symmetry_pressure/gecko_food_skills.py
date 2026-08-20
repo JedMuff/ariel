@@ -3,13 +3,15 @@ Symmetry-pressure investigation — food collection task with a state-based
 skill-controller brain instead of a single monolithic network.
 
 Outer loop:  (mu+lambda | mu,lambda | nsga2-efficiency | nsga2-symmetry) ES
-             over TreeGenome bodies using the ariel.ec engine.
-Inner loop:  Three separate CMA-ES (cma library) runs per body — loco, turn-left,
-             turn-right — each trained on their own single-skill task. At
-             evaluation time the three trained networks are driven by a
-             hand-coded, vision-gated SkillController (see run_skill_controller.py)
-             that commits to whichever skill it selects for a minimum number of
-             control steps before it is allowed to switch.
+             over bodies (tree / tree_symmetric / cppn genome, see --genome-type
+             and genome_adapter.py) using the ariel.ec engine.
+Inner loop:  Three separate CMA-ES runs per body — loco, turn-left, turn-right —
+             each trained on their own single-skill task via
+             shared.train_skill_for_body. At evaluation time the three trained
+             networks are driven by a hand-coded, vision-gated SkillController
+             (see run_skill_controller.py) that commits to whichever skill it
+             selects for a minimum number of control steps before it is
+             allowed to switch.
 Task:        Collect food items (waypoints) in sequence. Proprioception + camera.
              Same fitness definition as gecko_food.py (see run_episode_food).
 
@@ -23,7 +25,7 @@ turn skills and food-task evaluation are skipped for that individual too, and
 its loco fitness is used as-is as the final fitness.
 
 Data saved per individual during evolution (run_data.jsonl):
-  gen, ind_id, parent_ids, fitness, loco_only,
+  gen, ind_id, parent_ids, fitness, loco_only, genome_type,
   loco_learning_curve, left_learning_curve, right_learning_curve,
   loco_eval_time_s, left_eval_time_s, right_eval_time_s, food_eval_time_s,
   trajectory, food_positions, skill_pct,
@@ -34,15 +36,12 @@ import argparse
 import gc
 import json
 import math
-import os
 import random
 import time
 import warnings
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
-import cma
 import mujoco
 import numpy as np
 import torch
@@ -50,27 +49,31 @@ from rich.console import Console
 from rich.traceback import install
 
 from ariel.ec import EA, EAOperation, EASettings, Individual, Population
-from ariel.ec.genotypes.tree.tree_genome import TreeGenome
 from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
 from ariel.simulation.environments import SimpleFlatWorld
 
+import genome_adapter
 from shared import (
+    LOCO_DURATION,
     RING_R_MAX,
+    SETTLE_DURATION,
+    CONTROL_STEP_FREQ,
+    CTRL_ALPHA,
+    GATE_HALF_HEIGHT,
+    SPAWN_POSITION,
+    TURN_DURATION,
     Network,
+    SkillReward,
     action_control_cost,
     analyze_sections,
-    bilateral_symmetry_score,
-    create_individual,
     fill_parameters,
-    genome_hash,
+    floor_id,
     genome_input_dim,
-    genome_to_spec,
     isolate_green,
-    make_offspring,
     nsga2_survivor_selection,
+    rotor_geom_ids,
     sample_waypoints,
-    signed_vertical_yaw_delta,
-    symmetry_axis_from_cli,
+    train_skill_for_body,
 )
 
 install()
@@ -95,11 +98,11 @@ parser.add_argument("--num-waypoints", type=int,   default=10)
 parser.add_argument("--arena-radius",  type=float, default=3.0)
 parser.add_argument("--max-modules",   type=int,   default=25)
 parser.add_argument("--max-depth",     type=int,   default=25)
-parser.add_argument("--symmetry-axis",
-                    choices=["none", "y_zero", "x_equals_y"],
-                    default="none",
-                    help="Enforce bilateral symmetry of generated/mutated/crossed-over "
-                         "bodies about this axis before construction ('none' disables)")
+parser.add_argument("--genome-type",
+                    choices=["tree", "tree_symmetric", "cppn"],
+                    default="tree",
+                    help="Body genome representation: plain TreeGenome, TreeGenome with "
+                         "enforced y_zero bilateral symmetry, or a CPPN-NEAT genome")
 parser.add_argument("--seed",          type=int,   default=42)
 parser.add_argument("--strategy-type",
                     choices=["plus", "comma", "nsga2-efficiency", "nsga2-symmetry"],
@@ -124,12 +127,14 @@ NUM_WAYPOINTS  = args.num_waypoints
 ARENA_RADIUS   = max(1.0, args.arena_radius)
 NUM_MODULES    = args.max_modules
 MAX_DEPTH      = args.max_depth
-SYMMETRY_AXIS  = symmetry_axis_from_cli(args.symmetry_axis)
+GENOME_TYPE    = args.genome_type
 BASE_SEED      = args.seed
 STRATEGY       = args.strategy_type
 REPEAT_EVALS   = args.repeat_evals
 LOCO_ONLY      = args.loco_only
 TIME_LIMIT     = args.time_limit
+
+TOURNAMENT_SIZE = 4
 
 SCRIPT_NAME = Path(__file__).stem
 DATA = Path.cwd() / "__data__" / SCRIPT_NAME
@@ -145,66 +150,29 @@ with (DATA / "run_config.json").open("w") as _fh:
     json.dump(vars(args), _fh, indent=2)
 
 # ── Fixed skill-pipeline hyperparameters ──────────────────────────────────────
+#
+# CMA-ES hyperparameters, episode durations, and the hinge-glitch/height-penalty
+# fitness terms shared with every other task script now live in shared.py
+# (shared.train_skill_for_body) so all task scripts train skills identically.
 
-HIDDEN_SIZES        = [32]     # 1 hidden layer, 32 neurons
-CMA_SIGMA            = 0.7
-CMA_POPSIZE          = 16
 LOCO_BUDGET          = 100     # CMA-ES generations
 TURN_BUDGET          = 100     # CMA-ES generations (per direction)
 COMMIT_STEPS         = 40
 CENTRE_FWD_THRESH    = 0.4
-CONTROL_STEP_FREQ    = 100     # Hz
-CMA_INIT_SCALE       = 1.3
 LOCO_GATE_THRESH     = -1.0    # loco fitness must be <= this to train turn skills
+FOOD_EVAL_DURATION   = 120.0   # 2 minutes
 
-SETTLE_DURATION       = 3.0
-LOCO_DURATION         = 30.0
-TURN_DURATION         = 15.0
-FOOD_EVAL_DURATION    = 120.0  # 2 minutes
-HINGE_CONTACT_LIMIT   = 200
-HINGE_CONTACT_PENALTY = 0.005
-HINGE_GLITCH_FITNESS  = 1.0
-HEIGHT_PENALTY_THRESHOLD = 0.21
-CTRL_ALPHA            = 0.5
-
-# The core-mounted camera's local mount (euler + position) is fixed in
-# core.py and never rotated relative to the world, since every body here
-# spawns with rotation=None (SimpleFlatWorld default = no rotation). Its
-# world-frame forward direction is therefore this constant for every
-# individual, not something that needs re-measuring per body: confirmed via
-# data.cam_xmat at spawn (camera looks down world -Y, not +X). The loco skill
-# must reward displacement along this same axis so "forward" for locomotion
-# and "forward" for the vision-driven SkillController agree.
-FORWARD_AXIS = np.array([0.0, -1.0])
-
-SPAWN_POSITION = (0.0, 0.0, 0.1)
-GATE_HALF_HEIGHT = 0.15
+ADAPTER = genome_adapter.genome_adapter_from_cli(GENOME_TYPE, NUM_MODULES)
 
 
-# ── Body-specific world builders ──────────────────────────────────────────────
-
-
-def _build_loco_world_for_body(genome_dict: dict) -> tuple[mujoco.MjModel, mujoco.MjData]:
-    """Plain flat-world body, no food target/camera — used for loco/turn training."""
-    spec = genome_to_spec(genome_dict)
-    if spec is None:
-        raise ValueError("Could not decode morphology")
-    world = SimpleFlatWorld()
-    try:
-        world.spawn(spec, position=SPAWN_POSITION, correct_collision_with_floor=True)
-    except Exception:
-        world = SimpleFlatWorld()
-        world.spawn(spec, position=SPAWN_POSITION, correct_collision_with_floor=False)
-    model = world.spec.compile()
-    data  = mujoco.MjData(model)
-    return model, data
+# ── Body-specific world builder (food task only; skill training lives in shared.py) ─
 
 
 def _build_food_world_for_body(
     genome_dict: dict,
 ) -> tuple[mujoco.MjModel, mujoco.MjData, int, Optional[str]]:
     """Flat-world body + green food marker + body-mounted camera lookup."""
-    spec = genome_to_spec(genome_dict)
+    spec = ADAPTER.to_spec(genome_dict)
     if spec is None:
         raise ValueError("Could not decode morphology")
     world = SimpleFlatWorld()
@@ -236,170 +204,6 @@ def _build_food_world_for_body(
             break
 
     return model, data, target_mocap_id, cam_name
-
-
-def _rotor_geom_ids(model: mujoco.MjModel) -> set[int]:
-    return {i for i in range(model.ngeom) if model.geom(i).name.endswith("-rotor")}
-
-
-def _floor_id(model: mujoco.MjModel) -> int:
-    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-
-
-# ── Per-skill CMA-ES worker (loco / left / right training) ───────────────────
-
-_skill_worker_ctx: Optional[dict[str, Any]] = None
-
-
-def _skill_worker_init(seed: int, skill: str, genome_dict: dict) -> None:
-    global _skill_worker_ctx
-    torch.set_num_threads(1)
-    np.random.seed((seed + os.getpid()) % (2**32 - 1))
-    model, data = _build_loco_world_for_body(genome_dict)
-    input_dim   = len(get_robot_state(data))
-    output_dim  = model.nu
-    network     = Network(input_size=input_dim, output_size=output_dim,
-                          hidden_size=HIDDEN_SIZES[0])
-    rotor_ids   = _rotor_geom_ids(model)
-    floor       = _floor_id(model)
-    _skill_worker_ctx = {
-        "model": model, "data": data, "network": network,
-        "rotor_ids": rotor_ids, "floor": floor, "skill": skill,
-    }
-
-
-def _skill_worker_eval(weights_list: list[float]) -> float:
-    assert _skill_worker_ctx is not None
-    ctx       = _skill_worker_ctx
-    model     = ctx["model"]
-    data      = ctx["data"]
-    network   = ctx["network"]
-    rotor_ids = ctx["rotor_ids"]
-    floor     = ctx["floor"]
-    skill     = ctx["skill"]
-    weights   = np.array(weights_list, dtype=np.float32)
-    fill_parameters(network, weights)
-    mujoco.mj_resetData(model, data)
-
-    while data.time < SETTLE_DURATION:
-        mujoco.mj_step(model, data)
-
-    core_id        = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
-    initial_height = float(data.xpos[core_id, 2])
-    step           = 0
-    current_action = np.zeros(model.nu)
-    c_hinge        = 0
-    prev_contacts: set[int] = set()
-
-    if skill == "loco":
-        xy0      = np.array([data.qpos[0], data.qpos[1]])
-        duration = LOCO_DURATION
-    else:
-        r_prev      = np.array(data.xmat[core_id]).reshape(3, 3).copy()
-        accumulated = 0.0
-        direction   = +1 if skill == "left" else -1
-        duration    = TURN_DURATION
-
-    episode_end = SETTLE_DURATION + duration
-    while data.time < episode_end:
-        if step % CONTROL_STEP_FREQ == 0:
-            state      = get_robot_state(data).astype(np.float32)
-            raw_action = network.forward(model, data, state)
-            current_action = np.clip(
-                current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
-                -math.pi / 2, math.pi / 2,
-            )
-        data.ctrl[:] = current_action
-        mujoco.mj_step(model, data)
-
-        curr: set[int] = set()
-        for k in range(data.ncon):
-            c = data.contact[k]
-            g1, g2 = int(c.geom1), int(c.geom2)
-            if g1 == floor and g2 in rotor_ids:
-                curr.add(g2)
-            elif g2 == floor and g1 in rotor_ids:
-                curr.add(g1)
-        c_hinge += len(curr - prev_contacts)
-        prev_contacts = curr
-
-        if skill != "loco":
-            r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
-            delta  = signed_vertical_yaw_delta(r_prev, r_curr)
-            accumulated += max(0.0, delta * direction)
-            r_prev = r_curr.copy()
-
-        step += 1
-
-    if c_hinge > HINGE_CONTACT_LIMIT:
-        return HINGE_GLITCH_FITNESS
-
-    height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-    if skill == "loco":
-        xy_now   = np.array([data.qpos[0], data.qpos[1]])
-        fwd_disp = float(np.dot(xy_now - xy0, FORWARD_AXIS))
-        return -(fwd_disp - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
-    else:
-        return -(accumulated - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
-
-
-def _train_skill_for_body(
-    skill: str,
-    genome_dict: dict,
-    budget: int,
-    workers: int,
-    seed: int,
-) -> tuple[np.ndarray, list[float], float]:
-    """Train one skill via CMA-ES for a specific body.
-
-    Returns (best_weights, learning_curve, eval_time_s).
-    """
-    t_start = time.perf_counter()
-
-    model, data = _build_loco_world_for_body(genome_dict)
-    input_dim   = len(get_robot_state(data))
-    output_dim  = model.nu
-    network     = Network(input_size=input_dim, output_size=output_dim,
-                          hidden_size=HIDDEN_SIZES[0])
-    num_params  = sum(p.numel() for p in network.parameters())
-
-    rng = np.random.default_rng(seed)
-    x0  = rng.uniform(-CMA_INIT_SCALE, CMA_INIT_SCALE, size=num_params).tolist()
-
-    es = cma.CMAEvolutionStrategy(
-        x0, CMA_SIGMA,
-        {"popsize": CMA_POPSIZE, "seed": seed, "verbose": -9, "maxiter": 10**9},
-    )
-
-    best_fit = float("inf")
-    best_w   = np.array(x0, dtype=np.float32)
-    learning_curve: list[float] = []
-
-    effective_workers = min(CMA_POPSIZE, workers)
-    with ProcessPoolExecutor(
-        max_workers=effective_workers,
-        initializer=_skill_worker_init,
-        initargs=(seed, skill, genome_dict),
-    ) as pool:
-        gen = 0
-        while gen < budget:
-            if es.stop():
-                break
-
-            solutions = es.ask()
-            fits      = list(pool.map(_skill_worker_eval, [s.tolist() for s in solutions]))
-            es.tell(solutions, fits)
-
-            gen_best = min(fits)
-            if gen_best < best_fit:
-                best_fit = gen_best
-                best_w   = np.array(solutions[fits.index(gen_best)], dtype=np.float32)
-                learning_curve.append(best_fit)
-
-            gen += 1
-
-    console.log(f"    {skill}: best_fitness={best_fit:.4f}  gens={gen}/{budget}")
-    return best_w, learning_curve, time.perf_counter() - t_start
 
 
 # ── SkillController (matches run_skill_controller.py / tune_skill_pipeline.py) ─
@@ -460,8 +264,7 @@ def _run_food_episode(
     output_dim = model.nu
 
     def _load(w: np.ndarray) -> Network:
-        net = Network(input_size=input_dim, output_size=output_dim,
-                      hidden_size=HIDDEN_SIZES[0])
+        net = Network(input_size=input_dim, output_size=output_dim)
         fill_parameters(net, w)
         return net
 
@@ -470,8 +273,8 @@ def _run_food_episode(
     right_net = _load(right_weights)
     renderer  = mujoco.Renderer(model, height=96, width=128)
 
-    rotor_geom_ids = _rotor_geom_ids(model)
-    floor_id       = _floor_id(model)
+    rotor_ids     = rotor_geom_ids(model)
+    floor_geom_id = floor_id(model)
 
     rng = np.random.default_rng(seed)
 
@@ -540,9 +343,9 @@ def _run_food_episode(
         for k in range(data.ncon):
             c = data.contact[k]
             g1, g2 = int(c.geom1), int(c.geom2)
-            if g1 == floor_id and g2 in rotor_geom_ids:
+            if g1 == floor_geom_id and g2 in rotor_ids:
                 curr_rotor_contacts.add(g2)
-            elif g2 == floor_id and g1 in rotor_geom_ids:
+            elif g2 == floor_geom_id and g1 in rotor_ids:
                 curr_rotor_contacts.add(g1)
         c_hinge += len(curr_rotor_contacts - prev_rotor_contacts)
         prev_rotor_contacts = curr_rotor_contacts
@@ -562,14 +365,14 @@ def _run_food_episode(
     final_dist = 0.0 if waypoints_reached >= num_wps else min_dist
     d_norm = float(np.clip((RING_R_MAX - final_dist) / RING_R_MAX, 0.0, 1.0))
 
-    if c_hinge > HINGE_CONTACT_LIMIT:
-        fitness = HINGE_GLITCH_FITNESS
-    else:
-        height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-        # Baseline shift: reaching the food eval at all (i.e. clearing the loco
-        # gate) is worth -1, matching LOCO_GATE_THRESH so a gated-in individual
-        # is never scored worse than one that was gated out.
-        fitness = -1.0 - (waypoints_reached + d_norm - height_penalty - HINGE_CONTACT_PENALTY * c_hinge)
+    # Height penalty, hinge-contact penalty, and the hinge-glitch override are
+    # deliberately not applied here: those concerns are handled during the
+    # underlying loco/left/right skill training (see shared._skill_worker_eval)
+    # that this episode's skills were trained with, not re-applied on top here.
+    # Baseline shift: reaching the food eval at all (i.e. clearing the loco
+    # gate) is worth -1, matching LOCO_GATE_THRESH so a gated-in individual
+    # is never scored worse than one that was gated out.
+    fitness = -1.0 - (waypoints_reached + d_norm)
 
     total_ctrl_steps = len(skill_log)
     skill_pct = {
@@ -596,8 +399,9 @@ def _train_pipeline_for_body(
     waypoints: list[np.ndarray],
     seed: int,
 ) -> dict[str, Any]:
-    loco_w, loco_curve, loco_time = _train_skill_for_body(
-        "loco", genome_dict, LOCO_BUDGET, BRAIN_WORKERS, seed,
+    loco_w, loco_curve, loco_time = train_skill_for_body(
+        SkillReward(kind="translate", angle_deg=0.0, duration=LOCO_DURATION),
+        genome_dict, LOCO_BUDGET, BRAIN_WORKERS, seed, to_spec_fn=ADAPTER.to_spec,
     )
     loco_fitness = float(min(loco_curve)) if loco_curve else float("inf")
 
@@ -621,11 +425,13 @@ def _train_pipeline_for_body(
             "skill_pct":            {},
         }
 
-    left_w, left_curve, left_time = _train_skill_for_body(
-        "left", genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 1,
+    left_w, left_curve, left_time = train_skill_for_body(
+        SkillReward(kind="rotate", turn_sign=+1, duration=TURN_DURATION),
+        genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 1, to_spec_fn=ADAPTER.to_spec,
     )
-    right_w, right_curve, right_time = _train_skill_for_body(
-        "right", genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 2,
+    right_w, right_curve, right_time = train_skill_for_body(
+        SkillReward(kind="rotate", turn_sign=-1, duration=TURN_DURATION),
+        genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 2, to_spec_fn=ADAPTER.to_spec,
     )
 
     t_food_start = time.perf_counter()
@@ -669,6 +475,7 @@ class BodyBrainEvolution:
         )
         self.outer_gen: int = 0
         self.gen_waypoints: list[np.ndarray] = []
+        self.selected_parents: list[Individual] = []
         self.best_seen_fitness:  float = float("inf")
         self.best_seen_genotype: Optional[dict] = None
         self.best_seen_weights:  Optional[dict[str, np.ndarray]] = None
@@ -677,16 +484,25 @@ class BodyBrainEvolution:
     # -- operations -----------------------------------------------------------
 
     def parent_selection(self, population: Population) -> Population:
-        population = population.sort(sort="min", attribute="fitness_")
-        for i, ind in enumerate(population):
-            ind.tags = {**ind.tags, "ps": i < MU}
+        contenders = list(population)
+        k = min(TOURNAMENT_SIZE, len(contenders))
+        winners: list[Individual] = []
+        for _ in range(MU):
+            bracket = RNG.choice(len(contenders), size=k, replace=False)
+            winner = min(
+                (contenders[i] for i in bracket),
+                key=lambda ind: ind.fitness_ if ind.fitness_ is not None else float("inf"),
+            )
+            winners.append(winner)
+        self.selected_parents = winners
+        winner_ids = {id(w) for w in winners}
+        for ind in population:
+            ind.tags = {**ind.tags, "ps": id(ind) in winner_ids}
         return population
 
     def reproduction(self, population: Population) -> Population:
-        parents = [ind for ind in population if ind.tags.get("ps", False)]
-        if not parents:
-            parents = list(population)
-        offspring = make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH, symmetry_axis=SYMMETRY_AXIS)
+        parents = self.selected_parents or list(population)
+        offspring = ADAPTER.make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH)
 
         if STRATEGY == "plus" and REPEAT_EVALS:
             for ind in parents:
@@ -718,9 +534,10 @@ class BodyBrainEvolution:
         eval_times: list[float] = []
         results: list[dict[str, Any]] = []
         for idx, ind in enumerate(to_eval):
-            console.log(f"  [{idx + 1}/{len(to_eval)}] training body {genome_hash(ind.genotype['morph'])[:8]}...")
+            genome_dict = ind.genotype[ADAPTER.genotype_key]
+            console.log(f"  [{idx + 1}/{len(to_eval)}] training body {ADAPTER.hash(genome_dict)[:8]}...")
             res = _train_pipeline_for_body(
-                genome_dict=ind.genotype["morph"],
+                genome_dict=genome_dict,
                 waypoints=self.gen_waypoints,
                 seed=BASE_SEED + 1000 * self.outer_gen + idx,
             )
@@ -745,7 +562,7 @@ class BodyBrainEvolution:
                 "food_eval_time_s":     res["food_eval_time_s"],
                 "trajectory":           res["trajectory"],
                 "control_cost":         res["control_cost"],
-                "yz_symmetry":          bilateral_symmetry_score(ind.genotype["morph"]),
+                "yz_symmetry":          ADAPTER.symmetry_score(ind.genotype[ADAPTER.genotype_key]),
                 "food_positions":       food_positions,
                 "eval_time_s":          eval_times[idx],
                 "c_hinge":              res["c_hinge"],
@@ -763,7 +580,7 @@ class BodyBrainEvolution:
             }
             self._save_checkpoint(
                 tag=f"gen{self.outer_gen:03d}_body{idx:02d}",
-                genotype=dict(ind.genotype["morph"]),
+                genotype=dict(ind.genotype[ADAPTER.genotype_key]),
                 weights=weights,
                 fitness=best_fit,
                 waypoints=list(self.gen_waypoints),
@@ -771,7 +588,7 @@ class BodyBrainEvolution:
 
             if best_fit < self.best_seen_fitness and res["loco_weights"] is not None:
                 self.best_seen_fitness   = best_fit
-                self.best_seen_genotype  = dict(ind.genotype["morph"])
+                self.best_seen_genotype  = dict(ind.genotype[ADAPTER.genotype_key])
                 self.best_seen_weights   = {k: (v.copy() if v is not None else None)
                                              for k, v in weights.items()}
                 self.best_seen_waypoints = list(self.gen_waypoints)
@@ -841,6 +658,7 @@ class BodyBrainEvolution:
             "parent_ids":            ind.genotype.get("parent_ids", []),
             "fitness":               ind.fitness_ if ind.fitness_ is not None else None,
             "loco_only":             LOCO_ONLY,
+            "genome_type":           GENOME_TYPE,
             "loco_learning_curve":   ind.tags.get("loco_learning_curve", []),
             "left_learning_curve":   ind.tags.get("left_learning_curve", []),
             "right_learning_curve":  ind.tags.get("right_learning_curve", []),
@@ -853,7 +671,7 @@ class BodyBrainEvolution:
             "skill_pct":             ind.tags.get("skill_pct", {}),
             "control_cost":          ind.tags.get("control_cost", 0.0),
             "yz_symmetry":           ind.tags.get("yz_symmetry", 0.0),
-            "genome_hash":           genome_hash(ind.genotype["morph"]),
+            "genome_hash":           ADAPTER.hash(ind.genotype[ADAPTER.genotype_key]),
             "eval_time_s":           ind.tags.get("eval_time_s", 0.0),
             "c_hinge":               ind.tags.get("c_hinge", 0),
             "initial_height":        ind.tags.get("initial_height", 0.0),
@@ -888,16 +706,13 @@ class BodyBrainEvolution:
             np.save(sub / "best_waypoints.npy", np.array(waypoints))
         with (sub / "best_genome.json").open("w") as fh:
             json.dump(genotype, fh, indent=2)
-        try:
-            num_mods = len(TreeGenome.from_dict(genotype).nodes)
-        except Exception:
-            num_mods = 0
         with (sub / "meta.json").open("w") as fh:
             json.dump({
                 "gen":         self.outer_gen,
                 "fitness":     fitness,
-                "yz_symmetry": bilateral_symmetry_score(genotype),
-                "num_modules": num_mods,
+                "yz_symmetry": ADAPTER.symmetry_score(genotype),
+                "num_modules": ADAPTER.module_count(genotype),
+                "genome_type": GENOME_TYPE,
             }, fh, indent=2)
 
     # -- main -----------------------------------------------------------------
@@ -905,7 +720,7 @@ class BodyBrainEvolution:
     def evolve(self) -> Optional[Individual]:
         console.log("[yellow]Initialising population...[/yellow]")
         population = Population([
-            create_individual(NUM_MODULES, MAX_DEPTH, symmetry_axis=SYMMETRY_AXIS) for _ in range(MU)
+            ADAPTER.create_individual(RNG, NUM_MODULES, MAX_DEPTH) for _ in range(MU)
         ])
 
         population = self.evaluate(population)
@@ -943,10 +758,9 @@ def main() -> None:
 
     console.rule("[bold magenta]Symmetry-Pressure — Food Collection (Skill Controller)[/bold magenta]")
     console.log(
-        f"strategy={STRATEGY}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
+        f"genome_type={GENOME_TYPE}  strategy={STRATEGY}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
         f"loco_only={LOCO_ONLY}  loco_gate_thresh={LOCO_GATE_THRESH}  "
-        f"loco_budget={LOCO_BUDGET}  turn_budget={TURN_BUDGET}  "
-        f"cma_sigma={CMA_SIGMA}  cma_pop={CMA_POPSIZE}  commit_steps={COMMIT_STEPS}  "
+        f"loco_budget={LOCO_BUDGET}  turn_budget={TURN_BUDGET}  commit_steps={COMMIT_STEPS}  "
         f"centre_fwd_thresh={CENTRE_FWD_THRESH}  brain_workers={BRAIN_WORKERS}  "
         f"repeat_evals={REPEAT_EVALS}  waypoints={NUM_WAYPOINTS}  seed={BASE_SEED}"
     )
