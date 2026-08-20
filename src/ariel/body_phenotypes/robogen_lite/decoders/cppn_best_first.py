@@ -22,6 +22,21 @@ def softmax(raw_scores: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
     return e_x / e_x.sum()
 
 
+def _fix_terminal_hinges(robot_graph: nx.DiGraph) -> None:
+    """Convert any leaf HINGE node into a BRICK.
+
+    A hinge with no child can rest directly on the ground and exploit
+    contact-driven propulsion instead of using its joint. Hinge chains
+    (hinge -> hinge -> ... -> brick) are unaffected since only leaf nodes
+    are considered.
+    """
+    for node_id, data in robot_graph.nodes(data=True):
+        if node_id == IDX_OF_CORE:
+            continue
+        if data["type"] == ModuleType.HINGE.name and robot_graph.out_degree(node_id) == 0:
+            data["type"] = ModuleType.BRICK.name
+
+
 class MorphologyDecoderBestFirst:
     """Decodes a CPPN using a true greedy, best-first search strategy."""
 
@@ -155,4 +170,5 @@ class MorphologyDecoderBestFirst:
             frontier.append(child_id)
             next_module_id += 1
 
+        _fix_terminal_hinges(robot_graph)
         return robot_graph
