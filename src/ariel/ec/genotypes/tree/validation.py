@@ -122,3 +122,14 @@ def validate_genome_dict(genome: dict[str, Any]) -> None:
     if not is_single_connected_tree(genome):
         msg = "Genome does not form a single connected tree with core as root"
         raise ValueError(msg)
+
+    # A HINGE must not be a leaf: a bare terminal hinge can rest directly on
+    # the ground and exploit contact-driven propulsion instead of its joint.
+    parents_with_children = {_to_int_node_id(e["parent"]) for e in edges}
+    for k, v in nodes.items():
+        nid = _to_int_node_id(k)
+        if nid == IDX_OF_CORE:
+            continue
+        if v.get("type") == "HINGE" and nid not in parents_with_children:
+            msg = f"Node {nid} is a terminal HINGE (leaf); attach a BRICK instead"
+            raise ValueError(msg)
