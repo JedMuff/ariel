@@ -3,9 +3,10 @@
 import numpy as np
 
 from evogym_body_descriptors import relative_activity, size, compactness, elongation, symmetry
+from morphology_ops import body_from_list
 
 
-def voxel_descriptor(body: np.ndarray) -> np.ndarray:
+def voxel_descriptor(genome) -> np.ndarray:
     """Return a 5-d descriptor for an EvoGym body grid.
 
     d = [relative_activity, size, compactness, elongation, symmetry]
@@ -21,6 +22,7 @@ def voxel_descriptor(body: np.ndarray) -> np.ndarray:
     -------
     np.ndarray shape (5,) in [0, 1]
     """
+    body = body_from_list(genome)
 
     d = np.array(
         [

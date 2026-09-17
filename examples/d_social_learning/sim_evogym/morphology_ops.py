@@ -21,7 +21,7 @@ MIN_ACTUATORS = 1
 MAX_RETRIES = 200
 
 
-def random_body(rng: random.Random | None = None) -> np.ndarray:
+def random_individual(rng: random.Random | None = None) -> list:
     """Return a random valid 5×5 voxel body (dtype int)."""
     rng = rng or random
     body = np.full((5, 5), 0.0)
@@ -42,16 +42,16 @@ def random_body(rng: random.Random | None = None) -> np.ndarray:
 
             body = new_grid
             success = True
-    return body
+    return body_to_list(body)
 
 
-def mutate_body(body: np.ndarray, rng: random.Random | None = None) -> np.ndarray:
+def mutate(body: list, rng: random.Random | None = None) -> list:
     """Return a mutated copy of *body*.
 
     Randomly resamples one or more voxels; retries until constraints are met.
     """
     rng = rng or random
-    original = body.copy()
+    original = body_from_list(body.copy())
     for _ in range(MAX_RETRIES):
         candidate = original.copy()
         n_mutations = rng.randint(0, max(1, (ROWS * COLS) // 5))
@@ -60,8 +60,8 @@ def mutate_body(body: np.ndarray, rng: random.Random | None = None) -> np.ndarra
         for r, c in chosen:
             candidate[r, c] = rng.choice(TYPES)
         if _is_valid(candidate):
-            return candidate
-    return original
+            return body_to_list(candidate)
+    return body_to_list(original)
 
 
 # ---------------------------------------------------------------------------

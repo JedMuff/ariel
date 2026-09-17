@@ -152,7 +152,8 @@ def make_step_fn(
             evaluated.append(ind)
 
         if num_workers > 1:
-            with Pool(processes=num_workers) as pool:
+            from evaluator import init_worker
+            with Pool(processes=num_workers, initializer=init_worker, initargs=("evogym",)) as pool:
                 results = pool.map(evaluate_individual, worker_args)
         else:
             results = [evaluate_individual(a) for a in worker_args]
