@@ -27,7 +27,7 @@ from evogym_adapter import body_to_adjacency, get_actuator_order, get_node_input
 
 console = Console()
 
-_WORLD_JSON = os.path.join(os.path.dirname(__file__), "../../evogymtest/world_data/simple_environment.json")
+_WORLD_JSON = os.path.join(os.path.dirname(__file__), "../../../evogymtest/world_data/simple_environment.json")
 
 SAMPLE_BODY = np.array([
     [3, 3, 3, 3, 3],

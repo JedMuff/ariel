@@ -15,7 +15,7 @@ from ariel.simulation.controllers import DistributedMLP
 from ariel.simulation.environments import SimpleFlatWorld
 
 from morphology_adapter import gecko_graph, MorphologyAdapter
-from gecko_utils import scale_actions
+from examples.d_social_learning.things_ege_thinks_are_unnecessary_now.gecko_utils import scale_actions
 
 console = Console()
 
