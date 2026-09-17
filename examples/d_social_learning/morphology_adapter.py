@@ -38,25 +38,29 @@ def gecko_graph() -> DiGraph:
     """
     g: DiGraph = nx.DiGraph()
 
+    # Rotations mirror src/ariel/body_phenotypes/robogen_lite/prebuilt_robots/gecko.py:
+    # front legs get a 2nd hinge rotated 90° relative to the first (for
+    # sideways swing), back legs are rotated ±45° to encourage forward
+    # movement. All other modules are unrotated.
     nodes = [
-        (0,  ModuleType.CORE),
-        (1,  ModuleType.HINGE),
-        (2,  ModuleType.BRICK),
-        (3,  ModuleType.HINGE),
-        (4,  ModuleType.BRICK),
-        (5,  ModuleType.HINGE),
-        (6,  ModuleType.BRICK),
-        (7,  ModuleType.HINGE),
-        (8,  ModuleType.BRICK),
-        (9,  ModuleType.HINGE),
-        (10, ModuleType.BRICK),
-        (11, ModuleType.HINGE),
-        (12, ModuleType.BRICK),
-        (15, ModuleType.HINGE),
-        (17, ModuleType.HINGE),
+        (0,  ModuleType.CORE,  "DEG_0"),
+        (1,  ModuleType.HINGE, "DEG_0"),
+        (2,  ModuleType.BRICK, "DEG_0"),
+        (3,  ModuleType.HINGE, "DEG_0"),
+        (4,  ModuleType.BRICK, "DEG_0"),
+        (5,  ModuleType.HINGE, "DEG_90"),   # fl_leg
+        (6,  ModuleType.BRICK, "DEG_0"),
+        (7,  ModuleType.HINGE, "DEG_270"),  # fr_leg (-90)
+        (8,  ModuleType.BRICK, "DEG_0"),
+        (9,  ModuleType.HINGE, "DEG_45"),   # bl_leg
+        (10, ModuleType.BRICK, "DEG_0"),
+        (11, ModuleType.HINGE, "DEG_315"),  # br_leg (-45)
+        (12, ModuleType.BRICK, "DEG_0"),
+        (15, ModuleType.HINGE, "DEG_90"),   # fl_leg2
+        (17, ModuleType.HINGE, "DEG_90"),   # fr_leg2
     ]
-    for idx, mtype in nodes:
-        g.add_node(idx, type=mtype.name, rotation="DEG_0")
+    for idx, mtype, rotation in nodes:
+        g.add_node(idx, type=mtype.name, rotation=rotation)
 
     edges = [
         (0,  1,  ModuleFaces.FRONT),   # core  → neck

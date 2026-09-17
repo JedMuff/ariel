@@ -40,15 +40,27 @@ from ariel.simulation.environments import SimpleFlatWorld
 console = Console()
 
 SPAWN_POS = (-0.8, 0.0, 0.1)
-CTRL_EVERY = 50
+CTRL_EVERY = 9  # 500Hz physics / 9 ≈ 55.6Hz control (closest integer divisor to 60Hz)
+CTRL_ALPHA = 0.5
 N_NEIGHBORS = 6
-HINGE_CONTACT_LIMIT = 200
-HINGE_CONTACT_PENALTY = 0.005
+FEATURES_PER_NODE = 8
+HEIGHT_PENALTY_THRESHOLD = 0.5
+JERK_PENALTY_WEIGHT = 2.0
+JERK_THRESHOLD = 0.15
 
 SCHEMES = [
     "darwinian", "lamarckian", "random", "random_many",
     "best", "best_many", "similar", "similar_many",
 ]
+
+
+def _infer_hidden(theta_len: int) -> int:
+    """Solve n_params = hidden * (input_size + 2) + 1 for hidden."""
+    input_size = (1 + N_NEIGHBORS) * FEATURES_PER_NODE + 1
+    hidden, remainder = divmod(theta_len - 1, input_size + 2)
+    if remainder != 0:
+        raise ValueError(f"theta length {theta_len} is not a valid DistributedMLP size")
+    return hidden
 
 
 def _scale_actions(raw: np.ndarray) -> np.ndarray:
@@ -86,23 +98,15 @@ def _build_model(morph_dict: dict):
     return model, adapter
 
 
-def _geom_ids(model):
-    hinge_geom_ids: set[int] = set()
-    for i in range(model.ngeom):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i)
-        if name and ("stator" in name or "rotor" in name):
-            hinge_geom_ids.add(i)
-    floor_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-    return hinge_geom_ids, floor_geom_id
-
-
 def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float) -> float:
-    """Re-score a theta under the current fitness function."""
+    """Re-score a theta under the current fitness function (mirrors
+    ariel/evaluator.py::run_episode's settle/rollout structure, control
+    blending, and fitness formula exactly)."""
     model, adapter = _build_model(morph_dict)
     data = mujoco.MjData(model)
-    hinge_geom_ids, floor_geom_id = _geom_ids(model)
 
-    brain = DistributedMLP(n_neighbors=N_NEIGHBORS)
+    hidden = _infer_hidden(len(theta))
+    brain = DistributedMLP(n_neighbors=N_NEIGHBORS, hidden=hidden)
     brain.set_theta(theta)
     mujoco.mj_resetData(model, data)
 
@@ -113,30 +117,32 @@ def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float
         mujoco.mj_step(model, data)
         sim_step += 1
 
-    c_hinge = 0
     ctrl_step = 0
-    active_hinge_contacts: set[frozenset[int]] = set()
+    prev_ctrl = np.zeros(model.nu, dtype=np.float32)
+    jerk_sum = 0.0
     rollout_end = settle + duration
     while data.time < rollout_end:
         if sim_step % CTRL_EVERY == 0:
             node_inputs, t = adapter.get_node_inputs(model, data, ctrl_step)
             raw = brain.forward_all(node_inputs, t)
-            data.ctrl[:] = _scale_actions(raw)
+            target_ctrl = _scale_actions(raw)
+            new_ctrl = np.clip(
+                prev_ctrl * (1.0 - CTRL_ALPHA) + target_ctrl * CTRL_ALPHA,
+                -np.pi / 2, np.pi / 2,
+            ).astype(np.float32)
+            if ctrl_step > 0 and model.nu > 0:
+                jerk_sum += float(np.mean(np.abs(new_ctrl - prev_ctrl)))
+            prev_ctrl = new_ctrl.copy()
+            data.ctrl[:] = new_ctrl
             ctrl_step += 1
         mujoco.mj_step(model, data)
-        current: set[frozenset[int]] = set()
-        for k in range(data.ncon):
-            c = data.contact[k]
-            if ((c.geom1 == floor_geom_id and c.geom2 in hinge_geom_ids) or
-                    (c.geom2 == floor_geom_id and c.geom1 in hinge_geom_ids)):
-                current.add(frozenset((c.geom1, c.geom2)))
-        c_hinge += len(current - active_hinge_contacts)
-        active_hinge_contacts = current
         sim_step += 1
 
-    if c_hinge > HINGE_CONTACT_LIMIT:
-        return -1.0
-    return float(data.qpos[0]) - core_height - HINGE_CONTACT_PENALTY * c_hinge
+    mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
+    d = float(data.qpos[0])
+    height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+    return d - height_penalty - jerk_penalty
 
 
 def render_individual(
@@ -145,7 +151,8 @@ def render_individual(
 ) -> list:
     model, adapter = _build_model(morph_dict)
     data = mujoco.MjData(model)
-    brain = DistributedMLP(n_neighbors=N_NEIGHBORS)
+    hidden = _infer_hidden(len(theta))
+    brain = DistributedMLP(n_neighbors=N_NEIGHBORS, hidden=hidden)
     brain.set_theta(theta)
     mujoco.mj_resetData(model, data)
 
@@ -166,12 +173,19 @@ def render_individual(
 
     # Rollout phase
     ctrl_step = 0
+    prev_ctrl = np.zeros(model.nu, dtype=np.float32)
     rollout_end = settle + duration
     while data.time < rollout_end:
         if sim_step % CTRL_EVERY == 0:
             node_inputs, t = adapter.get_node_inputs(model, data, ctrl_step)
             raw = brain.forward_all(node_inputs, t)
-            data.ctrl[:] = _scale_actions(raw)
+            target_ctrl = _scale_actions(raw)
+            new_ctrl = np.clip(
+                prev_ctrl * (1.0 - CTRL_ALPHA) + target_ctrl * CTRL_ALPHA,
+                -np.pi / 2, np.pi / 2,
+            ).astype(np.float32)
+            prev_ctrl = new_ctrl.copy()
+            data.ctrl[:] = new_ctrl
             ctrl_step += 1
         mujoco.mj_step(model, data)
         if sim_step % render_every == 0:
