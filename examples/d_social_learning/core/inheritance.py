@@ -144,7 +144,7 @@ def similar(
     n_params: int,
 ) -> tuple[np.ndarray, list[int]]:
     similarity_function = pop_state[idx]['similarity_function']
-    target_body = np.asarray(pop_state[idx]["body"], dtype=np.float64)
+    target_morphology = np.asarray(pop_state[idx]["morphology"], dtype=np.float64)
     candidates = [
         (i, s) for i, s in enumerate(pop_state)
         if i != idx and s["theta"] is not None
@@ -153,7 +153,7 @@ def similar(
         return darwinian(pop_state, idx, n_params)
     nearest_i, nearest_s = min(
         candidates,
-        key=lambda t: similarity_function(np.asarray(t[1]["body"], dtype=np.float64), target_body),
+        key=lambda t: similarity_function(np.asarray(t[1]["morphology"], dtype=np.float64), target_morphology),
     )
     db_id = nearest_s.get("db_id")
     donor_ids = [db_id] if db_id is not None else []
@@ -166,7 +166,7 @@ def similar_many(
     n_params: int,
 ) -> tuple[np.ndarray, list[int]]:
     similarity_function = pop_state[idx]['similarity_function']
-    target_body = np.asarray(pop_state[idx]["body"], dtype=np.float64)
+    target_morphology = np.asarray(pop_state[idx]["morphology"], dtype=np.float64)
     candidates = [
         (i, s) for i, s in enumerate(pop_state)
         if i != idx and s["theta"] is not None
@@ -174,7 +174,7 @@ def similar_many(
     if not candidates:
         return darwinian(pop_state, idx, n_params)
 
-    candidates.sort(key=lambda t: similarity_function(np.asarray(t[1]["body"], dtype=np.float64), target_body))
+    candidates.sort(key=lambda t: similarity_function(np.asarray(t[1]["morphology"], dtype=np.float64), target_morphology))
     top = candidates[:K_INHERIT]
     thetas = np.array([s["theta"] for _, s in top], dtype=np.float64)
     donor_ids = [s.get("db_id") for _, s in top if s.get("db_id") is not None]

@@ -77,8 +77,9 @@ def _pop_state(individuals: list[Individual]) -> list[dict]:
             "theta": np.array(theta, dtype=np.float64) if theta else None,
             "fitness": fitness,
             "db_id": ind.id,
-            "parent_id": parent_id
-            #TODO: similarity function
+            "parent_id": parent_id,
+            "morphology": ind.genotype["morph"],
+            "similarity_function": simulator_dependent_functions.similarity_function()
         })
     return states
 

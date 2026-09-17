@@ -79,6 +79,16 @@ def stop_simulator(simulator_specifics):
     if simulator == SIMULATOR_EVOGYM:
         simulator_specifics["env"].close()
 
+def similarity_function():
+    from sim_evogym.evogym_body_descriptors import aligned_hamming_distance
+
+    if simulator == SIMULATOR_ARIEL:
+        return None #TODO: Add tree edit distance here
+    if simulator == SIMULATOR_EVOGYM:
+        return aligned_hamming_distance
+    else:
+        return None
+
 def n_neighbours():
     if simulator == SIMULATOR_ARIEL:
         return 6
