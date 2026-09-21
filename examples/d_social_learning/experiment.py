@@ -244,6 +244,8 @@ def build_ops(
 
         worker_args = []
         for i, ind in enumerate(all_alive):
+            if not ind.requires_eval:
+                continue
             init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params)
             worker_args.append((
                 ind.genotype_["morph"],
@@ -260,10 +262,16 @@ def build_ops(
         else:
             results = [evaluate_individual(a) for a in worker_args]
 
+        i_evaluated = 0
         for i, ind in enumerate(all_alive):
-            r = results[i]
+            if ind.requires_eval:
+                r = results[i_evaluated]
+                i_evaluated += 1
+                theta_list = r["best_theta"]
+            else:
+                r = ind.tags
+                theta_list = ind.tags["theta"]
             distance = r["distance"]
-            theta_list = r["best_theta"]
             novelty = float(novelties[i])
             desc = descs[i]
             prior = ind.tags_ or {}
