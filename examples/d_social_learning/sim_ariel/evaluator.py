@@ -18,7 +18,7 @@ SPAWN_POS = (-0.8, 0.0, 0.1)
 CTRL_EVERY = 9  # 500Hz physics / 9 ≈ 55.6Hz control (closest integer divisor to 60Hz)
 CTRL_ALPHA = 0.5   # control blending factor (0=no change, 1=instant) — damps resonant ground-jitter exploit
 HEIGHT_PENALTY_THRESHOLD = 0.5  # m — only penalise spawn height above this
-JERK_PENALTY_WEIGHT = 2.0  # penalty per unit of mean absolute ctrl delta, applied above JERK_THRESHOLD
+JERK_PENALTY_WEIGHT = 3.0  # penalty per unit of mean absolute ctrl delta, applied above JERK_THRESHOLD
 JERK_THRESHOLD = 0.15  # hurdle: mean_jerk below this is free; at/above it, the full weight*mean_jerk applies
 
 
