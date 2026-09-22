@@ -80,12 +80,18 @@ def stop_simulator(simulator_specifics):
         simulator_specifics["env"].close()
 
 def similarity_function():
+    import numpy as np
     from sim_evogym.evogym_body_descriptors import aligned_hamming_distance
+    from sim_ariel.tree_edit_distance import tree_edit_distance
 
     if simulator == SIMULATOR_ARIEL:
-        return None #TODO: Add tree edit distance here
+        return tree_edit_distance
     if simulator == SIMULATOR_EVOGYM:
-        return aligned_hamming_distance
+        # aligned_hamming_distance needs np.ndarray inputs; callers pass raw
+        # stored morphology (a list for evogym), so cast here.
+        return lambda a, b: aligned_hamming_distance(
+            np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+        )
     else:
         return None
 

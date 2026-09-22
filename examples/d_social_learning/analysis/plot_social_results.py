@@ -42,7 +42,8 @@ def main() -> None:
 
     SCHEMES = [
         "darwinian", "lamarckian", "random", "random_many",
-        "best", "best_many", "similar", "similar_many",
+        "best", "best_many", "similar_MD", "similar_many_MD",
+        "similar_TED", "similar_many_TED",
     ]
     X_VALUES = [0.0, 0.5, 1.0]
     DOMAINS = ["ariel", "evogym"]

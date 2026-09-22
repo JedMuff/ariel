@@ -98,11 +98,12 @@ def best_many(
     return thetas.mean(axis=0), donor_ids
 
 
-def novelty(
+def similar_MD(
     pop_state: list[dict],
     idx: int,
     n_params: int,
 ) -> tuple[np.ndarray, list[int]]:
+    """Donor = nearest neighbour by Euclidean distance in morphological-descriptor space."""
     target_desc = np.asarray(pop_state[idx]["descriptor"], dtype=np.float64)
     candidates = [
         (i, s) for i, s in enumerate(pop_state)
@@ -119,11 +120,12 @@ def novelty(
     return np.asarray(nearest_s["theta"], dtype=np.float64), donor_ids
 
 
-def novelty_many(
+def similar_many_MD(
     pop_state: list[dict],
     idx: int,
     n_params: int,
 ) -> tuple[np.ndarray, list[int]]:
+    """Like ``similar_MD``, averaged over the K_INHERIT nearest donors."""
     target_desc = np.asarray(pop_state[idx]["descriptor"], dtype=np.float64)
     candidates = [
         (i, s) for i, s in enumerate(pop_state)
@@ -138,13 +140,18 @@ def novelty_many(
     return thetas.mean(axis=0), donor_ids
 
 
-def similar(
+def similar_TED(
     pop_state: list[dict],
     idx: int,
     n_params: int,
 ) -> tuple[np.ndarray, list[int]]:
+    """Donor = nearest neighbour by ``similarity_function`` (tree edit distance
+    for ariel, aligned Hamming distance on the voxel grid for evogym) applied
+    to the raw morphology -- *not* the descriptor vector. Morphology is passed
+    through as-is (not cast to a numeric array): ariel's morphology is a
+    genome dict, not an array."""
     similarity_function = pop_state[idx]['similarity_function']
-    target_morphology = np.asarray(pop_state[idx]["morphology"], dtype=np.float64)
+    target_morphology = pop_state[idx]["morphology"]
     candidates = [
         (i, s) for i, s in enumerate(pop_state)
         if i != idx and s["theta"] is not None
@@ -153,20 +160,21 @@ def similar(
         return darwinian(pop_state, idx, n_params)
     nearest_i, nearest_s = min(
         candidates,
-        key=lambda t: similarity_function(np.asarray(t[1]["morphology"], dtype=np.float64), target_morphology),
+        key=lambda t: similarity_function(t[1]["morphology"], target_morphology),
     )
     db_id = nearest_s.get("db_id")
     donor_ids = [db_id] if db_id is not None else []
     return np.asarray(nearest_s["theta"], dtype=np.float64), donor_ids
 
 
-def similar_many(
+def similar_many_TED(
     pop_state: list[dict],
     idx: int,
     n_params: int,
 ) -> tuple[np.ndarray, list[int]]:
+    """Like ``similar_TED``, averaged over the K_INHERIT nearest donors."""
     similarity_function = pop_state[idx]['similarity_function']
-    target_morphology = np.asarray(pop_state[idx]["morphology"], dtype=np.float64)
+    target_morphology = pop_state[idx]["morphology"]
     candidates = [
         (i, s) for i, s in enumerate(pop_state)
         if i != idx and s["theta"] is not None
@@ -174,7 +182,7 @@ def similar_many(
     if not candidates:
         return darwinian(pop_state, idx, n_params)
 
-    candidates.sort(key=lambda t: similarity_function(np.asarray(t[1]["morphology"], dtype=np.float64), target_morphology))
+    candidates.sort(key=lambda t: similarity_function(t[1]["morphology"], target_morphology))
     top = candidates[:K_INHERIT]
     thetas = np.array([s["theta"] for _, s in top], dtype=np.float64)
     donor_ids = [s.get("db_id") for _, s in top if s.get("db_id") is not None]
@@ -188,8 +196,8 @@ SCHEMES = {
     "random_many": random_many,
     "best": best,
     "best_many": best_many,
-    "novelty": novelty,
-    "novelty_many": novelty_many,
-    "similar": similar,
-    "similar_many": similar_many,
+    "similar_MD": similar_MD,
+    "similar_many_MD": similar_many_MD,
+    "similar_TED": similar_TED,
+    "similar_many_TED": similar_many_TED,
 }

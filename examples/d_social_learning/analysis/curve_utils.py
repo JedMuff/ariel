@@ -17,7 +17,8 @@ import numpy as np
 
 SCHEMES = [
     "darwinian", "lamarckian", "random", "random_many",
-    "best", "best_many", "similar", "similar_many",
+    "best", "best_many", "similar_MD", "similar_many_MD",
+    "similar_TED", "similar_many_TED",
 ]
 X_VALUES = [0.0, 0.5, 1.0]
 
@@ -26,7 +27,8 @@ SCHEME_COLORS = {
     scheme: color for scheme, color in zip(
         SCHEMES,
         ["#4c72b0", "#dd8452", "#55a868", "#c44e52",
-         "#8172b2", "#937860", "#da8bc3", "#8c8c8c"],
+         "#8172b2", "#937860", "#da8bc3", "#8c8c8c",
+         "#ccb974", "#64b5cd"],
     )
 }
 
