@@ -6,7 +6,7 @@ def relative_activity(body: np.ndarray):
     return np.count_nonzero(body > 2) / np.count_nonzero(body > 0)
 
 def size(body: np.ndarray):
-    return np.count_nonzero(body > 0)
+    return np.count_nonzero(body > 0) / np.count_nonzero(body > -1)
 
 def compactness(body: np.ndarray) -> float:
     convex_hull = body > 0

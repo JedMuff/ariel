@@ -25,6 +25,7 @@ import re
 import sys
 from multiprocessing import Pool
 from pathlib import Path
+import simulator_dependent_functions
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -48,18 +49,13 @@ from rich.console import Console
 from ariel.ec import EA, EAOperation, Individual, Population
 
 # Local social-learning modules (resolved via _THIS_DIR on sys.path)
-from descriptor import tree_descriptor       # d_social_learning/ariel/descriptor.py
-from morphology_ops import mutate, random_individual
-from evaluator import evaluate_individual
+from evaluate import evaluate_individual
 
-from fitness import combined_fitness
-from inheritance import SCHEMES
-from novelty import compute_novelty
+from core.fitness import combined_fitness
+from core.inheritance import SCHEMES
+from core.novelty import compute_novelty
 
 console = Console()
-
-N_NEIGHBORS = 6  # must match evaluator.py
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,12 +70,16 @@ def _pop_state(individuals: list[Individual]) -> list[dict]:
         fitness = ind.fitness_ if not ind.requires_eval else None
         descriptor = ind.tags_.get("descriptor") if ind.tags_ else None
         if descriptor is None:
-            descriptor = [0.0] * 8
+            descriptor = [0.0] * simulator_dependent_functions.n_descriptors()
+        parent_id = ind.tags_.get("parent_id") if ind.tags_ else None
         states.append({
             "descriptor": np.array(descriptor, dtype=np.float64),
             "theta": np.array(theta, dtype=np.float64) if theta else None,
             "fitness": fitness,
             "db_id": ind.id,
+            "parent_id": parent_id,
+            "morphology": ind.genotype["morph"],
+            "similarity_function": simulator_dependent_functions.similarity_function()
         })
     return states
 
@@ -92,7 +92,7 @@ def _compute_descriptors(individuals: list[Individual]) -> list[np.ndarray]:
             descs.append(np.array(stored, dtype=np.float64))
         else:
             try:
-                d = tree_descriptor(ind.genotype_["morph"])
+                d = simulator_dependent_functions.get_descriptor(ind.genotype_["morph"])
             except Exception:  # noqa: BLE001
                 d = np.zeros(8, dtype=np.float64)
             descs.append(d)
@@ -119,7 +119,7 @@ def _timeout_result(donor_ids: list[int]) -> dict:
 
 
 def _evaluate_with_timeout(
-    worker_args: list[tuple], num_workers: int, timeout_s: float,
+    worker_args: list[tuple], num_workers: int, timeout_s: float, platform: str
 ) -> list[dict]:
     """Like ``pool.map(evaluate_individual, worker_args)``, but a task that
     doesn't return within ``timeout_s`` is replaced with a NaN result instead
@@ -139,7 +139,8 @@ def _evaluate_with_timeout(
     (matching ``with Pool(...) as pool:``'s terminate-on-exit semantics) —
     safe since a fresh Pool is created for every generation anyway.
     """
-    pool = Pool(processes=num_workers)
+    from evaluate import init_worker
+    pool = Pool(processes=num_workers, initializer=init_worker, initargs=(platform,))
     try:
         async_results = [pool.apply_async(evaluate_individual, (a,)) for a in worker_args]
         results = []
@@ -214,7 +215,7 @@ def build_ops(
             if i % len(parent_pool) == 0:
                 _random.shuffle(parent_pool)
             parent = parent_pool[i % len(parent_pool)]
-            child_morph = mutate(parent.genotype_["morph"])
+            child_morph = simulator_dependent_functions.mutate(parent)
             child = Individual()
             parent_brain = parent.genotype_.get("brain") or []
             child.genotype = {"morph": child_morph, "brain": parent_brain}
@@ -227,6 +228,7 @@ def build_ops(
 
     @EAOperation
     def evaluate_and_select(population: Population) -> Population:
+        platform = simulator_dependent_functions.simulator
         parents = [ind for ind in population if ind.alive and not ind.requires_eval]
         offspring = [ind for ind in population if ind.alive and ind.requires_eval]
         all_alive = parents + offspring
@@ -234,77 +236,63 @@ def build_ops(
         descs = _compute_descriptors(all_alive)
         novelties = compute_novelty(descs)
 
-        if x_val == 0.0:
-            # Pure novelty — no simulation needed
-            for i, ind in enumerate(all_alive):
-                novelty = float(novelties[i])
-                desc = descs[i]
-                prior = ind.tags_ or {}
-                ind.fitness = novelty
-                ind.tags = {
-                    "parent_id": prior.get("parent_id"),
-                    "distance": 0.0,
-                    "novelty": novelty,
-                    "descriptor": desc.tolist(),
-                    "theta": prior.get("theta", []),
-                    "init_fitness": 0.0,
-                    "learning_curve": [],
-                    "donor_ids": [],
-                    "mean_jerk": 0.0,
-                    "c_hinge": 0,
-                }
+        all_state = _pop_state(all_alive)
+        scheme_fn = SCHEMES[scheme_name]
+
+        from ariel.simulation.controllers.distributed_mlp import DistributedMLP
+        n_params = DistributedMLP(n_neighbors=simulator_dependent_functions.n_neighbours(), hidden=hidden).n_params
+
+        worker_args = []
+        for i, ind in enumerate(all_alive):
+            if not ind.requires_eval:
+                continue
+            init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params)
+            worker_args.append((
+                ind.genotype_["morph"],
+                init_mean_arr.tolist(),
+                donor_ids,
+                inner_gens,
+                inner_pop,
+                sigma,
+                hidden,
+            ))
+
+        if num_workers > 1:
+            results = _evaluate_with_timeout(worker_args, num_workers, eval_timeout, platform)
         else:
-            all_state = _pop_state(all_alive)
-            scheme_fn = SCHEMES[scheme_name]
+            results = [evaluate_individual(a) for a in worker_args]
 
-            from ariel.simulation.controllers.distributed_mlp import DistributedMLP
-            n_params = DistributedMLP(n_neighbors=N_NEIGHBORS, hidden=hidden).n_params
-
-            worker_args = []
-            for i, ind in enumerate(all_alive):
-                init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params)
-                worker_args.append((
-                    ind.genotype_["morph"],
-                    init_mean_arr.tolist(),
-                    donor_ids,
-                    inner_gens,
-                    inner_pop,
-                    sigma,
-                    hidden,
-                ))
-
-            if num_workers > 1:
-                results = _evaluate_with_timeout(worker_args, num_workers, eval_timeout)
-            else:
-                results = [evaluate_individual(a) for a in worker_args]
-
-            for i, ind in enumerate(all_alive):
-                r = results[i]
-                distance = r["distance"]
+        i_evaluated = 0
+        for i, ind in enumerate(all_alive):
+            if ind.requires_eval:
+                r = results[i_evaluated]
+                i_evaluated += 1
                 theta_list = r["best_theta"]
-                novelty = float(novelties[i])
-                desc = descs[i]
-                prior = ind.tags_ or {}
-                computed_fitness = combined_fitness(distance, novelty, x_val)
-                # NaN (e.g. a timed-out individual's distance, see
-                # _evaluate_with_timeout) doesn't reliably sink to the bottom
-                # under Population.best()'s comparison-based sort the way
-                # -inf does (see _safe_attr) -- substitute -inf explicitly so
-                # a failed individual can never be selected as a survivor.
-                ind.fitness = computed_fitness if np.isfinite(computed_fitness) else float("-inf")
-                ind.tags = {
-                    "parent_id": prior.get("parent_id"),
-                    "distance": distance,
-                    "novelty": novelty,
-                    "descriptor": desc.tolist(),
-                    "theta": theta_list,
-                    "init_fitness": r["init_fitness"],
-                    "learning_curve": r["learning_curve"],
-                    "donor_ids": r["donor_ids"],
-                    "mean_jerk": r.get("mean_jerk", 0.0),
-                    "c_hinge": r.get("c_hinge", 0),
-                }
-                ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
+            else:
+                r = ind.tags
+                theta_list = ind.tags["theta"]
+            distance = r["distance"]
+            novelty = float(novelties[i])
+            desc = descs[i]
+            prior = ind.tags_ or {}
+            computed_fitness = combined_fitness(distance, novelty, x_val)
+            # NaN (e.g. a timed-out individual's distance, see
+            # _evaluate_with_timeout) doesn't reliably sink to the bottom
+            # under Population.best()'s comparison-based sort the way
+            # -inf does (see _safe_attr) -- substitute -inf explicitly so
+            # a failed individual can never be selected as a survivor.
+            ind.fitness = computed_fitness if np.isfinite(computed_fitness) else float("-inf")
+            ind.tags = {
+                "parent_id": prior.get("parent_id"),
+                "distance": distance,
+                "novelty": novelty,
+                "descriptor": desc.tolist(),
+                "theta": theta_list,
+                "init_fitness": r["init_fitness"],
+                "learning_curve": r["learning_curve"],
+                "donor_ids": r["donor_ids"]
+            } | simulator_dependent_functions.extra_tags(r)
+            ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
 
         if comma_selection:
             # (mu,lambda): survivors drawn only from offspring, parents always die.
@@ -336,7 +324,7 @@ def make_initial_population(mu: int) -> Population:
     inds = []
     for _ in range(mu):
         ind = Individual()
-        ind.genotype = {"morph": random_individual(), "brain": []}
+        ind.genotype = {"morph": simulator_dependent_functions.random_individual(), "brain": []}
         inds.append(ind)
     return Population(inds)
 
@@ -409,6 +397,7 @@ def main() -> None:
              "database_part{N}.db in that same directory. If omitted, a fresh "
              "timestamped directory is created instead.",
     )
+    parser.add_argument("--platform", type=str, choices=["ariel", "evogym"], default="ariel")
     args = parser.parse_args()
 
     if args.comma_selection and args.lam < args.pop:
@@ -416,6 +405,8 @@ def main() -> None:
 
     if args.selection == "tournament" and args.tournament_size < 2:
         parser.error("--tournament-size must be >= 2 when --selection=tournament")
+
+    simulator_dependent_functions.simulator = args.platform
 
     if args.resume_dir:
         out_dir = Path(args.resume_dir)
@@ -439,7 +430,7 @@ def main() -> None:
             sel_bits.append(f"tourn{args.tournament_size}")
         sel_suffix = ("_" + "_".join(sel_bits)) if sel_bits else ""
         out_dir = Path(
-            f"__data__/social/ariel/{args.scheme}/x{x_str}/rep_{args.rep}{sel_suffix}_{timestamp}"
+            f"__data__/social/{args.platform}/{args.scheme}/x{x_str}/rep_{args.rep}"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -448,7 +439,7 @@ def main() -> None:
     # which directory this run landed in — see run_social_parta.sh.
     print(f"RUN_DIR={out_dir}")
 
-    console.rule(f"[bold cyan]ARIEL | scheme={args.scheme} x={args.x} rep={args.rep} dir={out_dir}")
+    console.rule(f"[bold cyan]{args.platform.capitalize} | scheme={args.scheme} x={args.x} rep={args.rep} dir={out_dir}")
 
     ops = build_ops(
         scheme_name=args.scheme,

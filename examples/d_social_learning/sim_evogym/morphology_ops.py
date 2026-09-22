@@ -15,43 +15,53 @@ import numpy as np
 ROWS = 5
 COLS = 5
 TYPES = [0, 1, 2, 3, 4]
-ACTUATOR_TYPES = {3, 4}
+BODY_TYPES = [1, 2, 3, 4]
+ACTUATOR_TYPES = [3, 4]
 MIN_ACTUATORS = 1
 MAX_RETRIES = 200
 
 
-def random_body(rng: random.Random | None = None) -> np.ndarray:
+def random_individual(rng: random.Random | None = None) -> list:
     """Return a random valid 5×5 voxel body (dtype int)."""
     rng = rng or random
-    for _ in range(MAX_RETRIES):
-        body = np.array(
-            [rng.choice(TYPES) for _ in range(ROWS * COLS)], dtype=int
-        ).reshape(ROWS, COLS)
-        if _is_valid(body):
-            return body
-    # fallback: minimal valid body (single actuator)
-    body = np.zeros((ROWS, COLS), dtype=int)
-    body[2, 2] = 3
-    return body
+    body = np.full((5, 5), 0.0)
+
+    body[rng.randint(0, 4)][rng.randint(0, 4)] = rng.choice(ACTUATOR_TYPES)
+    for i in range(rng.randint(10, 20)):
+        success = False
+        while not success:
+            new_grid = np.copy(body)
+            x = rng.randint(0, 4)
+            y = rng.randint(0, 4)
+            if new_grid[x][y] != 0.0:
+                continue
+
+            new_grid[x][y] = float(rng.choice(BODY_TYPES))
+            if not _is_valid(new_grid):
+                continue
+
+            body = new_grid
+            success = True
+    return body_to_list(body)
 
 
-def mutate_body(body: np.ndarray, rng: random.Random | None = None) -> np.ndarray:
+def mutate(body: list, rng: random.Random | None = None) -> list:
     """Return a mutated copy of *body*.
 
     Randomly resamples one or more voxels; retries until constraints are met.
     """
     rng = rng or random
-    original = body.copy()
+    original = body_from_list(body.copy())
     for _ in range(MAX_RETRIES):
         candidate = original.copy()
-        n_mutations = rng.randint(1, max(1, (ROWS * COLS) // 5))
+        n_mutations = rng.randint(0, max(1, (ROWS * COLS) // 5))
         positions = [(r, c) for r in range(ROWS) for c in range(COLS)]
         chosen = rng.sample(positions, min(n_mutations, len(positions)))
         for r, c in chosen:
             candidate[r, c] = rng.choice(TYPES)
         if _is_valid(candidate):
-            return candidate
-    return original
+            return body_to_list(candidate)
+    return body_to_list(original)
 
 
 # ---------------------------------------------------------------------------
