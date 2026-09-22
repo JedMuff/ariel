@@ -1,7 +1,7 @@
 """ARIEL social-learning experiment: (mu+lambda) morphology EA + CMA-ES brain learning.
 
 Usage:
-    uv run examples/d_social_learning/ariel/experiment.py \
+    uv run examples/d_social_learning/experiment.py \
         --scheme lamarckian --x 0.5 --rep 0 [--gens 100] [--pop 20] [--lam 100] \
         [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N] \
         [--comma-selection] [--selection elitist|tournament] [--tournament-size 4] \
@@ -12,7 +12,7 @@ directory (__data__/social/ariel/{scheme}/x{x}/rep_{rep}_{timestamp}) so
 re-running the same scheme/x/rep never clobbers a previous run, and prints
 that directory as `RUN_DIR=<path>` on its own stdout line. To continue a run,
 pass that exact directory back in:
-    uv run examples/d_social_learning/ariel/experiment.py \
+    uv run examples/d_social_learning/experiment.py \
         --scheme lamarckian --x 0.5 --rep 0 --gens 20 \
         --resume-dir __data__/social/ariel/lamarckian/x05/rep_0_20260813_143022
 """
@@ -34,15 +34,11 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 
-# Add local module dirs to sys.path WITHOUT adding d_social_learning/ itself,
-# because that directory contains an ariel/ subdirectory that would shadow the
-# installed ariel package.
-_THIS_DIR = Path(__file__).parent          # d_social_learning/ariel/
-_SOCIAL_DIR = _THIS_DIR.parent             # d_social_learning/
-_CORE_DIR = _SOCIAL_DIR / "core"
-for _p in [str(_THIS_DIR), str(_CORE_DIR)]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+# Add this dir to sys.path so local modules (evaluate, core.*,
+# simulator_dependent_functions) resolve.
+_THIS_DIR = Path(__file__).parent          # d_social_learning/
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
 
 import numpy as np
 from rich.console import Console

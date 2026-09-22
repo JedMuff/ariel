@@ -102,7 +102,7 @@ mkdir -p out_files
 
 START_TIME=$(date +%s)
 
-srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/experiment.py \
+srun "$VENV_PATH/bin/python" examples/d_social_learning/experiment.py \
     --scheme "$SCHEME" --x "$X" --rep "$REP" \
     --gens "$GENS" --pop "$POP" --lam "$LAM" \
     --inner-gens "$INNER_GENS" --inner-pop "$INNER_POP" \
