@@ -13,7 +13,7 @@
 # Usage:
 #   sbatch examples/d_social_learning/run_social_parta_array.sh
 #
-# 8 schemes x 3 x-values x 10 reps = 240 combos -> array indices 0-239.
+# 10 schemes x 3 x-values x 5 reps = 150 combos -> array indices 0-149.
 # Ordering matches run_social_submit.sh: rep outermost, then scheme, then x.
 #
 #SBATCH --job-name=social-parta
@@ -23,7 +23,7 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=40G
 #SBATCH --partition=genoa
-#SBATCH --array=0-119
+#SBATCH --array=0-149
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -43,14 +43,14 @@ cd "$REPO_ROOT"
 # Map array index -> (scheme, x, rep)
 # ---------------------------------------------------------------------------
 
-SCHEMES=(darwinian lamarckian random random_many best best_many similar similar_many)
+SCHEMES=(darwinian lamarckian random random_many best best_many similar_MD similar_many_MD similar_TED similar_many_TED)
 X_VALUES=(0 0.5 1)
 N_REPS=5
 
 IDX=$SLURM_ARRAY_TASK_ID
 
-REP=$(( IDX / 24 ))                 # 8 schemes x 3 x-values = 24 combos per rep
-REM=$(( IDX % 24 ))
+REP=$(( IDX / 30 ))                 # 10 schemes x 3 x-values = 30 combos per rep
+REM=$(( IDX % 30 ))
 SCHEME_IDX=$(( REM / 3 ))
 X_IDX=$(( REM % 3 ))
 
@@ -89,8 +89,14 @@ else
     SELECTION_FLAG=()
 fi
 
+# Distance metric used for the fitness-blend novelty term: MD = Euclidean
+# distance on the morphological-descriptor vector, TED = tree edit distance
+# (default here). Applies uniformly to every task in this submission (not
+# swept per array index) -- flip back to MD and resubmit for an MD sweep.
+NOVELTY_METRIC=TED
+
 echo "Scheme: $SCHEME  x=$X  rep=$REP  (array idx=$IDX)"
-echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS comma_selection=$COMMA_SELECTION"
+echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS comma_selection=$COMMA_SELECTION novelty_metric=$NOVELTY_METRIC"
 
 mkdir -p out_files
 
@@ -101,7 +107,7 @@ srun "$VENV_PATH/bin/python" examples/d_social_learning/ariel/experiment.py \
     --gens "$GENS" --pop "$POP" --lam "$LAM" \
     --inner-gens "$INNER_GENS" --inner-pop "$INNER_POP" \
     --sigma "$SIGMA" --hidden "$HIDDEN" \
-    --workers "$WORKERS" "${SELECTION_FLAG[@]}"
+    --workers "$WORKERS" --novelty-metric "$NOVELTY_METRIC" "${SELECTION_FLAG[@]}"
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
