@@ -48,6 +48,10 @@ from ariel.ec.genotypes.tree.operators import (
     random_tree_symmetric,
     validate_tree_depth,
 )
+from ariel.ec.genotypes.tree.collision import (
+    prune_colliding_subtrees,
+    prune_colliding_subtrees_symmetric,
+)
 from ariel.ec.genotypes.tree.symmetry import MirrorAxis, symmetrize_genome
 from ariel.ec.genotypes.tree.tree_genome import TreeGenome
 from ariel.ec.genotypes.tree.validation import validate_genome_dict
@@ -543,6 +547,9 @@ def mutate_morph(genome: TreeGenome, rng: np.random.Generator, num_modules: int)
                 new.nodes[nid]["rotation"] = random.choice(rots)
 
     _prune_invalid_edges(new)
+    # Point/rotation changes and grafted subtrees can make parts overlap;
+    # drop any subtree that now collides (FCL, real module geometry).
+    prune_colliding_subtrees(new)
     with contextlib.suppress(ValueError):
         validate_genome_dict(new.to_dict())
     return new
@@ -555,10 +562,15 @@ def mutate_morph_symmetric(
 
     Applies the ordinary (potentially symmetry-breaking) mutation, then
     re-symmetrizes — reusing all four existing mutation operators unchanged.
-    Assumes ``genome`` is already symmetric about ``axis``.
+    Assumes ``genome`` is already symmetric about ``axis``. Mirroring can
+    create new overlaps (an arm hitting its own mirror image across the
+    plane), so colliding subtrees are pruned again, pairwise with their
+    mirror images to keep the genome symmetric.
     """
     mutated = mutate_morph(genome, rng, num_modules)
-    return symmetrize_genome(mutated, axis)
+    symmetric = symmetrize_genome(mutated, axis)
+    prune_colliding_subtrees_symmetric(symmetric, axis)
+    return symmetric
 
 
 def joint_count(genome: TreeGenome) -> int:
