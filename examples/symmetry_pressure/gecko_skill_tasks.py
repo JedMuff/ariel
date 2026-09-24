@@ -49,6 +49,7 @@ from ariel.ec import EA, EAOperation, EASettings, Individual, Population
 
 import genome_adapter
 from shared import (
+    CONTROL_STEP_FREQ,
     LOCO_DURATION,
     TURN_DURATION,
     SkillReward,
@@ -90,6 +91,9 @@ parser.add_argument("--strategy-type",
                     default="plus")
 parser.add_argument("--repeat-evals",  action="store_true",
                     help="Re-evaluate parents each generation (plus strategy only)")
+parser.add_argument("--control-step-freq", type=int, default=CONTROL_STEP_FREQ,
+                    help="Physics steps between controller updates (physics runs at "
+                         "500Hz, so 9 = ~55.6Hz, 50 = 10Hz, 100 = 5Hz)")
 parser.add_argument("--time-limit",    type=float, default=None,
                     help="Wall-clock seconds; stop after current generation completes")
 args = parser.parse_args()
@@ -107,6 +111,7 @@ BASE_SEED      = args.seed
 STRATEGY       = args.strategy_type
 REPEAT_EVALS   = args.repeat_evals
 TIME_LIMIT     = args.time_limit
+CTRL_STRIDE    = args.control_step_freq
 
 TOURNAMENT_SIZE = 4
 N_DIRECTIONS    = 5   # multidirection: 360 / 5 = 72 degrees apart
@@ -163,6 +168,7 @@ def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
         w, learning_curve, eval_time = train_skill_for_body(
             reward, genome_dict, SKILL_BUDGET, BRAIN_WORKERS, seed + i,
             to_spec_fn=ADAPTER.to_spec,
+            control_step_freq=CTRL_STRIDE,
         )
         fitness = float(min(learning_curve)) if learning_curve else float("inf")
         console.log(f"    {name}: best_fitness={fitness:.4f}")

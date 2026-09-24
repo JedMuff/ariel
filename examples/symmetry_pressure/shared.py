@@ -856,7 +856,9 @@ def build_loco_world_for_body(genome_dict: dict, to_spec_fn=genome_to_spec) -> t
 _skill_worker_ctx: Optional[dict[str, Any]] = None
 
 
-def _skill_worker_init(seed: int, reward: SkillReward, genome_dict: dict, to_spec_fn) -> None:
+def _skill_worker_init(
+    seed: int, reward: SkillReward, genome_dict: dict, to_spec_fn, control_step_freq: int,
+) -> None:
     global _skill_worker_ctx  # noqa: PLW0603
     torch.set_num_threads(1)
     np.random.seed((seed + os.getpid()) % (2**32 - 1))
@@ -867,6 +869,7 @@ def _skill_worker_init(seed: int, reward: SkillReward, genome_dict: dict, to_spe
     _skill_worker_ctx = {
         "model": model, "data": data, "network": network,
         "rotor_ids": rotor_geom_ids(model), "floor": floor_id(model), "reward": reward,
+        "control_step_freq": control_step_freq,
     }
 
 
@@ -879,6 +882,7 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
     rotor_ids = ctx["rotor_ids"]
     floor     = ctx["floor"]
     reward: SkillReward = ctx["reward"]
+    control_step_freq: int = ctx["control_step_freq"]
     weights   = np.array(weights_list, dtype=np.float32)
     fill_parameters(network, weights)
     mujoco.mj_resetData(model, data)
@@ -905,7 +909,7 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
 
     episode_end = SETTLE_DURATION + reward.duration
     while data.time < episode_end:
-        if step % CONTROL_STEP_FREQ == 0:
+        if step % control_step_freq == 0:
             state      = get_robot_state(data).astype(np.float32)
             raw_action = network.forward(model, data, state)
             current_action = np.clip(
@@ -960,8 +964,12 @@ def train_skill_for_body(
     workers: int,
     seed: int,
     to_spec_fn=genome_to_spec,
+    control_step_freq: int = CONTROL_STEP_FREQ,
 ) -> tuple[np.ndarray, list[float], float]:
     """Train one skill via CMA-ES for a specific body.
+
+    control_step_freq is the number of physics steps between controller
+    updates (see CONTROL_STEP_FREQ).
 
     Returns (best_weights, learning_curve, eval_time_s).
     """
@@ -989,7 +997,7 @@ def train_skill_for_body(
     with ProcessPoolExecutor(
         max_workers=effective_workers,
         initializer=_skill_worker_init,
-        initargs=(seed, reward, genome_dict, to_spec_fn),
+        initargs=(seed, reward, genome_dict, to_spec_fn, control_step_freq),
     ) as pool:
         gen = 0
         while gen < budget:
