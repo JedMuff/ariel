@@ -15,16 +15,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
+import re
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import mujoco
 import numpy as np
 from rich.console import Console
 
+import genome_adapter
 from shared import (
+    CONTROL_STEP_FREQ,
     Network,
     analyze_sections,
     fill_parameters,
@@ -45,7 +50,13 @@ GATE_HALF_HEIGHT       = 0.15
 # both measured along that axis, not world +X.
 FORWARD_AXIS           = np.array([0.0, -1.0])
 HIDDEN_SIZES           = [32]
-CONTROL_STEP_FREQ      = 100
+# CONTROL_STEP_FREQ is imported from shared.py (not hardcoded here) because it
+# was previously a stale local copy (100) left behind by the "centralize
+# skill-training kernel, raise control frequency" change that set the real
+# value to 9 -- replaying at the wrong frequency re-evaluates the vision-gated
+# SkillController and network action 11x less often than training did,
+# producing a materially different (and much worse-looking) episode than the
+# one that earned the recorded fitness.
 CTRL_ALPHA             = 0.5
 SETTLE_DURATION        = 3.0
 FOOD_EVAL_DURATION     = 120.0
@@ -87,8 +98,8 @@ class SkillController:
         return self._current_skill
 
 
-def build_food_world(genome_dict: dict, reach_radius: float):
-    spec = genome_to_spec(genome_dict)
+def build_food_world(genome_dict: dict, reach_radius: float, to_spec_fn=genome_to_spec):
+    spec = to_spec_fn(genome_dict)
     if spec is None:
         raise ValueError("Could not decode morphology")
     from ariel.simulation.environments import SimpleFlatWorld
@@ -158,24 +169,61 @@ def _pip_overlay_bottom(base_bgr: np.ndarray, fpv_bgr: np.ndarray, margin: int =
     return out
 
 
+def _reconstruct_food_seed(ckpt_dir: Path, gen: int) -> Optional[int]:
+    """Recover the exact seed _run_food_episode used for this checkpoint
+    (gecko_food_skills.py: seed=BASE_SEED + 1000*gen + idx, then +3 for the
+    food episode itself), so SkillController's one random choice — its
+    initial search-turn direction — replays with the same draw it actually
+    got scored with, instead of an arbitrary default. Returns None (caller
+    falls back to an explicit --seed) if the checkpoint layout or naming
+    doesn't match what's needed to reconstruct it.
+    """
+    m = re.search(r"body(\d+)", ckpt_dir.name)
+    if m is None:
+        return None
+    idx = int(m.group(1))
+    run_config_path = ckpt_dir.parent.parent / "run_config.json"
+    if not run_config_path.exists():
+        return None
+    base_seed = json.loads(run_config_path.read_text()).get("seed")
+    if base_seed is None:
+        return None
+    return base_seed + 1000 * gen + idx + 3
+
+
 def render_checkpoint(
     ckpt_dir: Path,
     out_path: Path,
     reach_radius: float = 0.20,
-    seed: int = 0,
+    seed: Optional[int] = None,
     render_fps: int = 30,
     render_height: int = 480,
     render_width: int = 640,
+    max_modules: int = 25,
 ) -> dict:
     genome = json.loads((ckpt_dir / "best_genome.json").read_text())
     meta = json.loads((ckpt_dir / "meta.json").read_text()) if (ckpt_dir / "meta.json").exists() else {}
     waypoints = np.load(ckpt_dir / "best_waypoints.npy")
 
+    if seed is None:
+        reconstructed = _reconstruct_food_seed(ckpt_dir, meta.get("gen", 0))
+        if reconstructed is not None:
+            seed = reconstructed
+            console.log(f"  Using reconstructed training seed {seed} for SkillController")
+        else:
+            seed = 0
+            console.log("  [yellow]Could not reconstruct training seed -- using seed=0[/yellow]")
+
     loco_w = np.load(ckpt_dir / "loco_weights.npy")
     left_w = np.load(ckpt_dir / "left_weights.npy")
     right_w = np.load(ckpt_dir / "right_weights.npy")
 
-    model, data, target_mocap_id, cam_name = build_food_world(genome, reach_radius)
+    to_spec_fn = (
+        functools.partial(genome_adapter.cppn_genome_to_spec, max_modules=max_modules)
+        if meta.get("genome_type") == "cppn"
+        else genome_to_spec
+    )
+    model, data, target_mocap_id, cam_name = build_food_world(genome, reach_radius, to_spec_fn=to_spec_fn)
     input_dim = model.nq + model.nv  # placeholder overwritten below
     from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
     input_dim = len(get_robot_state(data))
@@ -488,7 +536,10 @@ def main() -> None:
                          help="Output video path (single checkpoint only)")
     parser.add_argument("--out-dir", type=Path, default=Path("data/food_skills_videos"))
     parser.add_argument("--reach-radius", type=float, default=0.20)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=None,
+                         help="SkillController RNG seed. Default: reconstruct the exact "
+                              "seed gecko_food_skills.py used for this checkpoint's food "
+                              "episode from run_config.json + the checkpoint's gen/idx.")
     parser.add_argument("--render-fps", type=int, default=30)
     parser.add_argument("--render-height", type=int, default=480)
     parser.add_argument("--render-width", type=int, default=640)
