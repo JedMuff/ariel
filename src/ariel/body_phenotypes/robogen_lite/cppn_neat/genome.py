@@ -14,11 +14,15 @@ class Genome:
         connections: dict[int, Connection],
         fitness: float,
         serialized: dict = None,
+        bias_value: float | None = None,
     ):
         self.nodes = nodes
         self.connections = connections
         self.fitness = fitness
         self.serialized = serialized
+        # Constant fed to the last input node (see `random(bias_input=True)`);
+        # None means the genome has no bias input.
+        self.bias_value = bias_value
 
     @staticmethod
     def _get_random_weight():
@@ -45,7 +49,9 @@ class Genome:
         }
 
         # Return a new Genome instance
-        return Genome(new_nodes, new_connections, self.fitness)
+        return Genome(
+            new_nodes, new_connections, self.fitness, bias_value=self.bias_value
+        )
 
     @classmethod
     def random(
@@ -54,14 +60,24 @@ class Genome:
         num_outputs: int,
         next_node_id: int,
         next_innov_id: int,
+        bias_input: bool = False,
     ):
         """
         Creates a new, randomly initialized Genome with a base topology.
         Initial topology is fully connected inputs to outputs.
+
+        With ``bias_input``, one extra input node is added after the
+        ``num_inputs`` ones and fed a constant drawn from U(-1, 1), stored as
+        ``bias_value`` (callers of `activate` still pass ``num_inputs``
+        values).
         """
 
         nodes = {}
         connections = {}
+        bias_value = None
+        if bias_input:
+            bias_value = random.uniform(-1.0, 1.0)
+            num_inputs += 1
 
         # 1. Create Input Nodes
         for i in range(num_inputs):
@@ -97,7 +113,7 @@ class Genome:
                     1  # Increment for the next unique innovation ID
                 )
 
-        return cls(nodes, connections, fitness=0.0)
+        return cls(nodes, connections, fitness=0.0, bias_value=bias_value)
 
     def mutate(
         self,
@@ -116,42 +132,65 @@ class Genome:
         if random.random() < node_add_rate:
             self._mutate_add_node(next_innov_id_getter, next_node_id_getter)
 
-    def _mutate_add_connection(self, next_innov_id_getter):
-        """Attempts to add a new connection between two existing, non-connected nodes."""
+    def _mutate_add_connection(self, next_innov_id_getter, attempts: int = 20) -> bool:
+        """Attempts to add a new connection between two existing, non-connected
+        nodes. Tries up to ``attempts`` random pairs; a pair is rejected if the
+        target is an input, the connection exists, or it would close a cycle.
+        Returns whether a connection was added."""
 
         all_nodes = list(self.nodes.keys())
         # We need at least two nodes to form a connection
         if len(all_nodes) < 2:
-            return
+            return False
 
-        # Pick two random distinct nodes
-        in_id, out_id = random.sample(all_nodes, 2)
+        existing = {(c.in_id, c.out_id) for c in self.connections.values()}
+        for _ in range(attempts):
+            # Pick two random distinct nodes
+            in_id, out_id = random.sample(all_nodes, 2)
 
-        # (I assume a feed-forward structure)
-        if self.nodes[out_id].typ == "input":
-            in_id, out_id = out_id, in_id  # Swap to ensure input to non-input
+            # (I assume a feed-forward structure)
+            if self.nodes[out_id].typ == "input":
+                in_id, out_id = out_id, in_id  # Swap to ensure input to non-input
+            if self.nodes[out_id].typ == "input":
+                continue  # both inputs
+            if (in_id, out_id) in existing or self._reaches(out_id, in_id):
+                continue
 
-        # Check if connection already exists (using in_id and out_id)
-        for conn in self.connections.values():
-            if conn.in_id == in_id and conn.out_id == out_id:
-                return  # Connection already exists
+            # Create new connection
+            new_innov_id = next_innov_id_getter()
+            new_weight = self._get_random_weight()
+            new_connection = Connection(
+                in_id, out_id, new_weight, enabled=True, innov_id=new_innov_id
+            )
+            self.add_connection(new_connection)
+            return True
+        return False
 
-        # Create new connection
-        new_innov_id = next_innov_id_getter()
-        new_weight = self._get_random_weight()
-        new_connection = Connection(
-            in_id, out_id, new_weight, enabled=True, innov_id=new_innov_id
-        )
+    def _reaches(self, src: int, dst: int) -> bool:
+        """Whether ``dst`` can be reached from ``src`` along connections
+        (enabled or not: a disabled one can be re-enabled by crossover)."""
+        succ: dict[int, list[int]] = {}
+        for c in self.connections.values():
+            succ.setdefault(c.in_id, []).append(c.out_id)
+        stack, seen = [src], {src}
+        while stack:
+            node = stack.pop()
+            if node == dst:
+                return True
+            for nxt in succ.get(node, []):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
 
-        self.add_connection(new_connection)
-
-    def _mutate_add_node(self, next_innov_id_getter, next_node_id_getter):
+    def _mutate_add_node(self, next_innov_id_getter, next_node_id_getter) -> bool:
         """
         Splits an existing connection by inserting a new (hidden) node.
+        Returns whether a node was added.
         """
 
         if not self.connections:
-            return
+            return False
 
         # 1. Select a random existing connection to split
         conn_to_split: Connection = random.choice(
@@ -192,6 +231,66 @@ class Genome:
             innov_id=innov_id_2,
         )
         self.add_connection(conn2)
+        return True
+
+    def mutate_weights(self, rate: float = 0.3, power: float = 0.3) -> bool:
+        """Perturb each connection weight with probability ``rate`` by
+        N(0, ``power``); at least one weight is always perturbed."""
+        conns = list(self.connections.values())
+        if not conns:
+            return False
+        chosen = [c for c in conns if random.random() < rate] or [random.choice(conns)]
+        for c in chosen:
+            c.weight += random.gauss(0.0, power)
+        return True
+
+    def mutate_biases(self, rate: float = 0.3, power: float = 0.3) -> bool:
+        """Perturb each non-input node's bias with probability ``rate`` by
+        N(0, ``power``); at least one bias is always perturbed."""
+        nodes = [n for n in self.nodes.values() if n.typ != "input"]
+        if not nodes:
+            return False
+        chosen = [n for n in nodes if random.random() < rate] or [random.choice(nodes)]
+        for n in chosen:
+            n.bias += random.gauss(0.0, power)
+        return True
+
+    def mutate_bias_input(self, power: float = 0.2) -> bool:
+        """Perturb the bias input's value by N(0, ``power``), clipped to
+        [-1, 1]. False if the genome has no bias input."""
+        if self.bias_value is None:
+            return False
+        old = self.bias_value
+        self.bias_value = min(1.0, max(-1.0, old + random.gauss(0.0, power)))
+        return self.bias_value != old
+
+    def mutate_one(
+        self,
+        probs: dict[str, float],
+        next_innov_id_getter,
+        next_node_id_getter,
+    ) -> bool:
+        """Apply exactly one mutation, chosen with weights ``probs`` over
+        "weights", "biases", "bias_input", "add_connection", "add_node". If
+        the chosen one can't change anything (e.g. no bias input), another is
+        drawn from the rest, so the genome always changes unless none apply.
+        Returns whether it changed."""
+        operators = {
+            "weights": self.mutate_weights,
+            "biases": self.mutate_biases,
+            "bias_input": self.mutate_bias_input,
+            "add_connection": lambda: self._mutate_add_connection(next_innov_id_getter),
+            "add_node": lambda: self._mutate_add_node(
+                next_innov_id_getter, next_node_id_getter
+            ),
+        }
+        remaining = {k: p for k, p in probs.items() if p > 0}
+        while remaining:
+            name = random.choices(list(remaining), weights=list(remaining.values()))[0]
+            if operators[name]():
+                return True
+            del remaining[name]
+        return False
 
     def crossover(self, other: "Genome") -> "Genome":
         """
@@ -256,6 +355,12 @@ class Genome:
         # Get the node gene from the fitter parent if possible, otherwise from the less fit parent
         combined_nodes = {**less_fit_parent.nodes, **fitter_parent.nodes}
 
+        # Always keep every input and output node, even if no inherited
+        # connection touches it, so the network's interface never changes.
+        all_inherited_node_ids |= {
+            nid for nid, n in combined_nodes.items() if n.typ in ("input", "output")
+        }
+
         for node_id in all_inherited_node_ids:
             # Nodes are inherited without structural change, just copy the properties
             node_gene = combined_nodes.get(node_id)
@@ -264,7 +369,10 @@ class Genome:
 
         # 3. Create and return the new Genome
         return Genome(
-            offspring_node_genes, offspring_connection_genes, fitness=0.0
+            offspring_node_genes,
+            offspring_connection_genes,
+            fitness=0.0,
+            bias_value=random.choice([self.bias_value, other.bias_value]),
         )
 
     def add_connection(self, connection: Connection):
@@ -333,6 +441,9 @@ class Genome:
         1. Tries a topological sort (Feed-Forward) for speed and precision.
         2. If a cycle is detected, falls back to iterative relaxation (Recurrent).
         """
+
+        if self.bias_value is not None:
+            inputs = [*inputs, self.bias_value]
 
         # 1. Identify Input/Output IDs
         input_node_ids = [
@@ -427,7 +538,7 @@ class Genome:
 
     def to_dict(self) -> dict:
         """Serializes the Genome to a dictionary."""
-        return {
+        data = {
             "nodes": {
                 str(k): {
                     "_id": v._id,
@@ -450,6 +561,9 @@ class Genome:
                 for c in self.connections.values()
             ],
         }
+        if self.bias_value is not None:
+            data["bias_value"] = self.bias_value
+        return data
 
     @classmethod
     def from_dict(cls, data: dict, fitness: float = 0.0) -> "Genome":
@@ -476,4 +590,9 @@ class Genome:
             )
             connections[new_conn.innov_id] = new_conn
         # 3. Return new Genome instance
-        return cls(nodes=nodes, connections=connections, fitness=0.0)
+        return cls(
+            nodes=nodes,
+            connections=connections,
+            fitness=0.0,
+            bias_value=data.get("bias_value"),
+        )
