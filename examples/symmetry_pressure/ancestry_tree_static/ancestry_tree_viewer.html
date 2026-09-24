@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ancestry Tree Viewer</title>
+<link rel="stylesheet" href="ancestry_tree_viewer.css">
+</head>
+<body>
+<header id="header">
+  <div id="run-info">
+    <h1 id="run-title">Ancestry Tree</h1>
+    <div id="run-subtitle"></div>
+  </div>
+  <div id="legend">
+    <div id="legend-label">fitness</div>
+    <div id="legend-bar"></div>
+    <div id="legend-ticks">
+      <span id="legend-min"></span>
+      <span id="legend-max"></span>
+    </div>
+    <div id="legend-note"></div>
+  </div>
+  <div id="legend-swatches">
+    <span class="swatch-item"><span class="swatch dim"></span>no image</span>
+    <span class="swatch-item"><span class="swatch invalid"></span>invalid</span>
+    <span class="swatch-item"><span class="swatch passthrough"></span>alive, not re-evaluated</span>
+  </div>
+</header>
+
+<section id="slots-panel" aria-label="Pinned individuals">
+  <div id="slots-row-labels">
+    <div class="slots-row-label">genome</div>
+    <div class="slots-row-label">phenotype</div>
+  </div>
+  <!-- slots-grid injected by JS -->
+</section>
+
+<section id="tree-panel" aria-label="Ancestry tree">
+  <svg id="tree-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+</section>
+
+<div id="hover-card" class="hidden"></div>
+<div id="toast" class="hidden"></div>
+
+<!--ANCESTRY_DATA-->
+<script src="ancestry_tree_viewer.js"></script>
+</body>
+</html>
