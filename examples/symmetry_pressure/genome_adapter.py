@@ -40,15 +40,29 @@ import shared
 
 GenomeType = Literal["tree", "tree_symmetric", "cppn"]
 
-# CPPN inputs: parent (x, y, z) + child (x, y, z) grid coords (matches
-# cppn_best_first.MorphologyDecoderBestFirst._get_child_coords usage).
+# CPPN inputs: 6 values per face from the decoder; which ones depends on the
+# genotype's decoder_version (see _CPPN_DECODER_FLAGS below and
+# cppn_best_first.MorphologyDecoderBestFirst._fcl_inputs).
+# New genomes also have a bias input (a constant in [-1, 1] stored in the
+# genome and appended by CPPNGenome.activate), so they have one more input node
+# than the decoder passes values.
 # Outputs: 1 connection score + one score per module type + one per rotation.
 NUM_CPPN_INPUTS  = 6
+NUM_CPPN_GENOME_INPUTS = NUM_CPPN_INPUTS + 1
 NUM_CPPN_OUTPUTS = 1 + NUM_OF_TYPES_OF_MODULES + NUM_OF_ROTATIONS
 
-_CPPN_NODE_ADD_RATE = 0.2
-_CPPN_CONN_ADD_RATE = 0.3
-_CPPN_INIT_STRUCTURAL_MUTATIONS = 3
+# Each mutation applies exactly one of these operators, drawn with these
+# weights (CPPNGenome.mutate_one), so every mutation changes the genome.
+_CPPN_MUTATION_PROBS = {
+    "weights": 0.4,
+    "biases": 0.2,
+    "bias_input": 0.1,
+    "add_connection": 0.2,
+    "add_node": 0.1,
+}
+# Initial genomes get 0.._CPPN_INIT_MAX_HIDDEN hidden nodes (uniform), each
+# followed by one extra random connection.
+_CPPN_INIT_MAX_HIDDEN = 3
 _MAX_OFFSPRING_ATTEMPTS = 50
 
 
@@ -104,14 +118,43 @@ def _make_tree_adapter(symmetry_axis: Optional[MirrorAxis]) -> GenomeAdapter:
 # globally unique across the entire run for crossover gene-alignment to be
 # meaningful (standard NEAT historical-marking convention).
 _id_manager = IdManager(
-    node_start=NUM_CPPN_INPUTS + NUM_CPPN_OUTPUTS - 1,
-    innov_start=(NUM_CPPN_INPUTS * NUM_CPPN_OUTPUTS) - 1,
+    node_start=NUM_CPPN_GENOME_INPUTS + NUM_CPPN_OUTPUTS - 1,
+    innov_start=(NUM_CPPN_GENOME_INPUTS * NUM_CPPN_OUTPUTS) - 1,
 )
+
+
+# Every CPPN genotype records which decoder built its body, so checkpoints
+# keep re-rendering/analysing as they evolved. CPPNGenome.from_dict ignores
+# the extra key. Genotypes created from now on get _CPPN_DECODER_VERSION.
+#   1 (key missing): legacy integer-grid decoder, NONE masked.
+#   2: FCL collision checks on the real module geometry, NONE leaves a face
+#      empty; global best-first growth on absolute xyz inputs.
+#   3: as 2, but local + distance inputs (face direction, outwardness,
+#      parent/attachment distance from the core) and per-module competition
+#      (breadth-first; a face attaches if its score > 0.5). Chosen from the
+#      decoder comparison in __data__/cppn_decoder_variants_seed42/FINDINGS.md.
+#      Same 6 decoder inputs as 2, so genomes are created/mutated the same way.
+_CPPN_DECODER_VERSION_KEY = "decoder_version"
+_CPPN_DECODER_VERSION = 3
+_CPPN_DECODER_FLAGS: dict[int, dict] = {
+    1: {"legacy": True, "allow_none": False},
+    2: {},
+    3: {"distance_input": True, "local_inputs": True, "local_competition": True},
+}
+
+
+def _cppn_genotype(genome: CPPNGenome) -> dict:
+    return {**genome.to_dict(), _CPPN_DECODER_VERSION_KEY: _CPPN_DECODER_VERSION}
 
 
 def _cppn_decode(genotype_dict: dict, max_modules: int):
     genome = CPPNGenome.from_dict(genotype_dict)
-    decoder = MorphologyDecoderBestFirst(cppn_genome=genome, max_modules=max_modules)
+    version = genotype_dict.get(_CPPN_DECODER_VERSION_KEY, 1)
+    decoder = MorphologyDecoderBestFirst(
+        cppn_genome=genome,
+        max_modules=max_modules,
+        **_CPPN_DECODER_FLAGS[version],
+    )
     return decoder.decode()
 
 
@@ -122,25 +165,31 @@ def _cppn_is_valid(graph) -> bool:
     return num_hinges >= shared.MIN_HINGES
 
 
-def _random_cppn_genome() -> CPPNGenome:
+def _random_cppn_genome(
+    num_inputs: int = NUM_CPPN_INPUTS, id_manager: IdManager = _id_manager
+) -> CPPNGenome:
+    """`num_inputs` excludes the bias input. A non-default `num_inputs` needs
+    its own `id_manager` starting after that genome's input/output node and
+    initial connection ids."""
     genome = CPPNGenome.random(
-        num_inputs=NUM_CPPN_INPUTS,
+        num_inputs=num_inputs,
         num_outputs=NUM_CPPN_OUTPUTS,
-        next_node_id=NUM_CPPN_INPUTS + NUM_CPPN_OUTPUTS,
+        next_node_id=num_inputs + 1 + NUM_CPPN_OUTPUTS,
         next_innov_id=0,
+        bias_input=True,
     )
-    for _ in range(_CPPN_INIT_STRUCTURAL_MUTATIONS):
-        genome.mutate(
-            _CPPN_NODE_ADD_RATE, _CPPN_CONN_ADD_RATE,
-            _id_manager.get_next_innov_id, _id_manager.get_next_node_id,
-        )
+    # Hidden nodes split a random connection (random activation and bias),
+    # then get one extra random connection each.
+    for _ in range(random.randint(0, _CPPN_INIT_MAX_HIDDEN)):
+        genome._mutate_add_node(id_manager.get_next_innov_id, id_manager.get_next_node_id)
+        genome._mutate_add_connection(id_manager.get_next_innov_id)
     return genome
 
 
 def _mutate_cppn_genome(genome: CPPNGenome) -> CPPNGenome:
     child = genome.copy()
-    child.mutate(
-        _CPPN_NODE_ADD_RATE, _CPPN_CONN_ADD_RATE,
+    child.mutate_one(
+        _CPPN_MUTATION_PROBS,
         _id_manager.get_next_innov_id, _id_manager.get_next_node_id,
     )
     return child
@@ -149,12 +198,12 @@ def _mutate_cppn_genome(genome: CPPNGenome) -> CPPNGenome:
 def _cppn_create_individual(rng: np.random.Generator, num_modules: int, max_depth: int) -> Individual:  # noqa: ARG001
     while True:
         genome = _random_cppn_genome()
-        graph = _cppn_decode(genome.to_dict(), num_modules)
+        graph = _cppn_decode(_cppn_genotype(genome), num_modules)
         if _cppn_is_valid(graph):
             break
     ind = Individual()
     ind.id = shared._next_ind_id()
-    ind.genotype = {"cppn": genome.to_dict()}
+    ind.genotype = {"cppn": _cppn_genotype(genome)}
     ind.tags = {"ps": False, "valid": True, "best_brain": []}
     return ind
 
@@ -182,18 +231,18 @@ def _cppn_make_offspring(
 
         attempts = 0
         valid = False
-        graph = _cppn_decode(child_genome.to_dict(), num_modules)
+        graph = _cppn_decode(_cppn_genotype(child_genome), num_modules)
         while attempts < _MAX_OFFSPRING_ATTEMPTS:
             if _cppn_is_valid(graph):
                 valid = True
                 break
             child_genome = _mutate_cppn_genome(child_genome)
-            graph = _cppn_decode(child_genome.to_dict(), num_modules)
+            graph = _cppn_decode(_cppn_genotype(child_genome), num_modules)
             attempts += 1
 
         child = Individual()
         child.id = shared._next_ind_id()
-        child.genotype = {"cppn": child_genome.to_dict(), "parent_ids": parent_ids}
+        child.genotype = {"cppn": _cppn_genotype(child_genome), "parent_ids": parent_ids}
         child.tags = {"ps": False, "valid": valid, "best_brain": []}
         child.requires_eval = True
         if not valid:
