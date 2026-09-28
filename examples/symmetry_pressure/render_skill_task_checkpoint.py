@@ -13,7 +13,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import functools
 import json
 import math
 from pathlib import Path
@@ -23,7 +22,7 @@ import mujoco
 import numpy as np
 from rich.console import Console
 
-import genome_adapter
+from behavior_common import resolve_replay_config, skills_for_task
 from shared import (
     CONTROL_STEP_FREQ,
     CTRL_ALPHA,
@@ -32,9 +31,7 @@ from shared import (
     HINGE_GLITCH_FITNESS,
     JERK_PENALTY_WEIGHT,
     JERK_THRESHOLD,
-    LOCO_DURATION,
     SETTLE_DURATION,
-    TURN_DURATION,
     FORWARD_AXIS,
     Network,
     build_loco_world_for_body,
@@ -46,32 +43,6 @@ from shared import (
 )
 
 console = Console()
-
-N_DIRECTIONS = 5  # must match gecko_skill_tasks.py
-
-
-def _skills_for_task(task: str) -> list[tuple[str, dict]]:
-    """Duplicated from gecko_skill_tasks.py:_skills_for_task (importing that
-    module would trigger its own module-level argparse.parse_args() and
-    fail). Each entry is (skill_name, reward_spec) where reward_spec is a
-    dict describing the SkillReward used at training time.
-    """
-    if task == "forward":
-        return [("fwd", {"kind": "translate", "angle_deg": 0.0, "duration": LOCO_DURATION})]
-    if task == "multidirection":
-        step = 360.0 / N_DIRECTIONS
-        return [
-            (f"dir{i}", {"kind": "translate", "angle_deg": i * step, "duration": LOCO_DURATION})
-            for i in range(N_DIRECTIONS)
-        ]
-    if task == "turn_avg":
-        return [
-            ("fwd", {"kind": "translate", "angle_deg": 0.0, "duration": LOCO_DURATION}),
-            ("left", {"kind": "rotate", "turn_sign": +1, "duration": TURN_DURATION}),
-            ("right", {"kind": "rotate", "turn_sign": -1, "duration": TURN_DURATION}),
-        ]
-    raise ValueError(f"Unknown task: {task!r}")
-
 
 def _rotate_2d(v: np.ndarray, angle_deg: float) -> np.ndarray:
     theta = math.radians(angle_deg)
@@ -268,20 +239,10 @@ def render_checkpoint(
     if task is None:
         raise ValueError(f"{ckpt_dir}/meta.json has no 'task' field")
 
-    to_spec_fn = (
-        functools.partial(genome_adapter.cppn_genome_to_spec, max_modules=max_modules)
-        if meta.get("genome_type") == "cppn"
-        else genome_to_spec
-    )
-
-    # Checkpoints live at <run>/checkpoints/<ckpt>; run_config.json sits in <run>.
-    # Runs predating --control-step-freq have no such key and used the shared default.
-    run_config_path = ckpt_dir.parent.parent / "run_config.json"
-    run_config = json.loads(run_config_path.read_text()) if run_config_path.exists() else {}
-    control_step_freq = run_config.get("control_step_freq", CONTROL_STEP_FREQ)
+    to_spec_fn, control_step_freq = resolve_replay_config(ckpt_dir, max_modules=max_modules)
 
     results = []
-    for skill_name, reward_spec in _skills_for_task(task):
+    for skill_name, reward_spec in skills_for_task(task):
         weights_path = ckpt_dir / f"{skill_name}_weights.npy"
         if not weights_path.exists():
             console.log(f"  [yellow]{skill_name}: weights not found at {weights_path} — skipping[/yellow]")
