@@ -54,6 +54,7 @@ from ariel.simulation.environments import SimpleFlatWorld
 
 import genome_adapter
 from shared import (
+    BRAIN_KINDS,
     LOCO_DURATION,
     RING_R_MAX,
     SETTLE_DURATION,
@@ -62,14 +63,13 @@ from shared import (
     GATE_HALF_HEIGHT,
     SPAWN_POSITION,
     TURN_DURATION,
-    Network,
     SkillReward,
     action_control_cost,
     analyze_sections,
-    fill_parameters,
     floor_id,
     genome_input_dim,
     isolate_green,
+    make_brain_for_model,
     nsga2_survivor_selection,
     rotor_geom_ids,
     sample_waypoints,
@@ -113,6 +113,9 @@ parser.add_argument("--loco-only",     action="store_true",
                     help="Train only the loco skill via CMA-ES; skip left/right "
                          "turn training and the food-task evaluation")
 parser.add_argument("--no-video",      action="store_true")
+parser.add_argument("--brain",         choices=BRAIN_KINDS, default="ann",
+                    help="Controller trained per skill: 'ann' (closed-loop MLP on "
+                         "proprioception) or 'cpg' (open-loop sine oscillators)")
 parser.add_argument("--time-limit",    type=float, default=None,
                     help="Wall-clock seconds; stop after current generation completes")
 args = parser.parse_args()
@@ -133,6 +136,7 @@ STRATEGY       = args.strategy_type
 REPEAT_EVALS   = args.repeat_evals
 LOCO_ONLY      = args.loco_only
 TIME_LIMIT     = args.time_limit
+BRAIN          = args.brain
 
 TOURNAMENT_SIZE = 4
 
@@ -260,17 +264,12 @@ def _run_food_episode(
     seed: int,
 ) -> dict[str, Any]:
     model, data, target_mocap_id, cam_name = _build_food_world_for_body(genome_dict)
-    input_dim  = len(get_robot_state(data))
-    output_dim = model.nu
 
-    def _load(w: np.ndarray) -> Network:
-        net = Network(input_size=input_dim, output_size=output_dim)
-        fill_parameters(net, w)
-        return net
-
-    loco_net  = _load(loco_weights)
-    left_net  = _load(left_weights)
-    right_net = _load(right_weights)
+    # All three skill brains see the same data.time, so a CPG stays
+    # phase-continuous across skill switches.
+    loco_net  = make_brain_for_model(BRAIN, model, data, loco_weights)
+    left_net  = make_brain_for_model(BRAIN, model, data, left_weights)
+    right_net = make_brain_for_model(BRAIN, model, data, right_weights)
     renderer  = mujoco.Renderer(model, height=96, width=128)
 
     rotor_ids     = rotor_geom_ids(model)
@@ -322,11 +321,11 @@ def _run_food_episode(
 
             state = get_robot_state(data).astype(np.float32)
             if skill == 1:
-                raw_action = loco_net.forward(model, data, state)
+                raw_action = loco_net.act(data, state)
             elif skill == 2:
-                raw_action = left_net.forward(model, data, state)
+                raw_action = left_net.act(data, state)
             else:
-                raw_action = right_net.forward(model, data, state)
+                raw_action = right_net.act(data, state)
 
             current_action = np.clip(
                 current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
@@ -365,10 +364,10 @@ def _run_food_episode(
     final_dist = 0.0 if waypoints_reached >= num_wps else min_dist
     d_norm = float(np.clip((RING_R_MAX - final_dist) / RING_R_MAX, 0.0, 1.0))
 
-    # Height penalty, hinge-contact penalty, and the hinge-glitch override are
-    # deliberately not applied here: those concerns are handled during the
-    # underlying loco/left/right skill training (see shared._skill_worker_eval)
-    # that this episode's skills were trained with, not re-applied on top here.
+    # The height penalty is deliberately not applied here: it is handled during
+    # the underlying loco/left/right skill training (see
+    # shared._skill_worker_eval), not re-applied on top here. c_hinge is
+    # logged for diagnostics only and plays no part in fitness.
     # Baseline shift: reaching the food eval at all (i.e. clearing the loco
     # gate) is worth -1, matching LOCO_GATE_THRESH so a gated-in individual
     # is never scored worse than one that was gated out.
@@ -402,6 +401,7 @@ def _train_pipeline_for_body(
     loco_w, loco_curve, loco_time = train_skill_for_body(
         SkillReward(kind="translate", angle_deg=0.0, duration=LOCO_DURATION),
         genome_dict, LOCO_BUDGET, BRAIN_WORKERS, seed, to_spec_fn=ADAPTER.to_spec,
+        brain_kind=BRAIN,
     )
     loco_fitness = float(min(loco_curve)) if loco_curve else float("inf")
 
@@ -428,10 +428,12 @@ def _train_pipeline_for_body(
     left_w, left_curve, left_time = train_skill_for_body(
         SkillReward(kind="rotate", turn_sign=+1, duration=TURN_DURATION),
         genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 1, to_spec_fn=ADAPTER.to_spec,
+        brain_kind=BRAIN,
     )
     right_w, right_curve, right_time = train_skill_for_body(
         SkillReward(kind="rotate", turn_sign=-1, duration=TURN_DURATION),
         genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 2, to_spec_fn=ADAPTER.to_spec,
+        brain_kind=BRAIN,
     )
 
     t_food_start = time.perf_counter()

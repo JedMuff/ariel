@@ -19,11 +19,17 @@
 # on the stride; only network updates get rarer, so these are upper bounds.
 # Genomes are ordered slowest-first so the cppn jobs start early.
 #
+# Brain: BRAIN=cpg (default, open-loop CPG) or BRAIN=ann (the original MLP).
+# Results go to FINAL_DIR=/scratch/jed/ariel_control_stride_sweep_<brain>, so
+# run tags are unchanged and the ANN sweep's data isn't mixed in; point the
+# analysis scripts at it with --stride-root.
+#
 # Dry-run a few indices first, e.g.:
 #   sbatch --array=0-2 slurm/run_control_stride_sweep.sh   # cppn, all 3 strides, rep 0
 #
 # Usage:
-#   sbatch slurm/run_control_stride_sweep.sh
+#   sbatch slurm/run_control_stride_sweep.sh               # CPG brain
+#   BRAIN=ann sbatch slurm/run_control_stride_sweep.sh     # ANN brain
 
 #SBATCH --job-name=ariel-ctrl-stride
 #SBATCH --output=out_files/ariel-ctrl-stride-%A_%a.out
@@ -55,9 +61,10 @@ REP=$(( (ID / 9) % N_REPS ))
 STRIDE=${STRIDES[$STRIDE_IDX]}
 GENOME_TYPE=${GENOME_TYPES[$GENOME_IDX]}
 SEED=$((42 + REP))   # same seeds as the stride-9 baseline runs
+BRAIN=${BRAIN:-cpg}
 
 TMP_DIR=/tmp/${USER}/ariel_ctrlstride_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}
-FINAL_DIR=/scratch/jed/ariel_control_stride_sweep
+FINAL_DIR=/scratch/jed/ariel_control_stride_sweep_${BRAIN}
 RUN_TAG=ctrlstride_forward_${GENOME_TYPE}_s${STRIDE}_rep${REP}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -78,6 +85,7 @@ echo "Array job/task: $SLURM_ARRAY_JOB_ID / $SLURM_ARRAY_TASK_ID"
 echo "Task:           forward"
 echo "Control stride: $STRIDE steps (~$(awk "BEGIN{printf \"%.1f\", 500/$STRIDE}")Hz)"
 echo "Genome type:    $GENOME_TYPE"
+echo "Brain:          $BRAIN"
 echo "Rep:            $REP"
 echo "Seed:           $SEED"
 echo "CPUs:           $SLURM_CPUS_PER_TASK"
@@ -121,6 +129,7 @@ srun bash -c "
         --max-modules 25 --max-depth 25 \
         --genome-type $GENOME_TYPE \
         --seed $SEED \
+        --brain $BRAIN \
         --time-limit 259200
 "
 

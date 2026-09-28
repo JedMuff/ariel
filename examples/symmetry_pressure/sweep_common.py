@@ -7,13 +7,18 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_ROOT = REPO_ROOT / "__data__" / "ariel_symmetry_pressure_sweep"
+# ARIEL_SWEEP_ROOT points every analysis script at another sweep with the same
+# layout, e.g. the CPG-brain sweep (slurm/run_symmetry_pressure_sweep.sh, BRAIN=cpg).
+DATA_ROOT = Path(os.environ.get(
+    "ARIEL_SWEEP_ROOT", REPO_ROOT / "__data__" / "ariel_symmetry_pressure_sweep",
+))
 
 TASKS = ["forward", "multidirection", "turn_avg", "food"]
 GENOME_TYPES = ["tree", "tree_symmetric", "cppn"]

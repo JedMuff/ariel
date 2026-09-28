@@ -116,6 +116,92 @@ def fill_parameters(net: nn.Module, vector: np.ndarray) -> None:
         raise IndexError("Parameter vector length mismatch")
 
 
+# ── Brains ────────────────────────────────────────────────────────────────────
+#
+# Every training/replay loop drives a brain through the same two calls:
+# set_params(flat CMA vector) once, then act(data, state) every control step.
+# The returned raw action is then alpha-blended and clipped by the caller, so
+# the post-processing (and jerk penalty) is identical across brain types.
+
+BrainKind = Literal["ann", "cpg"]
+BRAIN_KINDS: tuple[str, ...] = ("ann", "cpg")
+
+CPG_F_MIN = 0.5  # Hz
+CPG_F_MAX = 3.0  # Hz
+
+
+class AnnBrain:
+    """Closed-loop MLP on proprioceptive state (the original controller)."""
+
+    def __init__(self, input_dim: int, output_dim: int) -> None:
+        self.network    = Network(input_size=input_dim, output_size=output_dim)
+        self.num_params = sum(p.numel() for p in self.network.parameters())
+
+    def set_params(self, vec: np.ndarray) -> None:
+        fill_parameters(self.network, np.asarray(vec, dtype=np.float32))
+
+    def act(self, data: Any, state: np.ndarray) -> np.ndarray:
+        return self.network.forward(None, data, state)
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+class CpgBrain:
+    """Open-loop CPG: one sine oscillator per joint sharing a single frequency.
+
+    Parameter layout (3n+1): [freq, amp_0..n-1, phase_0..n-1, offset_0..n-1],
+    each squashed into range so CMA's unbounded search space stays valid:
+      f        = CPG_F_MIN + (CPG_F_MAX - CPG_F_MIN) * sigmoid(p_freq)
+      amp_i    = (pi/2) * sigmoid(p_amp_i)
+      phase_i  = pi * p_phase_i
+      offset_i = (pi/2) * tanh(p_offset_i)
+    Time is measured from the end of the settling phase, so every episode
+    starts at phase 0 and the brain is stateless/deterministic. State input
+    is ignored.
+    """
+
+    def __init__(self, input_dim: int, output_dim: int) -> None:  # noqa: ARG002
+        self.n          = output_dim
+        self.num_params = 3 * output_dim + 1
+        self.set_params(np.zeros(self.num_params))
+
+    def set_params(self, vec: np.ndarray) -> None:
+        p = np.asarray(vec, dtype=np.float64)
+        if len(p) != self.num_params:
+            raise IndexError("Parameter vector length mismatch")
+        n = self.n
+        self.freq   = CPG_F_MIN + (CPG_F_MAX - CPG_F_MIN) * float(_sigmoid(p[0]))
+        self.amp    = (math.pi / 2) * _sigmoid(p[1 : 1 + n])
+        self.phase  = math.pi * p[1 + n : 1 + 2 * n]
+        self.offset = (math.pi / 2) * np.tanh(p[1 + 2 * n : 1 + 3 * n])
+
+    def output_at(self, t: float) -> np.ndarray:
+        out = self.offset + self.amp * np.sin(2 * math.pi * self.freq * t + self.phase)
+        return np.clip(out, -math.pi / 2, math.pi / 2)
+
+    def act(self, data: Any, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
+        return self.output_at(float(data.time) - SETTLE_DURATION)
+
+
+def make_brain(kind: str, input_dim: int, output_dim: int) -> "AnnBrain | CpgBrain":
+    if kind == "ann":
+        return AnnBrain(input_dim, output_dim)
+    if kind == "cpg":
+        return CpgBrain(input_dim, output_dim)
+    raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")
+
+
+def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
+                         params: Optional[np.ndarray] = None) -> "AnnBrain | CpgBrain":
+    """Build a brain sized for this body (proprioceptive input, one output per actuator)."""
+    brain = make_brain(kind, len(get_robot_state(data)), model.nu)
+    if params is not None:
+        brain.set_params(params)
+    return brain
+
+
 # ── Vision helpers ────────────────────────────────────────────────────────────
 
 
@@ -787,9 +873,6 @@ SETTLE_DURATION    = 3.0
 LOCO_DURATION      = 30.0
 TURN_DURATION      = 15.0
 CTRL_ALPHA               = 0.5
-HINGE_CONTACT_LIMIT       = 200
-HINGE_CONTACT_PENALTY     = 0.005
-HINGE_GLITCH_FITNESS      = 1.0
 HEIGHT_PENALTY_THRESHOLD  = 0.21
 JERK_PENALTY_WEIGHT       = 3.0   # penalty per unit of mean absolute ctrl delta, above JERK_THRESHOLD
 JERK_THRESHOLD            = 0.15  # hurdle: mean_jerk below this is free
@@ -858,17 +941,15 @@ _skill_worker_ctx: Optional[dict[str, Any]] = None
 
 def _skill_worker_init(
     seed: int, reward: SkillReward, genome_dict: dict, to_spec_fn, control_step_freq: int,
+    brain_kind: str = "ann",
 ) -> None:
     global _skill_worker_ctx  # noqa: PLW0603
     torch.set_num_threads(1)
     np.random.seed((seed + os.getpid()) % (2**32 - 1))
     model, data = build_loco_world_for_body(genome_dict, to_spec_fn)
-    input_dim   = len(get_robot_state(data))
-    output_dim  = model.nu
-    network     = Network(input_size=input_dim, output_size=output_dim, hidden_size=HIDDEN_SIZE)
+    brain       = make_brain_for_model(brain_kind, model, data)
     _skill_worker_ctx = {
-        "model": model, "data": data, "network": network,
-        "rotor_ids": rotor_geom_ids(model), "floor": floor_id(model), "reward": reward,
+        "model": model, "data": data, "brain": brain, "reward": reward,
         "control_step_freq": control_step_freq,
     }
 
@@ -878,13 +959,10 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
     ctx       = _skill_worker_ctx
     model     = ctx["model"]
     data      = ctx["data"]
-    network   = ctx["network"]
-    rotor_ids = ctx["rotor_ids"]
-    floor     = ctx["floor"]
+    brain     = ctx["brain"]
     reward: SkillReward = ctx["reward"]
     control_step_freq: int = ctx["control_step_freq"]
-    weights   = np.array(weights_list, dtype=np.float32)
-    fill_parameters(network, weights)
+    brain.set_params(np.array(weights_list, dtype=np.float32))
     mujoco.mj_resetData(model, data)
 
     while data.time < SETTLE_DURATION:
@@ -894,8 +972,6 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
     initial_height = float(data.xpos[core_id, 2])
     step           = 0
     current_action = np.zeros(model.nu)
-    c_hinge        = 0
-    prev_contacts: set[int] = set()
     prev_ctrl: Optional[np.ndarray] = None
     jerk_sum       = 0.0
     ctrl_step      = 0
@@ -911,7 +987,7 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
     while data.time < episode_end:
         if step % control_step_freq == 0:
             state      = get_robot_state(data).astype(np.float32)
-            raw_action = network.forward(model, data, state)
+            raw_action = brain.act(data, state)
             current_action = np.clip(
                 current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
                 -math.pi / 2, math.pi / 2,
@@ -923,17 +999,6 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
         data.ctrl[:] = current_action
         mujoco.mj_step(model, data)
 
-        curr: set[int] = set()
-        for k in range(data.ncon):
-            c = data.contact[k]
-            g1, g2 = int(c.geom1), int(c.geom2)
-            if g1 == floor and g2 in rotor_ids:
-                curr.add(g2)
-            elif g2 == floor and g1 in rotor_ids:
-                curr.add(g1)
-        c_hinge += len(curr - prev_contacts)
-        prev_contacts = curr
-
         if reward.kind == "rotate":
             r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
             delta  = signed_vertical_yaw_delta(r_prev, r_curr)
@@ -941,9 +1006,6 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
             r_prev = r_curr.copy()
 
         step += 1
-
-    if c_hinge > HINGE_CONTACT_LIMIT:
-        return HINGE_GLITCH_FITNESS
 
     mean_jerk    = jerk_sum / max(ctrl_step - 1, 1)
     jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
@@ -965,21 +1027,20 @@ def train_skill_for_body(
     seed: int,
     to_spec_fn=genome_to_spec,
     control_step_freq: int = CONTROL_STEP_FREQ,
+    brain_kind: str = "ann",
 ) -> tuple[np.ndarray, list[float], float]:
     """Train one skill via CMA-ES for a specific body.
 
     control_step_freq is the number of physics steps between controller
-    updates (see CONTROL_STEP_FREQ).
+    updates (see CONTROL_STEP_FREQ). brain_kind selects the controller
+    (see make_brain); the returned vector is that brain's flat parameters.
 
     Returns (best_weights, learning_curve, eval_time_s).
     """
     t_start = time.perf_counter()
 
     model, data = build_loco_world_for_body(genome_dict, to_spec_fn)
-    input_dim   = len(get_robot_state(data))
-    output_dim  = model.nu
-    network     = Network(input_size=input_dim, output_size=output_dim, hidden_size=HIDDEN_SIZE)
-    num_params  = sum(p.numel() for p in network.parameters())
+    num_params  = make_brain_for_model(brain_kind, model, data).num_params
 
     rng = np.random.default_rng(seed)
     x0  = rng.uniform(-CMA_INIT_SCALE, CMA_INIT_SCALE, size=num_params).tolist()
@@ -997,7 +1058,7 @@ def train_skill_for_body(
     with ProcessPoolExecutor(
         max_workers=effective_workers,
         initializer=_skill_worker_init,
-        initargs=(seed, reward, genome_dict, to_spec_fn, control_step_freq),
+        initargs=(seed, reward, genome_dict, to_spec_fn, control_step_freq, brain_kind),
     ) as pool:
         gen = 0
         while gen < budget:

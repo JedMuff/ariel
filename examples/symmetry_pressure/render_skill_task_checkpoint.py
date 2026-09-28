@@ -27,18 +27,13 @@ from shared import (
     CONTROL_STEP_FREQ,
     CTRL_ALPHA,
     HEIGHT_PENALTY_THRESHOLD,
-    HINGE_CONTACT_LIMIT,
-    HINGE_GLITCH_FITNESS,
     JERK_PENALTY_WEIGHT,
     JERK_THRESHOLD,
     SETTLE_DURATION,
     FORWARD_AXIS,
-    Network,
     build_loco_world_for_body,
-    fill_parameters,
-    floor_id,
     genome_to_spec,
-    rotor_geom_ids,
+    make_brain_for_model,
     signed_vertical_yaw_delta,
 )
 
@@ -80,19 +75,15 @@ def render_skill_episode(
     render_width: int = 640,
     to_spec_fn=genome_to_spec,
     control_step_freq: int = CONTROL_STEP_FREQ,
+    brain_kind: str = "ann",
 ) -> dict:
     model, data = build_loco_world_for_body(genome, to_spec_fn=to_spec_fn)
     from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
 
-    input_dim = len(get_robot_state(data))
-    output_dim = model.nu
-    network = Network(input_size=input_dim, output_size=output_dim)
-    fill_parameters(network, weights.astype(np.float32))
+    brain = make_brain_for_model(brain_kind, model, data, weights.astype(np.float32))
 
     renderer = mujoco.Renderer(model, height=render_height, width=render_width)
     core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
-    rotor_ids = rotor_geom_ids(model)
-    floor = floor_id(model)
     frame_every = max(1, round(1.0 / (model.opt.timestep * render_fps)))
 
     mujoco.mj_resetData(model, data)
@@ -125,8 +116,6 @@ def render_skill_episode(
     # across every trained skill (e.g. 5 directions for multidirection, 3 for
     # turn_avg), not this one episode's fitness, so it must not be displayed
     # as if it were.
-    c_hinge = 0
-    prev_contacts: set[int] = set()
     prev_ctrl: np.ndarray | None = None
     jerk_sum = 0.0
     ctrl_step = 0
@@ -134,7 +123,7 @@ def render_skill_episode(
     while data.time < episode_end:
         if step % control_step_freq == 0:
             state = get_robot_state(data).astype(np.float32)
-            raw_action = network.forward(model, data, state)
+            raw_action = brain.act(data, state)
             action = np.clip(
                 action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
                 -math.pi / 2, math.pi / 2,
@@ -146,17 +135,6 @@ def render_skill_episode(
 
         data.ctrl[:] = action
         mujoco.mj_step(model, data)
-
-        curr_contacts: set[int] = set()
-        for k in range(data.ncon):
-            c = data.contact[k]
-            g1, g2 = int(c.geom1), int(c.geom2)
-            if g1 == floor and g2 in rotor_ids:
-                curr_contacts.add(g2)
-            elif g2 == floor and g1 in rotor_ids:
-                curr_contacts.add(g1)
-        c_hinge += len(curr_contacts - prev_contacts)
-        prev_contacts = curr_contacts
 
         if kind == "rotate":
             r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
@@ -189,18 +167,15 @@ def render_skill_episode(
         console.log(f"  [red]No frames captured for skill={skill_name}[/red]")
         return {}
 
-    if c_hinge > HINGE_CONTACT_LIMIT:
-        skill_fitness = HINGE_GLITCH_FITNESS
+    mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
+    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+    height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+    if kind == "translate":
+        xy_now = np.array([data.qpos[0], data.qpos[1]])
+        raw = float(np.dot(xy_now - xy0, reward_axis))
     else:
-        mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
-        jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
-        height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-        if kind == "translate":
-            xy_now = np.array([data.qpos[0], data.qpos[1]])
-            raw = float(np.dot(xy_now - xy0, reward_axis))
-        else:
-            raw = accumulated
-        skill_fitness = -(raw - height_penalty - jerk_penalty)
+        raw = accumulated
+    skill_fitness = -(raw - height_penalty - jerk_penalty)
 
     frames: list[np.ndarray] = []
     for frame_bgr, metric_line, active_time in pending_frames:
@@ -239,7 +214,7 @@ def render_checkpoint(
     if task is None:
         raise ValueError(f"{ckpt_dir}/meta.json has no 'task' field")
 
-    to_spec_fn, control_step_freq = resolve_replay_config(ckpt_dir, max_modules=max_modules)
+    to_spec_fn, control_step_freq, brain_kind = resolve_replay_config(ckpt_dir, max_modules=max_modules)
 
     results = []
     for skill_name, reward_spec in skills_for_task(task):
@@ -253,6 +228,7 @@ def render_checkpoint(
             genome, weights, reward_spec, skill_name, meta, out_path,
             render_fps=render_fps, render_height=render_height, render_width=render_width,
             to_spec_fn=to_spec_fn, control_step_freq=control_step_freq,
+            brain_kind=brain_kind,
         )
         if res:
             results.append(res)

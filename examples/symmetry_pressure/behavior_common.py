@@ -38,19 +38,16 @@ from shared import (
     CTRL_ALPHA,
     FORWARD_AXIS,
     HEIGHT_PENALTY_THRESHOLD,
-    HINGE_CONTACT_LIMIT,
-    HINGE_GLITCH_FITNESS,
     JERK_PENALTY_WEIGHT,
     JERK_THRESHOLD,
     LOCO_DURATION,
     SETTLE_DURATION,
     TURN_DURATION,
-    Network,
     _rotate_2d,
     build_loco_world_for_body,
-    fill_parameters,
     floor_id,
     genome_to_spec,
+    make_brain_for_model,
     rotor_geom_ids,
     signed_vertical_yaw_delta,
 )
@@ -82,10 +79,10 @@ def skills_for_task(task: str) -> list[tuple[str, dict]]:
 
 
 def resolve_replay_config(ckpt_dir: Path, max_modules: Optional[int] = None) -> tuple:
-    """(to_spec_fn, control_step_freq) for replaying a checkpoint exactly as it
-    was trained. Checkpoints live at <run>/checkpoints/<ckpt>; run_config.json
-    sits in <run>. Runs predating --control-step-freq have no such key and
-    used the shared default. ``max_modules`` overrides run_config's value
+    """(to_spec_fn, control_step_freq, brain_kind) for replaying a checkpoint
+    exactly as it was trained. Checkpoints live at <run>/checkpoints/<ckpt>;
+    run_config.json sits in <run>. Runs predating --control-step-freq / --brain
+    have no such keys and used the shared default / the ANN brain. ``max_modules`` overrides run_config's value
     (itself defaulting to 25) for the cppn decoder.
     """
     meta_path = ckpt_dir / "meta.json"
@@ -101,7 +98,8 @@ def resolve_replay_config(ckpt_dir: Path, max_modules: Optional[int] = None) -> 
         else genome_to_spec
     )
     control_step_freq = run_config.get("control_step_freq", CONTROL_STEP_FREQ)
-    return to_spec_fn, control_step_freq
+    brain_kind = run_config.get("brain", "ann")
+    return to_spec_fn, control_step_freq, brain_kind
 
 
 # ── Recording replay ──────────────────────────────────────────────────────────
@@ -157,6 +155,7 @@ def replay_skill_episode(
     to_spec_fn=genome_to_spec,
     control_step_freq: int = CONTROL_STEP_FREQ,
     record_every_n: int = 100,
+    brain_kind: str = "ann",
 ) -> EpisodeTrace:
     """Replay one trained skill; see module docstring. The control/fitness
     logic must stay in lockstep with shared._skill_worker_eval.
@@ -165,8 +164,7 @@ def replay_skill_episode(
 
     t0 = time.perf_counter()
     model, data = build_loco_world_for_body(genome, to_spec_fn=to_spec_fn)
-    network = Network(input_size=len(get_robot_state(data)), output_size=model.nu)
-    fill_parameters(network, np.asarray(weights, dtype=np.float32))
+    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32))
 
     rotor_ids = rotor_geom_ids(model)
     floor = floor_id(model)
@@ -250,7 +248,7 @@ def replay_skill_episode(
     while data.time < episode_end:
         if step % control_step_freq == 0:
             state = get_robot_state(data).astype(np.float32)
-            raw_action = network.forward(model, data, state)
+            raw_action = brain.act(data, state)
             current_action = np.clip(
                 current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
                 -math.pi / 2, math.pi / 2,
@@ -305,7 +303,8 @@ def replay_skill_episode(
         raw_score = float(np.dot(xy_now - xy0, reward_axis))
     else:
         raw_score = accumulated
-    fitness = HINGE_GLITCH_FITNESS if c_hinge > HINGE_CONTACT_LIMIT else -(raw_score - height_penalty - jerk_penalty)
+    # c_hinge is a behavioural descriptor only; training no longer scores it.
+    fitness = -(raw_score - height_penalty - jerk_penalty)
 
     trace.replayed_fitness = fitness
     trace.raw_score = raw_score

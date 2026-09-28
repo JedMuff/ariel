@@ -15,7 +15,12 @@
 #   sbatch --array=0-3 slurm/run_symmetry_pressure_sweep.sh   # one rep, all 4 tasks x genome 0
 #
 # Usage:
-#   sbatch slurm/run_symmetry_pressure_sweep.sh
+#   sbatch slurm/run_symmetry_pressure_sweep.sh              # ANN brain (default)
+#   BRAIN=cpg sbatch slurm/run_symmetry_pressure_sweep.sh    # open-loop CPG brain
+#
+# Non-ANN sweeps write to a separate FINAL_DIR (…_sweep_<brain>) so run tags
+# and sweep_common.py's parsing are unchanged; point the analysis scripts at it
+# with ARIEL_SWEEP_ROOT=<dir>.
 
 #SBATCH --job-name=ariel-sympress-sweep
 #SBATCH --output=out_files/ariel-sympress-sweep-%A_%a.out
@@ -49,11 +54,15 @@ REP=$(( (ID / 12) % N_REPS ))
 TASK=${TASKS[$TASK_IDX]}
 GENOME_TYPE=${GENOME_TYPES[$GENOME_IDX]}
 SEED=$((42 + REP))
+BRAIN=${BRAIN:-ann}
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 TMP_DIR=/tmp/${USER}/ariel_sympress_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}
 FINAL_DIR=/scratch/jed/ariel_symmetry_pressure_sweep
+if [ "$BRAIN" != "ann" ]; then
+    FINAL_DIR=${FINAL_DIR}_${BRAIN}
+fi
 RUN_TAG=sympress_${TASK}_${GENOME_TYPE}_rep${REP}_${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -73,6 +82,7 @@ echo "Node:           $(hostname)"
 echo "Array job/task: $SLURM_ARRAY_JOB_ID / $SLURM_ARRAY_TASK_ID"
 echo "Task:           $TASK"
 echo "Genome type:    $GENOME_TYPE"
+echo "Brain:          $BRAIN"
 echo "Rep:            $REP"
 echo "Seed:           $SEED"
 echo "CPUs:           $SLURM_CPUS_PER_TASK"
@@ -115,6 +125,7 @@ srun bash -c "
             --max-modules 25 --max-depth 25 \
             --genome-type $GENOME_TYPE \
             --seed $SEED \
+            --brain $BRAIN \
             --no-video \
             --time-limit 259200
     else
@@ -128,6 +139,7 @@ srun bash -c "
             --max-modules 25 --max-depth 25 \
             --genome-type $GENOME_TYPE \
             --seed $SEED \
+            --brain $BRAIN \
             --time-limit 259200
     fi
 "

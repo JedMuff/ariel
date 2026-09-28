@@ -161,10 +161,11 @@ def _replay_worker(job: tuple) -> tuple[int, int, str, EpisodeTrace | None, dict
     try:
         genome = json.loads((ckpt / "best_genome.json").read_text())
         weights = np.load(ckpt / f"{skill}_weights.npy")
-        to_spec_fn, stride = resolve_replay_config(ckpt, max_modules=max_modules)
+        to_spec_fn, stride, brain_kind = resolve_replay_config(ckpt, max_modules=max_modules)
         trace = replay_skill_episode(
             genome, weights, skill, reward_spec,
             to_spec_fn=to_spec_fn, control_step_freq=stride, record_every_n=record_every_n,
+            brain_kind=brain_kind,
         )
         desc = trace_descriptors(trace)
         drop_full_rate(trace)

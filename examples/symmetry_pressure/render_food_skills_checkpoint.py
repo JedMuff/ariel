@@ -30,11 +30,10 @@ from rich.console import Console
 import genome_adapter
 from shared import (
     CONTROL_STEP_FREQ,
-    Network,
     analyze_sections,
-    fill_parameters,
     genome_to_spec,
     isolate_green,
+    make_brain_for_model,
     signed_vertical_yaw_delta,
 )
 
@@ -49,7 +48,6 @@ GATE_HALF_HEIGHT       = 0.15
 # the loco skill's reward — and this overlay's displacement readout — are
 # both measured along that axis, not world +X.
 FORWARD_AXIS           = np.array([0.0, -1.0])
-HIDDEN_SIZES           = [32]
 # CONTROL_STEP_FREQ is imported from shared.py (not hardcoded here) because it
 # was previously a stale local copy (100) left behind by the "centralize
 # skill-training kernel, raise control frequency" change that set the real
@@ -191,6 +189,14 @@ def _reconstruct_food_seed(ckpt_dir: Path, gen: int) -> Optional[int]:
     return base_seed + 1000 * gen + idx + 3
 
 
+def _brain_kind(ckpt_dir: Path) -> str:
+    """Brain the checkpoint's skills were trained with; runs predating --brain used the ANN."""
+    run_config_path = ckpt_dir.parent.parent / "run_config.json"
+    if not run_config_path.exists():
+        return "ann"
+    return json.loads(run_config_path.read_text()).get("brain", "ann")
+
+
 def render_checkpoint(
     ckpt_dir: Path,
     out_path: Path,
@@ -224,15 +230,11 @@ def render_checkpoint(
         else genome_to_spec
     )
     model, data, target_mocap_id, cam_name = build_food_world(genome, reach_radius, to_spec_fn=to_spec_fn)
-    input_dim = model.nq + model.nv  # placeholder overwritten below
     from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
-    input_dim = len(get_robot_state(data))
-    output_dim = model.nu
+    brain_kind = _brain_kind(ckpt_dir)
 
     def _load(w):
-        net = Network(input_size=input_dim, output_size=output_dim, hidden_size=HIDDEN_SIZES[0])
-        fill_parameters(net, w.astype(np.float32))
-        return net
+        return make_brain_for_model(brain_kind, model, data, w.astype(np.float32))
 
     loco_net = _load(loco_w)
     left_net = _load(left_w)
@@ -307,7 +309,7 @@ def render_checkpoint(
 
             state = get_robot_state(data).astype(np.float32)
             net = {1: loco_net, 2: left_net, 3: right_net}[skill]
-            raw_action = net.forward(model, data, state)
+            raw_action = net.act(data, state)
             action = np.clip(action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
                               -math.pi / 2, math.pi / 2)
 
@@ -415,10 +417,7 @@ def render_skill_only(
     model = world.spec.compile()
     data = mujoco.MjData(model)
 
-    input_dim = len(get_robot_state(data))
-    output_dim = model.nu
-    net = Network(input_size=input_dim, output_size=output_dim, hidden_size=HIDDEN_SIZES[0])
-    fill_parameters(net, weights.astype(np.float32))
+    net = make_brain_for_model(_brain_kind(ckpt_dir), model, data, weights.astype(np.float32))
 
     renderer = mujoco.Renderer(model, height=render_height, width=render_width)
     core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
@@ -446,7 +445,7 @@ def render_skill_only(
     while data.time < episode_end:
         if step % CONTROL_STEP_FREQ == 0:
             state = get_robot_state(data).astype(np.float32)
-            raw_action = net.forward(model, data, state)
+            raw_action = net.act(data, state)
             action = np.clip(action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
                               -math.pi / 2, math.pi / 2)
 
