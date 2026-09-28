@@ -19,13 +19,16 @@
 # on the stride; only network updates get rarer, so these are upper bounds.
 # Genomes are ordered slowest-first so the cppn jobs start early.
 #
+# TEMPORARY: cppn is excluded (2 genomes -> 18 jobs). To restore it, put cppn
+# back at the front of GENOME_TYPES and set --array=0-26.
+#
 # Brain: BRAIN=cpg (default, open-loop CPG) or BRAIN=ann (the original MLP).
 # Results go to FINAL_DIR=/scratch/jed/ariel_control_stride_sweep_<brain>, so
 # run tags are unchanged and the ANN sweep's data isn't mixed in; point the
 # analysis scripts at it with --stride-root.
 #
 # Dry-run a few indices first, e.g.:
-#   sbatch --array=0-2 slurm/run_control_stride_sweep.sh   # cppn, all 3 strides, rep 0
+#   sbatch --array=0-2 slurm/run_control_stride_sweep.sh   # first genome, all 3 strides, rep 0
 #
 # Usage:
 #   sbatch slurm/run_control_stride_sweep.sh               # CPG brain
@@ -37,7 +40,7 @@
 #SBATCH --time=100:00:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=16G
-#SBATCH --array=0-26
+#SBATCH --array=0-17
 
 set -euo pipefail
 
@@ -51,12 +54,13 @@ SCRIPTS_DIR=$REPO/examples/symmetry_pressure
 
 N_REPS=3
 STRIDES=(20 50 100)
-GENOME_TYPES=(cppn tree_symmetric tree)
+GENOME_TYPES=(tree_symmetric tree)   # cppn temporarily excluded (see header)
+N_GENOMES=${#GENOME_TYPES[@]}
 
 ID=$SLURM_ARRAY_TASK_ID
 STRIDE_IDX=$(( ID % 3 ))
-GENOME_IDX=$(( (ID / 3) % 3 ))
-REP=$(( (ID / 9) % N_REPS ))
+GENOME_IDX=$(( (ID / 3) % N_GENOMES ))
+REP=$(( (ID / (3 * N_GENOMES)) % N_REPS ))
 
 STRIDE=${STRIDES[$STRIDE_IDX]}
 GENOME_TYPE=${GENOME_TYPES[$GENOME_IDX]}
