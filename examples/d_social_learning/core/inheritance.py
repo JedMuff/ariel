@@ -23,6 +23,7 @@ def darwinian(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     return np.random.uniform(-1.0, 1.0, size=n_params).astype(np.float64), []
 
@@ -30,6 +31,7 @@ def lamarckian(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     parent_id = pop_state[idx].get("parent_id")
     if parent_id is not None:
@@ -45,6 +47,7 @@ def random_scheme(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     candidates = [i for i, s in enumerate(pop_state) if s["theta"] is not None]
     if not candidates:
@@ -59,11 +62,12 @@ def random_many(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     candidates = [i for i, s in enumerate(pop_state) if s["theta"] is not None]
     if not candidates:
-        return darwinian(pop_state, idx, n_params)
-    k = min(K_INHERIT, len(candidates))
+        return darwinian(pop_state, idx, n_params, k_inherit)
+    k = min(k_inherit, len(candidates))
     chosen = random.sample(candidates, k)
     thetas = np.array([pop_state[i]["theta"] for i in chosen], dtype=np.float64)
     donor_ids = [pop_state[i].get("db_id") for i in chosen if pop_state[i].get("db_id") is not None]
@@ -74,10 +78,11 @@ def best(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     evaluated = [(i, s) for i, s in enumerate(pop_state) if s["theta"] is not None and s["distance"] is not None]
     if not evaluated:
-        return darwinian(pop_state, idx, n_params)
+        return darwinian(pop_state, idx, n_params, k_inherit)
     best_i, best_s = max(evaluated, key=lambda t: t[1]["distance"])
     db_id = best_s.get("db_id")
     donor_ids = [db_id] if db_id is not None else []
@@ -88,11 +93,12 @@ def best_many(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     evaluated = [(i, s) for i, s in enumerate(pop_state) if s["theta"] is not None and s["distance"] is not None]
     if not evaluated:
-        return darwinian(pop_state, idx, n_params)
-    top = sorted(evaluated, key=lambda t: t[1]["distance"], reverse=True)[:K_INHERIT]
+        return darwinian(pop_state, idx, n_params, k_inherit)
+    top = sorted(evaluated, key=lambda t: t[1]["distance"], reverse=True)[:k_inherit]
     thetas = np.array([s["theta"] for _, s in top], dtype=np.float64)
     donor_ids = [s.get("db_id") for _, s in top if s.get("db_id") is not None]
     return thetas.mean(axis=0), donor_ids
@@ -102,6 +108,7 @@ def similar_DESCR(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     """Donor = nearest neighbour by Euclidean distance in morphological-descriptor space."""
     target_desc = np.asarray(pop_state[idx]["descriptor"], dtype=np.float64)
@@ -110,7 +117,7 @@ def similar_DESCR(
         if i != idx and s["theta"] is not None
     ]
     if not candidates:
-        return darwinian(pop_state, idx, n_params)
+        return darwinian(pop_state, idx, n_params, k_inherit)
     nearest_i, nearest_s = min(
         candidates,
         key=lambda t: np.linalg.norm(np.asarray(t[1]["descriptor"], dtype=np.float64) - target_desc),
@@ -124,6 +131,7 @@ def similar_many_DESCR(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     """Like ``similar_DESCR``, averaged over the K_INHERIT nearest donors."""
     target_desc = np.asarray(pop_state[idx]["descriptor"], dtype=np.float64)
@@ -132,9 +140,9 @@ def similar_many_DESCR(
         if i != idx and s["theta"] is not None
     ]
     if not candidates:
-        return darwinian(pop_state, idx, n_params)
+        return darwinian(pop_state, idx, n_params, k_inherit)
     candidates.sort(key=lambda t: np.linalg.norm(np.asarray(t[1]["descriptor"], dtype=np.float64) - target_desc))
-    top = candidates[:K_INHERIT]
+    top = candidates[:k_inherit]
     thetas = np.array([s["theta"] for _, s in top], dtype=np.float64)
     donor_ids = [s.get("db_id") for _, s in top if s.get("db_id") is not None]
     return thetas.mean(axis=0), donor_ids
@@ -144,6 +152,7 @@ def similar_STRUCT(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     """Donor = nearest neighbour by ``similarity_function`` (tree edit distance
     for ariel, aligned Hamming distance on the voxel grid for evogym) applied
@@ -157,7 +166,7 @@ def similar_STRUCT(
         if i != idx and s["theta"] is not None
     ]
     if not candidates:
-        return darwinian(pop_state, idx, n_params)
+        return darwinian(pop_state, idx, n_params, k_inherit)
     nearest_i, nearest_s = min(
         candidates,
         key=lambda t: similarity_function(t[1]["morphology"], target_morphology),
@@ -171,6 +180,7 @@ def similar_many_STRUCT(
     pop_state: list[dict],
     idx: int,
     n_params: int,
+    k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     """Like ``similar_STRUCT``, averaged over the K_INHERIT nearest donors."""
     similarity_function = pop_state[idx]['similarity_function']
@@ -180,10 +190,10 @@ def similar_many_STRUCT(
         if i != idx and s["theta"] is not None
     ]
     if not candidates:
-        return darwinian(pop_state, idx, n_params)
+        return darwinian(pop_state, idx, n_params, k_inherit)
 
     candidates.sort(key=lambda t: similarity_function(t[1]["morphology"], target_morphology))
-    top = candidates[:K_INHERIT]
+    top = candidates[:k_inherit]
     thetas = np.array([s["theta"] for _, s in top], dtype=np.float64)
     donor_ids = [s.get("db_id") for _, s in top if s.get("db_id") is not None]
     return thetas.mean(axis=0), donor_ids

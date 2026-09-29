@@ -193,6 +193,7 @@ def build_ops(
     eval_timeout: float,
     sigma: float,
     hidden: int,
+    k_inherit: int = 3,
     comma_selection: bool = False,
     selection_method: str = "elitist",
     tournament_size: int = 4,
@@ -249,7 +250,7 @@ def build_ops(
         for i, ind in enumerate(all_alive):
             if not ind.requires_eval:
                 continue
-            init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params)
+            init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params, k_inherit)
             worker_args.append((
                 ind.genotype_["morph"],
                 init_mean_arr.tolist(),
@@ -393,6 +394,7 @@ def main() -> None:
     parser.add_argument("--inner-pop", type=int, default=16)
     parser.add_argument("--sigma", type=float, default=0.5, help="CMA-ES initial step size")
     parser.add_argument("--hidden", type=int, default=32, help="DistributedMLP hidden width")
+    parser.add_argument("--k-inherit", type=int, default=3, help="Number of neighbors for inheritance schemes")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument(
         "--eval-timeout", type=float, default=1800.0,
@@ -451,7 +453,7 @@ def main() -> None:
         sel_suffix = ("_" + "_".join(sel_bits)) if sel_bits else ""
         novelty_suffix = "_novSTRUCT" if args.novelty_metric == "STRUCT" else "_novDESCR"
         out_dir = Path(
-            f"__data__/social/{args.platform}/{args.scheme}/x{x_str}/rep_{args.rep}{sel_suffix}{novelty_suffix}"
+            f"__data__/social/{args.platform}/{args.scheme}/x{x_str}/k{args.k_inherit}/rep_{args.rep}{sel_suffix}{novelty_suffix}"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -473,6 +475,7 @@ def main() -> None:
         eval_timeout=args.eval_timeout,
         sigma=args.sigma,
         hidden=args.hidden,
+        k_inherit=args.k_inherit,
         comma_selection=args.comma_selection,
         selection_method=args.selection,
         tournament_size=args.tournament_size,
