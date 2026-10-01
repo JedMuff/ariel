@@ -17,7 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
-BRAIN_COLORS = {"ann": "#1f77b4", "sine": "#ff7f0e", "revolve_cpg": "#2ca02c", "matsuoka": "#d62728"}
+from plot_zoo_fitness_curves import BRAIN_COLORS  # noqa: E402
 
 
 def main() -> None:

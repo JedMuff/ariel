@@ -47,7 +47,8 @@ from ariel.simulation.environments import SimpleFlatWorld
 CORE_BODY = "robot1_core"
 
 # CMA-ES x0 per brain (see module docstring for why the ANN differs).
-DEFAULT_INITIAL_MEAN = {"ann": 0.0, "sine": 0.5, "revolve_cpg": 0.5, "matsuoka": 0.5}
+DEFAULT_INITIAL_MEAN = {"ann": 0.0, "sine": 0.5, "revolve_cpg": 0.5, "matsuoka": 0.5,
+                        "square": 0.5, "square_sync": 0.5}
 
 
 # ── World / episode ───────────────────────────────────────────────────────────
@@ -66,9 +67,9 @@ def build_world(body: str) -> tuple[mujoco.MjModel, mujoco.MjData]:
     return model, data
 
 
-def make_brain_for(kind: str, model: mujoco.MjModel, data: mujoco.MjData) -> Any:
+def make_brain_for(kind: str, model: mujoco.MjModel, data: mujoco.MjData, duration: float = 15.0) -> Any:
     mujoco.mj_resetData(model, data)
-    return make_brain(kind, len(get_state_from_data(data)), model.nu, model.opt.timestep)
+    return make_brain(kind, len(get_state_from_data(data)), model.nu, model.opt.timestep, duration)
 
 
 def run_episode(
@@ -103,7 +104,7 @@ def _worker_init(body: str, brain_kind: str, duration: float, control_freq: floa
     torch.set_num_threads(1)
     model, data = build_world(body)
     _worker_ctx = {
-        "model": model, "data": data, "brain": make_brain_for(brain_kind, model, data),
+        "model": model, "data": data, "brain": make_brain_for(brain_kind, model, data, duration),
         "duration": duration, "control_freq": control_freq,
     }
 
@@ -139,7 +140,7 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     model, data = build_world(args.body)
-    brain = make_brain_for(args.brain, model, data)
+    brain = make_brain_for(args.brain, model, data, args.duration)
     n_params = brain.num_params
 
     config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}

@@ -13,6 +13,8 @@ Brains:
   sine         open-loop sine CPG (shared.CpgBrain), the `cpg` of run_control_stride_sweep.sh
   revolve_cpg  kgd's fully connected RevolveCPG (apets-ariel common/controllers/cpg.py)
   matsuoka     Matsuoka oscillator network (morphlib@hyperneat matsuoka_brain/), bugs fixed
+  square       eased square wave per hinge (square_wave.py), 12 genes per hinge
+  square_sync  as square, but one frequency ModulatedValue shared by every hinge
 """
 
 from __future__ import annotations
@@ -26,8 +28,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "symmetry_pressure"))
 from shared import AnnBrain, CpgBrain  # noqa: E402
+from square_wave import ModulatedValue, PatternState, ServoPattern, step  # noqa: E402
 
-BRAIN_KINDS: tuple[str, ...] = ("ann", "sine", "revolve_cpg", "matsuoka")
+BRAIN_KINDS: tuple[str, ...] = ("ann", "sine", "revolve_cpg", "matsuoka", "square", "square_sync")
 
 HALF_PI = math.pi / 2
 
@@ -203,9 +206,113 @@ class Matsuoka:
         return self._output()
 
 
+# Gene ranges for the square-wave brains (each gene squashed from R). The
+# ranges are centred so that CMA-ES's x0 = 0.5 starts near what the ANN
+# champions converged to on every body: saturated bang-bang outputs at
+# 0.7-1 Hz. A constant square wave fitted to those outputs and replayed
+# open-loop reaches 82-100% of the ANN's speed. At x0 this gives f = 1.3 Hz,
+# angles -68/+68 deg, a 0.16 s transition and wobble amplitudes about 8% of max.
+# Phase is scaled down because the gait is far more sensitive to it than to any
+# other gene: around the fitted gecko gait, gene noise of sd 0.05 on the phases
+# alone (18 deg at scale 1) more than halves the speed, while every other group
+# tolerates sd 0.2. At scale 1 CMA-ES's shared sigma is dominated by the
+# phases; at 0.1 square_sync reached the ANN's 3k-eval gecko speed (pilot).
+SQUARE_F_RANGE = (0.2, 2.0)             # Hz, frequency start/end
+SQUARE_F_WOBBLE_AMP = 0.5               # Hz
+SQUARE_DUTY_RANGE = (0.02, 0.98)        # duty start/end
+SQUARE_DUTY_WOBBLE_AMP = 0.3
+SQUARE_WOBBLE_RATE = 1.0                # Hz, both wobbles
+SQUARE_WOBBLE_BIAS = 3.0                # wobble amp = max * sigmoid(g - bias): near off at x0
+SQUARE_MAX_ANGLE = 90.0                 # deg, high = 90 tanh(gain g), low = -90 tanh(gain g)
+SQUARE_ANGLE_GAIN = 2.0
+SQUARE_MAX_TRANSITION = 0.25            # s
+SQUARE_PHASE_SCALE = 0.1                # phase_offset = 0.1 g mod 1 (cycles), see above
+
+
+def _sigmoid_range(g: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    return lo + (hi - lo) / (1 + np.exp(-g))
+
+
+def _square_rhythm(g: np.ndarray, value_range: tuple[float, float], wobble_amp: float) -> ModulatedValue:
+    """4 genes (start, end, wobble amp, wobble rate), each a scalar or a per-hinge array."""
+    return ModulatedValue(
+        start=_sigmoid_range(g[0], *value_range), end=_sigmoid_range(g[1], *value_range),
+        wobble_amp=_sigmoid_range(g[2] - SQUARE_WOBBLE_BIAS, 0.0, wobble_amp),
+        wobble_rate=_sigmoid_range(g[3], 0.0, SQUARE_WOBBLE_RATE),
+    )
+
+
+class _ZooSquareBase:
+    """Eased square wave per hinge, driven by square_wave.step (freq_duty mode).
+
+    The timeline is the episode (duration s, hold). Every gene is squashed into
+    range (SQUARE_* constants); phase_offset is 0.1 x gene mod 1, and low_angle's
+    gene is mirrored so equal genes give a full swing rather than no motion. The
+    phase is integrated over the elapsed control period at each act() call. No
+    slew limit.
+    """
+
+    def __init__(self, n_inputs: int, n_hinges: int, duration: float = 15.0) -> None:  # noqa: ARG002
+        self.n = n_hinges
+        self.duration = duration
+        self.set_params(np.zeros(self.num_params))
+
+    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, np.ndarray]:
+        """Return (frequency, per-hinge genes (8, n): duty x4, low, high, phase, transition)."""
+        raise NotImplementedError
+
+    def set_params(self, vec: np.ndarray) -> None:
+        g = np.asarray(vec, dtype=np.float64)
+        if len(g) != self.num_params:
+            raise IndexError("Parameter vector length mismatch")
+        freq, h = self._decode(g)
+        self.pattern = ServoPattern(
+            servo_id=tuple(range(self.n)), mode="freq_duty",
+            a=freq, b=_square_rhythm(h[0:4], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
+            low_angle=-SQUARE_MAX_ANGLE * np.tanh(SQUARE_ANGLE_GAIN * h[4]),
+            high_angle=SQUARE_MAX_ANGLE * np.tanh(SQUARE_ANGLE_GAIN * h[5]),
+            phase_offset=np.mod(SQUARE_PHASE_SCALE * h[6], 1.0),
+            transition_time=_sigmoid_range(h[7], 0.0, SQUARE_MAX_TRANSITION),
+        )
+        self.reset()
+
+    def reset(self) -> None:
+        self._state = PatternState.initial(self.pattern)
+        self._time = 0.0
+
+    def act(self, t: float, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
+        self._state, angle = step(self.pattern, self._state, t, t - self._time, duration=self.duration)
+        self._time = t
+        return np.radians(angle)
+
+
+class ZooSquare(_ZooSquareBase):
+    """Full spec: 12 genes per hinge in square_wave.VECTOR_FIELDS order (own frequency per hinge)."""
+
+    @property
+    def num_params(self) -> int:
+        return 12 * self.n
+
+    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, np.ndarray]:
+        g = g.reshape(self.n, 12).T
+        return _square_rhythm(g[0:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP), g[4:12]
+
+
+class ZooSquareSync(_ZooSquareBase):
+    """One frequency ModulatedValue shared by every hinge (4 genes), then 8 genes per
+    hinge (duty x4, low, high, phase_offset, transition), so phase relations stay fixed."""
+
+    @property
+    def num_params(self) -> int:
+        return 4 + 8 * self.n
+
+    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, np.ndarray]:
+        return _square_rhythm(g[:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP), g[4:].reshape(self.n, 8).T
+
+
 def make_brain(
-    kind: str, n_inputs: int, n_hinges: int, physics_dt: float = 0.002,
-) -> ZooAnn | ZooSine | RevolveCpg | Matsuoka:
+    kind: str, n_inputs: int, n_hinges: int, physics_dt: float = 0.002, duration: float = 15.0,
+) -> ZooAnn | ZooSine | RevolveCpg | Matsuoka | ZooSquare | ZooSquareSync:
     if kind == "ann":
         return ZooAnn(n_inputs, n_hinges)
     if kind == "sine":
@@ -214,4 +321,8 @@ def make_brain(
         return RevolveCpg(n_inputs, n_hinges)
     if kind == "matsuoka":
         return Matsuoka(n_inputs, n_hinges, physics_dt)
+    if kind == "square":
+        return ZooSquare(n_inputs, n_hinges, duration)
+    if kind == "square_sync":
+        return ZooSquareSync(n_inputs, n_hinges, duration)
     raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")

@@ -30,12 +30,12 @@ def _tracking_camera(core_pos: np.ndarray) -> mujoco.MjvCamera:
     return cam
 
 
-def render_run(run_dir: Path, fps: int, width: int, height: int) -> Path:
+def render_run(run_dir: Path, fps: int, width: int, height: int, out_path: Path | None = None) -> Path:
     cfg = json.loads((run_dir / "config.json").read_text())
     params = np.load(run_dir / "champion.npy")
 
     model, data = build_world(cfg["body"])
-    brain = make_brain_for(cfg["brain"], model, data)
+    brain = make_brain_for(cfg["brain"], model, data, cfg["duration"])
     brain.set_params(params)
 
     control_freq, duration = cfg["control_freq"], cfg["duration"]
@@ -49,7 +49,7 @@ def render_run(run_dir: Path, fps: int, width: int, height: int) -> Path:
     brain.reset()
     x0 = float(data.xpos[core_id, 0])
 
-    out_path = run_dir / "champion.mp4"
+    out_path = out_path or run_dir / "champion.mp4"
     writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
     with mujoco.Renderer(model, height=height, width=width) as renderer:
         for step in range(n_steps):

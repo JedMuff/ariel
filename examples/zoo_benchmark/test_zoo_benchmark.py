@@ -32,6 +32,8 @@ def test_num_params(n):
         "sine": 3 * n + 1,
         "revolve_cpg": n + n * (n - 1) // 2,
         "matsuoka": 5 * n + n * (n - 1),
+        "square": 12 * n,
+        "square_sync": 8 * n + 4,
     }
     for kind, count in expected.items():
         assert make_brain(kind, 3 + n, n).num_params == count

@@ -1,0 +1,27 @@
+{
+  "duration": 15.0,
+  "end_behavior": "hold",
+  "update_rate_hz": 50,
+  "patterns": [
+    {
+      "servo_id": "robot1_C-LH-servo",
+      "mode": "freq_duty",
+      "a": {"start": 1.0, "end": 2.0, "wobble_amp": 0.0, "wobble_rate": 0.0},
+      "b": {"start": 0.5, "end": 0.5, "wobble_amp": 0.0, "wobble_rate": 0.0},
+      "low_angle": -45.0,
+      "high_angle": 45.0,
+      "phase_offset": 0.0,
+      "transition_time": 0.1
+    },
+    {
+      "servo_id": "robot1_C-RH-servo",
+      "mode": "freq_duty",
+      "a": {"start": 1.0, "end": 2.0, "wobble_amp": 0.0, "wobble_rate": 0.0},
+      "b": {"start": 0.5, "end": 0.5, "wobble_amp": 0.0, "wobble_rate": 0.0},
+      "low_angle": -45.0,
+      "high_angle": 45.0,
+      "phase_offset": 0.5,
+      "transition_time": 0.1
+    }
+  ]
+}
