@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Zoo brain benchmark, square-wave brain only: 23 canonical bodies x square_sync
-# x N_REPS repetitions. Same protocol and output dir as run_zoo_benchmark.sh, so
+# Zoo brain benchmark, one square-wave brain: 23 canonical bodies x BRAIN x
+# N_REPS repetitions. Same protocol and output dir as run_zoo_benchmark.sh, so
 # the runs aggregate and plot alongside the ann/sine/revolve_cpg/matsuoka ones.
 # Each task optimises one brain on one fixed body with CMA-ES (no body
 # evolution), using kgd's apets-ariel zoo protocol so results are comparable
@@ -16,9 +16,12 @@
 #     brain except the ANN, which starts at x0=0 (at 0.5 its outputs all
 #     saturate and fitness is flat; see DEFAULT_INITIAL_MEAN in zoo_benchmark.py)
 #
-# Brain (examples/zoo_benchmark/brains.py, engine in square_wave.py):
-#   square_sync  eased square wave per hinge, one frequency shared by all hinges
-#                (8 genes/hinge + 4)
+# Brain, chosen with BRAIN=... (examples/zoo_benchmark/brains.py, engine in
+# square_wave.py):
+#   bang_bang    (default) instant switches between -90 and +90 deg, one
+#                frequency shared by all hinges (5 genes/hinge + 4)
+#   square_sync  eased square wave with evolved angles, one shared frequency
+#                (8 genes/hinge + 4); already run as job 45219
 # The full-spec `square` brain (own frequency per hinge) is left out: in a gecko
 # pilot (3 seeds, 10k evals) it reached 0.14 m/s against square_sync's 0.47.
 #
@@ -33,7 +36,8 @@
 #   sbatch --array=0-3 slurm/run_zoo_square_benchmark.sh   # 4 bodies, rep 0
 #
 # Usage:
-#   sbatch slurm/run_zoo_square_benchmark.sh
+#   sbatch slurm/run_zoo_square_benchmark.sh                     # bang_bang
+#   BRAIN=square_sync sbatch slurm/run_zoo_square_benchmark.sh
 #   INITIAL_MEAN=0 sbatch slurm/run_zoo_square_benchmark.sh   # force one CMA-ES x0 for all brains
 #
 # Aggregate afterwards:
@@ -59,7 +63,7 @@ N_REPS=10
 BODIES=(ant babya babyb blokky garrix gecko insect linkin longleg park penguin
         pentapod queen salamander snake spider spider45 squarish stingray
         tinlicker turtle ww zappa)
-BRAINS=(square_sync)
+BRAINS=("${BRAIN:-bang_bang}")
 N_BODIES=${#BODIES[@]}
 N_BRAINS=${#BRAINS[@]}
 

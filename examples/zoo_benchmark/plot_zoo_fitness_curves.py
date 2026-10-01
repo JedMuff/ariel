@@ -27,9 +27,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-BRAINS = ["ann", "matsuoka", "revolve_cpg", "sine", "square", "square_sync"]
+BRAINS = ["ann", "matsuoka", "revolve_cpg", "sine", "square", "square_sync", "bang_bang"]
 BRAIN_COLORS = {"ann": "#2a78d6", "matsuoka": "#eb6834", "revolve_cpg": "#1baf7a", "sine": "#eda100",
-                "square": "#4a3aa7", "square_sync": "#e87ba4"}
+                "square": "#4a3aa7", "square_sync": "#e87ba4",
+                "bang_bang": "#008300"}
 INK, MUTED, GRID = "#1a1a19", "#6b6a63", "#e4e3dc"
 N_GRID = 201
 

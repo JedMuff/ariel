@@ -8,10 +8,10 @@ apets-ariel zoo protocol:
 - fitness = core x-speed
 
 `zoo_benchmark.py` has the details. `slurm/run_zoo_benchmark.sh` runs ann, sine,
-revolve_cpg and matsuoka. `slurm/run_zoo_square_benchmark.sh` runs
-`square_sync` into the same output directory. It leaves out `square`, which
-trained far slower in a gecko pilot. Aggregate and plot both
-sets together:
+revolve_cpg and matsuoka. `slurm/run_zoo_square_benchmark.sh` runs one
+square-wave brain (`bang_bang` by default, or `BRAIN=square_sync`) into the
+same output directory. It leaves out `square`, which trained far slower in a
+gecko pilot. Aggregate and plot all of them together:
 
 ```bash
 python aggregate_zoo_benchmark.py __data__/ariel_zoo_benchmark
@@ -115,13 +115,17 @@ The example drives gecko's two front hips (`robot1_C-LH-servo`,
 
 ### Benchmark brains
 
-Both brains use `freq_duty` mode, with the timeline set to the episode
+All three brains use `freq_duty` mode, with the timeline set to the episode
 (15 s, `hold`). The phase advances by the control period at each call.
 
 - **`square`**: the full 12 genes per hinge, so each hinge has its own frequency.
 - **`square_sync`**: one frequency ModulatedValue (4 genes) shared by all
   hinges, plus 8 genes per hinge. Sharing the frequency keeps the phase
   relationships fixed.
+- **`bang_bang`**: `square_sync` with the angles fixed at ±90° and
+  `transition_time` 0, so every hinge switches instantly between its limits,
+  as the ANN champions do. That leaves 5 genes per hinge: the duty-cycle
+  ModulatedValue and the phase offset.
 
 CMA-ES genes are unbounded and squashed into ranges by the `SQUARE_*` constants
 in `brains.py`. The ranges centre x0 = 0.5 near the ANN champions'

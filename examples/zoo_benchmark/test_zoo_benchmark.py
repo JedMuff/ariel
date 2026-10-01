@@ -34,6 +34,7 @@ def test_num_params(n):
         "matsuoka": 5 * n + n * (n - 1),
         "square": 12 * n,
         "square_sync": 8 * n + 4,
+        "bang_bang": 5 * n + 4,
     }
     for kind, count in expected.items():
         assert make_brain(kind, 3 + n, n).num_params == count
@@ -74,3 +75,12 @@ def test_zero_action_does_not_move():
             return np.zeros(model.nu)
 
     assert abs(run_episode(model, data, Zero(), 15, 20)) < 1e-3
+
+
+def test_bang_bang_is_bang_bang():
+    model, data = build_world("gecko")
+    brain = make_brain_for("bang_bang", model, data)
+    brain.set_params(np.random.default_rng(0).normal(0, 2, brain.num_params))
+    out = np.array([brain.act(k / 20, None) for k in range(300)])
+    assert set(np.unique(np.abs(out))) == {math.pi / 2}
+    assert np.all(out.std(axis=0) > 0)  # every hinge switches

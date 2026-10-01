@@ -48,7 +48,7 @@ CORE_BODY = "robot1_core"
 
 # CMA-ES x0 per brain (see module docstring for why the ANN differs).
 DEFAULT_INITIAL_MEAN = {"ann": 0.0, "sine": 0.5, "revolve_cpg": 0.5, "matsuoka": 0.5,
-                        "square": 0.5, "square_sync": 0.5}
+                        "square": 0.5, "square_sync": 0.5, "bang_bang": 0.5}
 
 
 # ── World / episode ───────────────────────────────────────────────────────────

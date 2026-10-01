@@ -15,6 +15,7 @@ Brains:
   matsuoka     Matsuoka oscillator network (morphlib@hyperneat matsuoka_brain/), bugs fixed
   square       eased square wave per hinge (square_wave.py), 12 genes per hinge
   square_sync  as square, but one frequency ModulatedValue shared by every hinge
+  bang_bang    as square_sync, but fixed +-90 deg and instant switches (5 genes per hinge)
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import itertools
 import math
 import sys
+from typing import Any
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "symmetry_pressu
 from shared import AnnBrain, CpgBrain  # noqa: E402
 from square_wave import ModulatedValue, PatternState, ServoPattern, step  # noqa: E402
 
-BRAIN_KINDS: tuple[str, ...] = ("ann", "sine", "revolve_cpg", "matsuoka", "square", "square_sync")
+BRAIN_KINDS: tuple[str, ...] = ("ann", "sine", "revolve_cpg", "matsuoka", "square", "square_sync", "bang_bang")
 
 HALF_PI = math.pi / 2
 
@@ -257,23 +259,26 @@ class _ZooSquareBase:
         self.duration = duration
         self.set_params(np.zeros(self.num_params))
 
-    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, np.ndarray]:
-        """Return (frequency, per-hinge genes (8, n): duty x4, low, high, phase, transition)."""
+    def _decode(self, g: np.ndarray) -> dict[str, Any]:
+        """Return the ServoPattern fields a, b, low_angle, high_angle, phase_offset, transition_time."""
         raise NotImplementedError
+
+    @staticmethod
+    def _hinge_fields(freq: ModulatedValue, h: np.ndarray) -> dict[str, Any]:
+        """Fields from a frequency and per-hinge genes (8, n): duty x4, low, high, phase, transition."""
+        return {
+            "a": freq, "b": _square_rhythm(h[0:4], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
+            "low_angle": -SQUARE_MAX_ANGLE * np.tanh(SQUARE_ANGLE_GAIN * h[4]),
+            "high_angle": SQUARE_MAX_ANGLE * np.tanh(SQUARE_ANGLE_GAIN * h[5]),
+            "phase_offset": np.mod(SQUARE_PHASE_SCALE * h[6], 1.0),
+            "transition_time": _sigmoid_range(h[7], 0.0, SQUARE_MAX_TRANSITION),
+        }
 
     def set_params(self, vec: np.ndarray) -> None:
         g = np.asarray(vec, dtype=np.float64)
         if len(g) != self.num_params:
             raise IndexError("Parameter vector length mismatch")
-        freq, h = self._decode(g)
-        self.pattern = ServoPattern(
-            servo_id=tuple(range(self.n)), mode="freq_duty",
-            a=freq, b=_square_rhythm(h[0:4], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
-            low_angle=-SQUARE_MAX_ANGLE * np.tanh(SQUARE_ANGLE_GAIN * h[4]),
-            high_angle=SQUARE_MAX_ANGLE * np.tanh(SQUARE_ANGLE_GAIN * h[5]),
-            phase_offset=np.mod(SQUARE_PHASE_SCALE * h[6], 1.0),
-            transition_time=_sigmoid_range(h[7], 0.0, SQUARE_MAX_TRANSITION),
-        )
+        self.pattern = ServoPattern(servo_id=tuple(range(self.n)), mode="freq_duty", **self._decode(g))
         self.reset()
 
     def reset(self) -> None:
@@ -293,9 +298,9 @@ class ZooSquare(_ZooSquareBase):
     def num_params(self) -> int:
         return 12 * self.n
 
-    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, np.ndarray]:
+    def _decode(self, g: np.ndarray) -> dict[str, Any]:
         g = g.reshape(self.n, 12).T
-        return _square_rhythm(g[0:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP), g[4:12]
+        return self._hinge_fields(_square_rhythm(g[0:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP), g[4:12])
 
 
 class ZooSquareSync(_ZooSquareBase):
@@ -306,13 +311,35 @@ class ZooSquareSync(_ZooSquareBase):
     def num_params(self) -> int:
         return 4 + 8 * self.n
 
-    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, np.ndarray]:
-        return _square_rhythm(g[:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP), g[4:].reshape(self.n, 8).T
+    def _decode(self, g: np.ndarray) -> dict[str, Any]:
+        freq = _square_rhythm(g[:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP)
+        return self._hinge_fields(freq, g[4:].reshape(self.n, 8).T)
+
+
+class ZooBangBang(_ZooSquareBase):
+    """square_sync restricted to bang-bang: every hinge switches instantly between
+    -90 and +90 deg (transition_time 0), as the ANN champions do. One shared
+    frequency ModulatedValue (4 genes), then 5 genes per hinge (duty x4, phase_offset)."""
+
+    @property
+    def num_params(self) -> int:
+        return 4 + 5 * self.n
+
+    def _decode(self, g: np.ndarray) -> dict[str, Any]:
+        h = g[4:].reshape(self.n, 5).T
+        return {
+            "a": _square_rhythm(g[:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP),
+            "b": _square_rhythm(h[0:4], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
+            "low_angle": np.full(self.n, -SQUARE_MAX_ANGLE),
+            "high_angle": np.full(self.n, SQUARE_MAX_ANGLE),
+            "phase_offset": np.mod(SQUARE_PHASE_SCALE * h[4], 1.0),
+            "transition_time": np.zeros(self.n),
+        }
 
 
 def make_brain(
     kind: str, n_inputs: int, n_hinges: int, physics_dt: float = 0.002, duration: float = 15.0,
-) -> ZooAnn | ZooSine | RevolveCpg | Matsuoka | ZooSquare | ZooSquareSync:
+) -> ZooAnn | ZooSine | RevolveCpg | Matsuoka | ZooSquare | ZooSquareSync | ZooBangBang:
     if kind == "ann":
         return ZooAnn(n_inputs, n_hinges)
     if kind == "sine":
@@ -325,4 +352,6 @@ def make_brain(
         return ZooSquare(n_inputs, n_hinges, duration)
     if kind == "square_sync":
         return ZooSquareSync(n_inputs, n_hinges, duration)
+    if kind == "bang_bang":
+        return ZooBangBang(n_inputs, n_hinges, duration)
     raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")
