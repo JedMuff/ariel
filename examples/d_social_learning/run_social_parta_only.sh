@@ -10,8 +10,13 @@
 # (out_files/social-parta-<jobid>_<taskid>.out). To continue a run manually,
 # grep that file for RUN_DIR= and pass it to experiment.py's --resume-dir.
 #
+# Each run is seeded from a stable hash of (scheme, x, k_inherit, rep); the
+# seed, args and git commit are saved to run_config.json in the run directory.
+#
 # Usage:
-#   sbatch examples/d_social_learning/run_social_parta_array.sh
+#   sbatch examples/d_social_learning/run_social_parta_only.sh
+#   # later, more reps (rep = IDX / 24, so 120-479 -> reps 5-19):
+#   sbatch --array=120-479 examples/d_social_learning/run_social_parta_only.sh
 #
 # 8 schemes x 3 x-values x 5 reps = 120 combos -> array indices 0-119.
 # Ordering matches run_social_submit.sh: rep outermost, then scheme, then x.

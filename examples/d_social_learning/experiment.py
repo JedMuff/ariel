@@ -5,24 +5,35 @@ Usage:
         --scheme lamarckian --x 0.5 --rep 0 [--gens 100] [--pop 20] [--lam 100] \
         [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N] \
         [--comma-selection] [--selection elitist|tournament] [--tournament-size 4] \
-        [--novelty-metric DESCR|STRUCT]
+        [--novelty-metric DESCR|STRUCT] [--k-inherit 3] [--seed N]
 
 Each invocation without --resume-dir creates a fresh, timestamped output
-directory (__data__/social/ariel/{scheme}/x{x}/rep_{rep}_{timestamp}) so
-re-running the same scheme/x/rep never clobbers a previous run, and prints
-that directory as `RUN_DIR=<path>` on its own stdout line. To continue a run,
-pass that exact directory back in:
+directory (__data__/social/{platform}/{scheme}/x{x}/k{k}/rep_{rep}[_sel]_nov{M}_{timestamp})
+so re-running the same scheme/x/k/rep never clobbers a previous run, and prints
+that directory as `RUN_DIR=<path>` (and the seed as `SEED=<n>`) on their own
+stdout lines.
+
+Seeding: the run seed is --seed, or a stable hash of (scheme, x, k_inherit,
+rep). It seeds `random` and `np.random` in the main process; each evaluated
+individual also gets its own seed drawn from that stream (stored in its tags
+as `eval_seed`) which seeds the worker that runs its inner CMA-ES. The seed,
+args and git commit are saved to run_config.json in the run directory.
+
+To continue a run, pass that exact directory back in:
     uv run examples/d_social_learning/experiment.py \
         --scheme lamarckian --x 0.5 --rep 0 --gens 20 \
-        --resume-dir __data__/social/ariel/lamarckian/x05/rep_0_20260813_143022
+        --resume-dir __data__/social/ariel/lamarckian/x05/k3/rep_0_novDESCR_20260813_143022
 """
 
 import argparse
 import datetime
+import hashlib
+import json
 import multiprocessing
 import os
 import random
 import re
+import subprocess
 import sys
 from multiprocessing import Pool
 from pathlib import Path
@@ -247,10 +258,16 @@ def build_ops(
         n_params = DistributedMLP(n_neighbors=simulator_dependent_functions.n_neighbours(), hidden=hidden).n_params
 
         worker_args = []
+        eval_seeds = []
         for i, ind in enumerate(all_alive):
             if not ind.requires_eval:
                 continue
             init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params, k_inherit)
+            # Drawn here in the (seeded) main process, in a fixed order, so
+            # each individual's inner learning is reproducible no matter
+            # which pool worker ends up running it.
+            eval_seed = random.getrandbits(32)
+            eval_seeds.append(eval_seed)
             worker_args.append((
                 ind.genotype_["morph"],
                 init_mean_arr.tolist(),
@@ -259,23 +276,31 @@ def build_ops(
                 inner_pop,
                 sigma,
                 hidden,
+                eval_seed,
             ))
 
         if num_workers > 1:
             results = _evaluate_with_timeout(worker_args, num_workers, eval_timeout, platform)
         else:
+            # evaluate_individual reseeds random/np.random with each eval_seed;
+            # in-process that would clobber the main stream, so restore it.
+            rng_state = random.getstate(), np.random.get_state()
             results = [evaluate_individual(a) for a in worker_args]
+            random.setstate(rng_state[0])
+            np.random.set_state(rng_state[1])
 
         distances = []
         i_evaluated = 0
         for i, ind in enumerate(all_alive):
             if ind.requires_eval:
                 r = results[i_evaluated]
+                eval_seed = eval_seeds[i_evaluated]
                 i_evaluated += 1
                 theta_list = r["best_theta"]
             else:
                 r = ind.tags
                 theta_list = ind.tags["theta"]
+                eval_seed = ind.tags.get("eval_seed")
             distance = r["distance"]
             distances.append(distance)
             novelty = float(novelties[i])
@@ -294,7 +319,8 @@ def build_ops(
                 "theta": theta_list,
                 "init_fitness": r["init_fitness"],
                 "learning_curve": r["learning_curve"],
-                "donor_ids": r["donor_ids"]
+                "donor_ids": r["donor_ids"],
+                "eval_seed": eval_seed,
             } | simulator_dependent_functions.extra_tags(r)
             ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
 
@@ -370,6 +396,35 @@ def _next_db_path(out_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Seeding / run config
+# ---------------------------------------------------------------------------
+
+RUN_CONFIG = "run_config.json"
+
+
+def _default_seed(scheme: str, x: float, k_inherit: int, rep: int) -> int:
+    """Stable 32-bit seed from (scheme, x, k_inherit, rep). sha256 rather
+    than the built-in hash(), which is salted per process."""
+    key = f"{scheme}|{x}|{k_inherit}|{rep}".encode()
+    return int.from_bytes(hashlib.sha256(key).digest()[:4], "little")
+
+
+def _seed_all(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def _git_commit() -> str | None:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=_THIS_DIR,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -411,6 +466,12 @@ def main() -> None:
              "database_part{N}.db in that same directory. If omitted, a fresh "
              "timestamped directory is created instead.",
     )
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Run seed. Defaults to a stable hash of (scheme, x, k_inherit, rep). "
+             "Saved to run_config.json in the run directory. Ignored with "
+             "--resume-dir if that directory already has a run_config.json.",
+    )
     parser.add_argument("--platform", type=str, choices=["ariel", "evogym"], default="ariel")
     parser.add_argument(
         "--novelty-metric", choices=["DESCR", "STRUCT"], default="DESCR",
@@ -429,22 +490,49 @@ def main() -> None:
 
     simulator_dependent_functions.simulator = args.platform
 
+    now = datetime.datetime.now()
+    if args.seed is not None:
+        seed, seed_source = args.seed, "arg"
+    else:
+        seed, seed_source = _default_seed(args.scheme, args.x, args.k_inherit, args.rep), "hash"
+
     if args.resume_dir:
         out_dir = Path(args.resume_dir)
         if not out_dir.is_dir():
             parser.error(f"--resume-dir does not exist: {out_dir}")
         if not (out_dir / "database.db").exists():
             parser.error(f"--resume-dir has no database.db to resume from: {out_dir}")
+        config_path = out_dir / RUN_CONFIG
+        if config_path.exists():
+            config = json.loads(config_path.read_text())
+            seed, seed_source = config["seed"], config["seed_source"]
+        else:
+            # Run predates run_config.json: record the seed it would have had.
+            config = {"seed": seed, "seed_source": seed_source, "args": None,
+                      "started": None, "git_commit": None}
+        # The RNG state at the point the previous part stopped isn't saved, so
+        # the continuation gets its own seed derived from (seed, part number):
+        # reproducible, but not bit-identical to an uninterrupted run.
+        next_db = _next_db_path(out_dir)
+        part_n = int(re.search(r"database_part(\d+)\.db", next_db.name).group(1))
+        part_seed = int(np.random.SeedSequence([seed, part_n]).generate_state(1)[0])
+        config.setdefault("resumes", []).append({
+            "db_file": next_db.name, "seed": part_seed, "args": vars(args),
+            "started": now.isoformat(timespec="seconds"), "git_commit": _git_commit(),
+        })
+        config_path.write_text(json.dumps(config, indent=2))
+        _seed_all(part_seed)
     else:
         x_str = str(args.x).replace(".", "")
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
         # Non-default selection schemes and novelty metric get a label in the
         # rep-dir name so runs of different variants for the same
         # (scheme, x, rep) don't get silently mixed together by
         # analysis/curve_utils.py's discover_reps (which globs
         # "rep_*/database.db"). The true default (mu+lambda, elitist, DESCR
         # novelty) keeps the original unlabeled name so every other run
-        # script's output layout is unaffected.
+        # script's output layout is unaffected. The timestamp suffix keeps a
+        # re-run of the same (scheme, x, k, rep) from deleting an earlier one.
         sel_bits = []
         if args.comma_selection:
             sel_bits.append("comma")
@@ -453,14 +541,20 @@ def main() -> None:
         sel_suffix = ("_" + "_".join(sel_bits)) if sel_bits else ""
         novelty_suffix = "_novSTRUCT" if args.novelty_metric == "STRUCT" else "_novDESCR"
         out_dir = Path(
-            f"__data__/social/{args.platform}/{args.scheme}/x{x_str}/k{args.k_inherit}/rep_{args.rep}{sel_suffix}{novelty_suffix}"
+            f"__data__/social/{args.platform}/{args.scheme}/x{x_str}/k{args.k_inherit}/rep_{args.rep}{sel_suffix}{novelty_suffix}_{timestamp}"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / RUN_CONFIG).write_text(json.dumps({
+            "seed": seed, "seed_source": seed_source, "args": vars(args),
+            "started": now.isoformat(timespec="seconds"), "git_commit": _git_commit(),
+        }, indent=2))
+        _seed_all(seed)
 
     # Printed on its own line (not via `console`, whose rich markup/box-drawing
     # would make this harder to grep) so calling scripts can pick up exactly
     # which directory this run landed in — see run_social_parta.sh.
     print(f"RUN_DIR={out_dir}")
+    print(f"SEED={seed}")
 
     console.rule(f"[bold cyan]{args.platform.capitalize} | scheme={args.scheme} x={args.x} rep={args.rep} dir={out_dir}")
 

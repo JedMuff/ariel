@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 
 import simulator_dependent_functions
 
@@ -24,7 +25,11 @@ def evaluate_individual(args: tuple) -> dict:
     Parameters
     ----------
     args : tuple
-        (genome_dict, init_mean_list, donor_ids, inner_gens, pop_size, sigma, hidden)
+        (genome_dict, init_mean_list, donor_ids, inner_gens, pop_size, sigma, hidden, seed)
+
+        ``seed`` seeds this worker's ``random`` and ``np.random`` (which
+        nevergrad's CMA draws its random_state from), so an individual's
+        learning is reproducible regardless of which pool worker runs it.
 
     Returns
     -------
@@ -38,7 +43,9 @@ def evaluate_individual(args: tuple) -> dict:
     from ariel.simulation.controllers.cmaes_learner import CMAESLearner
     from ariel.simulation.controllers.distributed_mlp import DistributedMLP
 
-    genome, init_mean_list, donor_ids, inner_gens, pop_size, sigma, hidden = args
+    genome, init_mean_list, donor_ids, inner_gens, pop_size, sigma, hidden, seed = args
+    random.seed(seed)
+    np.random.seed(seed)
 
     _empty = {"distance": 0.0, "best_theta": [], "init_fitness": 0.0, "learning_curve": [], "donor_ids": donor_ids}
 
