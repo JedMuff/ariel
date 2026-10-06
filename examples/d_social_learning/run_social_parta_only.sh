@@ -13,17 +13,17 @@
 # Usage:
 #   sbatch examples/d_social_learning/run_social_parta_array.sh
 #
-# 10 schemes x 3 x-values x 5 reps = 150 combos -> array indices 0-149.
+# 8 schemes x 3 x-values x 5 reps = 120 combos -> array indices 0-119.
 # Ordering matches run_social_submit.sh: rep outermost, then scheme, then x.
 #
 #SBATCH --job-name=social-parta
 #SBATCH --output=out_files/social-parta-%A_%a.out
 #SBATCH --error=out_files/social-parta-%A_%a.err
-#SBATCH --time=12:00:00
+#SBATCH --time=18:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=40G
 #SBATCH --partition=genoa
-#SBATCH --array=0-149
+#SBATCH --array=0-119
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -43,14 +43,14 @@ cd "$REPO_ROOT"
 # Map array index -> (scheme, x, rep)
 # ---------------------------------------------------------------------------
 
-SCHEMES=(darwinian lamarckian random random_many best best_many similar_DESCR similar_many_DESCR similar_STRUCT similar_many_STRUCT)
+SCHEMES=(darwinian lamarckian random random_many best best_many similar_STRUCT similar_many_STRUCT)
 X_VALUES=(0 0.5 1)
 N_REPS=5
 
 IDX=$SLURM_ARRAY_TASK_ID
 
-REP=$(( IDX / 30 ))                 # 10 schemes x 3 x-values = 30 combos per rep
-REM=$(( IDX % 30 ))
+REP=$(( IDX / 24 ))                 # 8 schemes x 3 x-values = 24 combos per rep
+REM=$(( IDX % 24 ))
 SCHEME_IDX=$(( REM / 3 ))
 X_IDX=$(( REM % 3 ))
 
