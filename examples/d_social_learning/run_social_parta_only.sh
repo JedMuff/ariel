@@ -96,8 +96,12 @@ fi
 # resubmit for an DESCR sweep.
 NOVELTY_METRIC=STRUCT
 
+# Number of neighbors/donors for the inheritance schemes. 5 was picked from the
+# run_k_inherit_sweep.sh pilot (best_many, x=1.0, k in {3, 5, 8}).
+K_INHERIT=5
+
 echo "Scheme: $SCHEME  x=$X  rep=$REP  (array idx=$IDX)"
-echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS comma_selection=$COMMA_SELECTION novelty_metric=$NOVELTY_METRIC"
+echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS comma_selection=$COMMA_SELECTION novelty_metric=$NOVELTY_METRIC k_inherit=$K_INHERIT"
 
 mkdir -p out_files
 
@@ -108,7 +112,8 @@ srun "$VENV_PATH/bin/python" examples/d_social_learning/experiment.py \
     --gens "$GENS" --pop "$POP" --lam "$LAM" \
     --inner-gens "$INNER_GENS" --inner-pop "$INNER_POP" \
     --sigma "$SIGMA" --hidden "$HIDDEN" \
-    --workers "$WORKERS" --novelty-metric "$NOVELTY_METRIC" "${SELECTION_FLAG[@]}"
+    --workers "$WORKERS" --novelty-metric "$NOVELTY_METRIC" \
+    --k-inherit "$K_INHERIT" "${SELECTION_FLAG[@]}"
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
