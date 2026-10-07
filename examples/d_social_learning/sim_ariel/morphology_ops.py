@@ -3,6 +3,7 @@
 import copy
 import random
 
+from ariel.ec.genotypes.tree.collision import prune_colliding_subtrees
 from ariel.ec.genotypes.tree.operators import (
     mutate_hoist,
     mutate_replace_node,
@@ -46,6 +47,10 @@ def mutate(genome_dict: dict) -> dict:
 
     if random.random() < _ROTATION_PROB:
         _mutate_rotation(genome)
+
+    # Point/rotation changes and grafted subtrees can make parts overlap;
+    # drop any subtree that now collides (FCL, real module geometry).
+    prune_colliding_subtrees(genome)
 
     return genome.to_dict()
 

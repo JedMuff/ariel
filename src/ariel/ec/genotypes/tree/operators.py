@@ -448,18 +448,31 @@ def mutate_hoist(genome: TreeGenome) -> None:
         genome.edges = old_edges
 
 
-def random_tree(max_modules: int) -> TreeGenome:
+def random_tree(max_modules: int, check_collisions: bool = True) -> TreeGenome:
     """Generate a random valid tree genome with up to ``max_modules`` nodes.
 
     Starts with only the core and iteratively adds a random module on a free
-    face until the budget is exhausted or no free faces remain.
+    face until the budget is exhausted or no free faces remain. With
+    ``check_collisions``, a module that would overlap the body so far (FCL,
+    see `collision.py`) is not added and its face is not tried again.
     """
     g = TreeGenome()
     g.nodes = {IDX_OF_CORE: {"type": "CORE", "rotation": "DEG_0"}}
     g.edges = []
+    _grow_random(g, max_modules, check_collisions)
+    _fix_terminal_hinges(g)
+    return g
 
-    next_id = 1
-    while next_id <= max_modules:
+
+def _grow_random(g: TreeGenome, n_modules: int, check_collisions: bool) -> None:
+    """Add up to ``n_modules`` random modules to ``g`` on free faces."""
+    from .collision import core_checker, try_place  # local import: avoid cycle
+
+    checker = core_checker(g) if check_collisions else None
+    blocked: set[tuple[int, str]] = set()  # faces where a module collided
+    next_id = max(g.nodes) + 1
+    added = 0
+    while added < n_modules:
         # collect available (parent,face) positions
         free = []
         for pid, pdata in g.nodes.items():
@@ -467,7 +480,7 @@ def random_tree(max_modules: int) -> TreeGenome:
             allowed_faces = [f.name for f in ALLOWED_FACES[ptype]]
             used = {e["face"] for e in g.edges if e["parent"] == pid}
             for face in allowed_faces:
-                if face not in used:
+                if face not in used and (pid, face) not in blocked:
                     free.append((pid, face))
         if not free:
             break
@@ -477,10 +490,12 @@ def random_tree(max_modules: int) -> TreeGenome:
         mtype = random.choice(types).name
         rotations = [r.name for r in ALLOWED_ROTATIONS[ModuleType[mtype]]]
         rot = random.choice(rotations) if rotations else "DEG_0"
+        if checker is not None and not try_place(checker, next_id, parent, face, mtype, rot):
+            blocked.add((parent, face))
+            continue
         add_node(g, parent, face, next_id, mtype, rot)
         next_id += 1
-    _fix_terminal_hinges(g)
-    return g
+        added += 1
 
 
 def get_tree_depth(genome: TreeGenome) -> int:
