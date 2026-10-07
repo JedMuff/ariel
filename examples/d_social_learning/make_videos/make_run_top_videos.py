@@ -36,7 +36,7 @@ _SOCIAL_DIR = Path(__file__).parent
 for _p in [str(_SOCIAL_DIR), ""]:
     if _p in sys.path:
         sys.path.remove(_p)
-sys.path.insert(0, str(_SOCIAL_DIR / "analysis"))
+sys.path.insert(0, str(_SOCIAL_DIR.parent / "analysis"))
 
 import imageio
 import numpy as np

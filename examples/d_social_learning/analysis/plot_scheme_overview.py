@@ -135,6 +135,13 @@ def main() -> None:
     for label, exp_dir in zip(labels, exp_dirs):
         plot_overview(exp_dir, label, "fitness", "fitness", out_dir, fitness_ylims)
 
+    # Pure displacement: per-x-row scale, like fitness.
+    displacement_ylims = compute_row_ylim_splits(exp_dirs, "displacement")
+    for label, exp_dir in zip(labels, exp_dirs):
+        plot_overview(
+            exp_dir, label, "displacement", "pure displacement (m)", out_dir, displacement_ylims,
+        )
+
     # Diversity: single scale shared across the whole grid.
     novelty_ylims = compute_global_ylim_split(exp_dirs, "novelty")
     for label, exp_dir in zip(labels, exp_dirs):

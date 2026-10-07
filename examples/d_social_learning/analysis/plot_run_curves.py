@@ -126,6 +126,13 @@ def main() -> None:
     for label, exp_dir in zip(labels, exp_dirs):
         plot_experiment(exp_dir, label, out_dir, metric="fitness", ylabel="fitness", ylim=row_ylims)
 
+    row_ylims = compute_row_ylims(exp_dirs, metric="displacement")
+    for label, exp_dir in zip(labels, exp_dirs):
+        plot_experiment(
+            exp_dir, label, out_dir, metric="displacement",
+            ylabel="pure displacement (m)", ylim=row_ylims,
+        )
+
 
 if __name__ == "__main__":
     main()

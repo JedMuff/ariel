@@ -345,9 +345,13 @@ def build_ops(
             } | simulator_dependent_functions.extra_tags(r)
             ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
 
-        # Calculate normalized fitness
-        min_dist, max_dist = min(distances), max(distances)
-        min_nov, max_nov = min(novelties), max(novelties)
+        # Calculate normalized fitness. Range over finite values only: a
+        # failed individual's NaN distance would otherwise poison min()/max()
+        # (order-dependently) and turn everyone's fitness into NaN -> -inf.
+        finite_dist = [d for d in distances if np.isfinite(d)] or [0.0]
+        finite_nov = [float(n) for n in novelties if np.isfinite(n)] or [0.0]
+        min_dist, max_dist = min(finite_dist), max(finite_dist)
+        min_nov, max_nov = min(finite_nov), max(finite_nov)
         for i, ind in enumerate(all_alive):
             norm_distance = (distances[i] - min_dist) / (max_dist - min_dist) if max_dist > min_dist else 0.0
             norm_novelty = (float(novelties[i]) - min_nov) / (max_nov - min_nov) if max_nov > min_nov else 0.0
@@ -550,7 +554,7 @@ def main() -> None:
         # rep-dir name so runs of different variants for the same
         # (scheme, x, rep) don't get silently mixed together by
         # analysis/curve_utils.py's discover_reps (which globs
-        # "rep_*/database.db"). The true default (mu+lambda, elitist, DESCR
+        # "rep_*/database.db" and "k*/rep_*/database.db"). The true default (mu+lambda, elitist, DESCR
         # novelty) keeps the original unlabeled name so every other run
         # script's output layout is unaffected. The timestamp suffix keeps a
         # re-run of the same (scheme, x, k, rep) from deleting an earlier one.
@@ -577,7 +581,7 @@ def main() -> None:
     print(f"RUN_DIR={out_dir}")
     print(f"SEED={seed}")
 
-    console.rule(f"[bold cyan]{args.platform.capitalize} | scheme={args.scheme} x={args.x} rep={args.rep} dir={out_dir}")
+    console.rule(f"[bold cyan]{args.platform.capitalize()} | scheme={args.scheme} x={args.x} rep={args.rep} dir={out_dir}")
 
     ops = build_ops(
         scheme_name=args.scheme,

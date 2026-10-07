@@ -37,6 +37,27 @@ def x_str(x: float) -> str:
     return str(x).replace(".", "")
 
 
+# Must match sim_ariel/evaluator.py's values at the time the data was generated.
+JERK_PENALTY_WEIGHT = 3.0
+JERK_THRESHOLD = 0.15
+
+
+def pure_displacement(tags: dict) -> float | None:
+    """Forward displacement with the jerk penalty added back onto the
+    learned (penalised) fitness stored in tags['distance'].
+
+    Only the jerk penalty can be undone: the spawn-height penalty depends on
+    core height, which isn't stored, so it stays included (it's zero unless
+    the core spawns above HEIGHT_PENALTY_THRESHOLD).
+    """
+    distance = tags.get("distance")
+    mean_jerk = tags.get("mean_jerk")
+    if distance is None or mean_jerk is None:
+        return None
+    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+    return distance + jerk_penalty
+
+
 def rep_db_parts(rep_dir: Path) -> list[Path]:
     """Return a rep's db files in stitching order: database.db first, then
     database_part2.db, database_part3.db, ... (numeric part order).
@@ -62,7 +83,8 @@ def load_run(rep_dir: Path, metric: str) -> dict[int, list[float]] | None:
     missing/empty.
 
     metric="fitness" reads individual.fitness_; metric="novelty" reads
-    tags_['novelty']. Both are restricted to individuals with fitness_ IS NOT
+    tags_['novelty']; metric="displacement" reads pure_displacement(tags_).
+    All are restricted to individuals with fitness_ IS NOT
     NULL, matching how the outer EA marks an individual as evaluated.
 
     A resumed run's continuation file re-persists the restored survivor
@@ -95,7 +117,10 @@ def load_run(rep_dir: Path, metric: str) -> dict[int, list[float]] | None:
                 value = fit
             else:
                 tags_d = json.loads(tags) if tags else {}
-                value = tags_d.get("novelty")
+                if metric == "displacement":
+                    value = pure_displacement(tags_d)
+                else:
+                    value = tags_d.get("novelty")
             if value is not None and np.isfinite(value):
                 by_gen[birth].append(float(value))
             part_max = max(part_max, birth)
@@ -158,10 +183,16 @@ def single_run_curve(
 
 
 def discover_reps(exp_dir: Path, scheme: str, xv: float) -> list[Path]:
+    """Rep dirs for (scheme, x): ``{scheme}/x{x}/rep_*`` (older layout) and
+    ``{scheme}/x{x}/k{k}/rep_*`` (experiment.py's current layout)."""
     base = exp_dir / scheme / f"x{x_str(xv)}"
     if not base.exists():
         return []
-    return sorted(p.parent for p in base.glob("rep_*/database.db"))
+    dbs = [*base.glob("rep_*/database.db"), *base.glob("k*/rep_*/database.db")]
+    k_dirs = {p.parent.parent.name for p in dbs if p.parent.parent != base}
+    if len(k_dirs) > 1:
+        print(f"[curve_utils] warning: {base} mixes reps from {sorted(k_dirs)}")
+    return sorted(p.parent for p in dbs)
 
 
 @lru_cache(maxsize=None)

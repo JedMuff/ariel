@@ -146,6 +146,23 @@ def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float
     return d - height_penalty - jerk_penalty
 
 
+def _tracking_camera(model) -> mujoco.MjvCamera:
+    """Camera that follows the robot's core body, so good walkers don't
+    leave the frame. Viewed side-on from -y like the world's fixed
+    pretty-cam, so forward (+x) motion reads left-to-right."""
+    core_id = next(
+        i for i in range(model.nbody)
+        if (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) or "").endswith("_core")
+    )
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
+    cam.trackbodyid = core_id
+    cam.distance = 2.5
+    cam.azimuth = 90.0
+    cam.elevation = -30.0
+    return cam
+
+
 def render_individual(
     morph_dict: dict, theta: np.ndarray,
     duration: float, settle: float, fps: int,
@@ -158,6 +175,7 @@ def render_individual(
     mujoco.mj_resetData(model, data)
 
     renderer = mujoco.Renderer(model, height=480, width=640)
+    cam = _tracking_camera(model)
     dt = model.opt.timestep
     render_every = max(1, int(round(1.0 / (fps * dt))))
 
@@ -168,7 +186,7 @@ def render_individual(
     while data.time < settle:
         mujoco.mj_step(model, data)
         if sim_step % render_every == 0:
-            renderer.update_scene(data, camera="pretty-cam")
+            renderer.update_scene(data, camera=cam)
             frames.append(renderer.render())
         sim_step += 1
 
@@ -190,7 +208,7 @@ def render_individual(
             ctrl_step += 1
         mujoco.mj_step(model, data)
         if sim_step % render_every == 0:
-            renderer.update_scene(data, camera="pretty-cam")
+            renderer.update_scene(data, camera=cam)
             frames.append(renderer.render())
         sim_step += 1
 

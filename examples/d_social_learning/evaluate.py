@@ -47,7 +47,18 @@ def evaluate_individual(args: tuple) -> dict:
     random.seed(seed)
     np.random.seed(seed)
 
-    _empty = {"distance": 0.0, "best_theta": [], "init_fitness": 0.0, "learning_curve": [], "donor_ids": donor_ids}
+    # Returned if the evaluation raises. NaN, not 0.0: most fitnesses are
+    # negative, so 0.0 would rank a crashed individual near the top. Matches
+    # experiment._timeout_result; experiment.py turns non-finite into -inf.
+    _empty = {
+        "distance": float("nan"),
+        "best_theta": [],
+        "init_fitness": float("nan"),
+        "learning_curve": [],
+        "donor_ids": donor_ids,
+        "mean_jerk": float("nan"),
+        "c_hinge": 0,
+    }
 
     try:
         simulator_specifics = simulator_dependent_functions.initialize_world(genome)
