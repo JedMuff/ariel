@@ -22,7 +22,8 @@
 # TEMPORARY: cppn is excluded (2 genomes -> 18 jobs). To restore it, put cppn
 # back at the front of GENOME_TYPES and set --array=0-26.
 #
-# Brain: BRAIN=cpg (default, open-loop CPG) or BRAIN=ann (the original MLP).
+# Brain: BRAIN=cpg (default, open-loop sine CPG), BRAIN=revolve_cpg (revolve's
+# fully connected coupled-oscillator CPG) or BRAIN=ann (the original MLP).
 # Results go to FINAL_DIR=/scratch/jed/ariel_control_stride_sweep_<brain>, so
 # run tags are unchanged and the ANN sweep's data isn't mixed in; point the
 # analysis scripts at it with --stride-root.
@@ -32,6 +33,7 @@
 #
 # Usage:
 #   sbatch slurm/run_control_stride_sweep.sh               # CPG brain
+#   BRAIN=revolve_cpg sbatch slurm/run_control_stride_sweep.sh  # revolve CPG
 #   BRAIN=ann sbatch slurm/run_control_stride_sweep.sh     # ANN brain
 
 #SBATCH --job-name=ariel-ctrl-stride

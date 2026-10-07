@@ -21,6 +21,7 @@ from shared import (
     AnnBrain,
     CpgBrain,
     Network,
+    RevolveCpgBrain,
     fill_parameters,
     make_brain,
 )
@@ -88,6 +89,47 @@ def test_ann_brain_matches_raw_network():
     fill_parameters(net, w)
     state = rng.normal(size=N_IN).astype(np.float32)
     np.testing.assert_array_equal(brain.act(_data(0.0), state), net.forward(None, None, state))
+
+
+def test_revolve_cpg_param_count_and_coupling_matrix():
+    brain = make_brain("revolve_cpg", N_IN, N_OUT)
+    assert isinstance(brain, RevolveCpgBrain)
+    assert brain.num_params == N_OUT + N_OUT * (N_OUT - 1) // 2
+    brain.set_params(np.random.default_rng(4).normal(size=brain.num_params))
+    np.testing.assert_array_equal(brain._a, -brain._a.T)
+    with pytest.raises(IndexError):
+        brain.set_params(np.zeros(brain.num_params + 1))
+
+
+def _rollout(brain: RevolveCpgBrain, dt: float, t_end: float) -> list[np.ndarray]:
+    return [brain.act(_data(SETTLE_DURATION + t), None).copy()
+            for t in np.arange(0.0, t_end, dt)]
+
+
+def test_revolve_cpg_bounded_and_set_params_resets():
+    rng = np.random.default_rng(5)
+    brain = RevolveCpgBrain(N_IN, N_OUT)
+    p = rng.normal(0, 2, brain.num_params)
+    brain.set_params(p)
+    first = _rollout(brain, 0.04, 5.0)
+    for a in first:
+        assert a.shape == (N_OUT,)
+        assert np.all(np.abs(a) <= math.pi / 2 + 1e-12)
+    # A second episode after re-decoding the candidate replays exactly.
+    brain.set_params(p)
+    for a, b in zip(first, _rollout(brain, 0.04, 5.0), strict=True):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_revolve_cpg_oscillates_from_initial_state():
+    brain = RevolveCpgBrain(N_IN, N_OUT)
+    brain.set_params(np.r_[np.full(N_OUT, 2.0), np.zeros(brain.num_params - N_OUT)])
+    # Uncoupled pairs with self-coupling w are x = r cos(w t + phi): at t=0
+    # x = sqrt(2)/2 (scaled by pi/2), and the sign of x flips within a period.
+    np.testing.assert_allclose(brain.act(_data(SETTLE_DURATION), None),
+                               np.full(N_OUT, math.sqrt(2) / 2 * math.pi / 2))
+    xs = np.array(_rollout(brain, 0.01, 2 * math.pi / 2.0))[:, 0]
+    assert xs.min() < -0.5 and xs.max() > 0.5
 
 
 def test_unknown_brain_kind():

@@ -11,7 +11,7 @@ Every brain exposes the same interface so one CMA-ES setup drives them all:
 Brains:
   ann          closed-loop MLP (shared.AnnBrain), the `ann` of run_control_stride_sweep.sh
   sine         open-loop sine CPG (shared.CpgBrain), the `cpg` of run_control_stride_sweep.sh
-  revolve_cpg  kgd's fully connected RevolveCPG (apets-ariel common/controllers/cpg.py)
+  revolve_cpg  kgd's fully connected RevolveCPG (shared.RevolveCpgBrain), the `revolve_cpg` of run_control_stride_sweep.sh
   matsuoka     Matsuoka oscillator network (morphlib@hyperneat matsuoka_brain/), bugs fixed
   square       eased square wave per hinge (square_wave.py), 12 genes per hinge
   square_sync  as square, but one frequency ModulatedValue shared by every hinge
@@ -20,7 +20,6 @@ Brains:
 
 from __future__ import annotations
 
-import itertools
 import math
 import sys
 from typing import Any
@@ -29,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "symmetry_pressure"))
-from shared import AnnBrain, CpgBrain  # noqa: E402
+from shared import AnnBrain, CpgBrain, RevolveCpgBrain  # noqa: E402
 from square_wave import ModulatedValue, PatternState, ServoPattern, step  # noqa: E402
 
 BRAIN_KINDS: tuple[str, ...] = ("ann", "sine", "revolve_cpg", "matsuoka", "square", "square_sync", "bang_bang")
@@ -72,53 +71,20 @@ class ZooSine:
 
 
 class RevolveCpg:
-    """Port of apets-ariel's RevolveCPG ("copied from revolve but fully connected").
+    """shared.RevolveCpgBrain, timed from episode start (this protocol has no settle phase)."""
 
-    One (x, y) oscillator pair per hinge. Weights: n self-couplings x_i<->y_i
-    followed by n(n-1)/2 couplings x_i<->x_j, placed antisymmetrically in a
-    2n x 2n matrix A. The state follows dS/dt = A S (RK4 over the elapsed
-    control period, clipped to [-1, 1]) and the first n entries, times the
-    actuator ctrlrange (pi/2), are the joint targets.
-    """
-
-    def __init__(self, n_inputs: int, n_hinges: int) -> None:  # noqa: ARG002
-        self.n = n_hinges
-        self.num_params = n_hinges + n_hinges * (n_hinges - 1) // 2
-        self._pairs = list(itertools.combinations(range(n_hinges), 2))
-        self._initial_state = (
-            np.hstack([np.full(n_hinges, 1.0), np.full(n_hinges, -1.0)]) * 0.5 * np.sqrt(2)
-        )
-        self.set_params(np.zeros(self.num_params))
+    def __init__(self, n_inputs: int, n_hinges: int) -> None:
+        self._brain = RevolveCpgBrain(n_inputs, n_hinges)
+        self.num_params = self._brain.num_params
 
     def set_params(self, vec: np.ndarray) -> None:
-        w = np.asarray(vec, dtype=np.float64)
-        if len(w) != self.num_params:
-            raise IndexError("Parameter vector length mismatch")
-        n = self.n
-        m = np.zeros((2 * n, 2 * n))
-        for i in range(n):
-            m[i, n + i] = +w[i]
-            m[n + i, i] = -w[i]
-        for (i, j), wij in zip(self._pairs, w[n:], strict=True):
-            m[i, j] = +wij
-            m[j, i] = -wij
-        self._a = m
-        self.reset()
+        self._brain.set_params(vec)
 
     def reset(self) -> None:
-        self._state = self._initial_state.copy()
-        self._time = 0.0
+        self._brain.reset()
 
     def act(self, t: float, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
-        dt = t - self._time
-        a, s = self._a, self._state
-        a1 = a @ s
-        a2 = a @ (s + dt / 2 * a1)
-        a3 = a @ (s + dt / 2 * a2)
-        a4 = a @ (s + dt * a3)
-        self._state = np.clip(s + dt / 6 * (a1 + 2 * (a2 + a3) + a4), -1, 1)
-        self._time = t
-        return self._state[: self.n] * HALF_PI
+        return self._brain.output_at(t)
 
 
 # Gene ranges from morphlib matsuoka_brain/optimize.py (convert_cma_weights_to_params).

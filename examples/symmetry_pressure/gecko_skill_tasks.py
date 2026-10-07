@@ -97,7 +97,8 @@ parser.add_argument("--control-step-freq", type=int, default=CONTROL_STEP_FREQ,
                          "500Hz, so 9 = ~55.6Hz, 50 = 10Hz, 100 = 5Hz)")
 parser.add_argument("--brain",         choices=BRAIN_KINDS, default="ann",
                     help="Controller trained per skill: 'ann' (closed-loop MLP on "
-                         "proprioception) or 'cpg' (open-loop sine oscillators)")
+                         "proprioception), 'cpg' (open-loop sine oscillators) or "
+                         "'revolve_cpg' (revolve's coupled-oscillator CPG)")
 parser.add_argument("--time-limit",    type=float, default=None,
                     help="Wall-clock seconds; stop after current generation completes")
 args = parser.parse_args()

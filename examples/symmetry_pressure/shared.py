@@ -8,6 +8,7 @@ additions for extended data logging, NSGA-II selection, and repeat evaluations.
 import contextlib
 import copy
 import hashlib
+import itertools
 import json
 import math
 import multiprocessing as mp
@@ -123,8 +124,8 @@ def fill_parameters(net: nn.Module, vector: np.ndarray) -> None:
 # The returned raw action is then alpha-blended and clipped by the caller, so
 # the post-processing (and jerk penalty) is identical across brain types.
 
-BrainKind = Literal["ann", "cpg"]
-BRAIN_KINDS: tuple[str, ...] = ("ann", "cpg")
+BrainKind = Literal["ann", "cpg", "revolve_cpg"]
+BRAIN_KINDS: tuple[str, ...] = ("ann", "cpg", "revolve_cpg")
 
 CPG_F_MIN = 0.5  # Hz
 CPG_F_MAX = 3.0  # Hz
@@ -185,16 +186,82 @@ class CpgBrain:
         return self.output_at(float(data.time) - SETTLE_DURATION)
 
 
-def make_brain(kind: str, input_dim: int, output_dim: int) -> "AnnBrain | CpgBrain":
+class RevolveCpgBrain:
+    """Port of apets-ariel's RevolveCPG ("copied from revolve but fully connected").
+
+    One (x, y) oscillator pair per joint. Weights (n + n(n-1)/2): n
+    self-couplings x_i<->y_i followed by the couplings x_i<->x_j for i < j,
+    placed antisymmetrically in a 2n x 2n matrix A. The state follows
+    dS/dt = A S, advanced by one RK4 step over the time elapsed since the
+    previous call and clipped to [-1, 1]; the x half, times pi/2, is the
+    joint targets. So unlike CpgBrain the stride changes the integration
+    step, as it does in revolve. State input is ignored.
+
+    The oscillator is stateful: set_params and reset restore the initial
+    state, with time measured from the end of the settling phase. Every
+    caller decodes a fresh candidate (set_params / make_brain_for_model with
+    params) before each episode, so episodes always start from that state.
+    """
+
+    def __init__(self, input_dim: int, output_dim: int) -> None:  # noqa: ARG002
+        self.n          = output_dim
+        self.num_params = output_dim + output_dim * (output_dim - 1) // 2
+        self._pairs     = list(itertools.combinations(range(output_dim), 2))
+        self._initial_state = (
+            np.hstack([np.full(output_dim, 1.0), np.full(output_dim, -1.0)]) * 0.5 * np.sqrt(2)
+        )
+        self.set_params(np.zeros(self.num_params))
+
+    def set_params(self, vec: np.ndarray) -> None:
+        w = np.asarray(vec, dtype=np.float64)
+        if len(w) != self.num_params:
+            raise IndexError("Parameter vector length mismatch")
+        n = self.n
+        m = np.zeros((2 * n, 2 * n))
+        for i in range(n):
+            m[i, n + i] = +w[i]
+            m[n + i, i] = -w[i]
+        for (i, j), wij in zip(self._pairs, w[n:], strict=True):
+            m[i, j] = +wij
+            m[j, i] = -wij
+        self._a = m
+        self.reset()
+
+    def reset(self) -> None:
+        self._state = self._initial_state.copy()
+        self._time  = 0.0
+
+    def output_at(self, t: float) -> np.ndarray:
+        """Advance the oscillator to time t (one RK4 step) and return the targets."""
+        dt = t - self._time
+        a, s = self._a, self._state
+        a1 = a @ s
+        a2 = a @ (s + dt / 2 * a1)
+        a3 = a @ (s + dt / 2 * a2)
+        a4 = a @ (s + dt * a3)
+        self._state = np.clip(s + dt / 6 * (a1 + 2 * (a2 + a3) + a4), -1, 1)
+        self._time  = t
+        return self._state[: self.n] * (math.pi / 2)
+
+    def act(self, data: Any, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
+        return self.output_at(float(data.time) - SETTLE_DURATION)
+
+
+Brain = "AnnBrain | CpgBrain | RevolveCpgBrain"
+
+
+def make_brain(kind: str, input_dim: int, output_dim: int) -> Brain:
     if kind == "ann":
         return AnnBrain(input_dim, output_dim)
     if kind == "cpg":
         return CpgBrain(input_dim, output_dim)
+    if kind == "revolve_cpg":
+        return RevolveCpgBrain(input_dim, output_dim)
     raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")
 
 
 def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
-                         params: Optional[np.ndarray] = None) -> "AnnBrain | CpgBrain":
+                         params: Optional[np.ndarray] = None) -> Brain:
     """Build a brain sized for this body (proprioceptive input, one output per actuator)."""
     brain = make_brain(kind, len(get_robot_state(data)), model.nu)
     if params is not None:
