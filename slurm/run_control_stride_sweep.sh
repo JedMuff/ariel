@@ -1,13 +1,14 @@
 #!/bin/bash
 #
-# Control-stride sweep on the forward locomotion task — 3 control strides x
+# Control-stride sweep on the forward locomotion task — 4 control strides x
 # 3 genome representations x N_REPS repetitions, at the same production scale
 # as slurm/run_symmetry_pressure_sweep.sh. Stride 9 (~55.6Hz, the shared.py
 # default) is not rerun: the forward runs of that sweep (job 37568, seeds
 # 42-44) are the baseline.
 #
 # Stride = physics steps between controller updates. Physics runs at MuJoCo's
-# default 500Hz, so 20 = 25Hz, 50 = 10Hz, 100 = 5Hz.
+# default 500Hz, so 25 = 20Hz, 33 = ~15.2Hz (500/15 isn't an integer),
+# 50 = 10Hz, 100 = 5Hz.
 #
 # Note: CTRL_ALPHA smoothing and the jerk penalty (JERK_THRESHOLD, mean
 # |delta ctrl| per update) in shared.py are defined per controller update, not
@@ -19,8 +20,8 @@
 # on the stride; only network updates get rarer, so these are upper bounds.
 # Genomes are ordered slowest-first so the cppn jobs start early.
 #
-# TEMPORARY: cppn is excluded (2 genomes -> 18 jobs). To restore it, put cppn
-# back at the front of GENOME_TYPES and set --array=0-26.
+# TEMPORARY: cppn is excluded (2 genomes -> 24 jobs). To restore it, put cppn
+# back at the front of GENOME_TYPES and set --array=0-35.
 #
 # Brain: BRAIN=cpg (default, open-loop sine CPG), BRAIN=revolve_cpg (revolve's
 # fully connected coupled-oscillator CPG) or BRAIN=ann (the original MLP).
@@ -29,7 +30,7 @@
 # analysis scripts at it with --stride-root.
 #
 # Dry-run a few indices first, e.g.:
-#   sbatch --array=0-2 slurm/run_control_stride_sweep.sh   # first genome, all 3 strides, rep 0
+#   sbatch --array=0-3 slurm/run_control_stride_sweep.sh   # first genome, all 4 strides, rep 0
 #
 # Usage:
 #   sbatch slurm/run_control_stride_sweep.sh               # CPG brain
@@ -42,7 +43,7 @@
 #SBATCH --time=100:00:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=16G
-#SBATCH --array=0-17
+#SBATCH --array=0-23
 
 set -euo pipefail
 
@@ -55,14 +56,16 @@ SCRIPTS_DIR=$REPO/examples/symmetry_pressure
 # completes before any condition repeats.
 
 N_REPS=3
-STRIDES=(20 50 100)
+STRIDES=(25 33 50 100)
 GENOME_TYPES=(tree_symmetric tree)   # cppn temporarily excluded (see header)
 N_GENOMES=${#GENOME_TYPES[@]}
 
+N_STRIDES=${#STRIDES[@]}
+
 ID=$SLURM_ARRAY_TASK_ID
-STRIDE_IDX=$(( ID % 3 ))
-GENOME_IDX=$(( (ID / 3) % N_GENOMES ))
-REP=$(( (ID / (3 * N_GENOMES)) % N_REPS ))
+STRIDE_IDX=$(( ID % N_STRIDES ))
+GENOME_IDX=$(( (ID / N_STRIDES) % N_GENOMES ))
+REP=$(( (ID / (N_STRIDES * N_GENOMES)) % N_REPS ))
 
 STRIDE=${STRIDES[$STRIDE_IDX]}
 GENOME_TYPE=${GENOME_TYPES[$GENOME_IDX]}
