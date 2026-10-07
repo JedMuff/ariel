@@ -46,13 +46,21 @@ def random_individual(rng: random.Random | None = None) -> list:
 
 
 def mutate(body: list, rng: random.Random | None = None) -> list:
-    """Return a mutated copy of *body*.
+    """Return a mutated copy of *body* (see `mutate_with_info`)."""
+    return mutate_with_info(body, rng)[0]
+
+
+def mutate_with_info(body: list, rng: random.Random | None = None) -> tuple[list, dict]:
+    """Return a mutated copy of *body* and a record of what was done.
 
     Randomly resamples one or more voxels; retries until constraints are met.
+    The record is ``{"op": "voxel", "n_voxels": int, "retries": int,
+    "fallback_to_parent": bool}``; if no valid candidate is found within
+    MAX_RETRIES, the parent body is returned unchanged.
     """
     rng = rng or random
     original = body_from_list(body.copy())
-    for _ in range(MAX_RETRIES):
+    for attempt in range(MAX_RETRIES):
         candidate = original.copy()
         n_mutations = rng.randint(0, max(1, (ROWS * COLS) // 5))
         positions = [(r, c) for r in range(ROWS) for c in range(COLS)]
@@ -60,8 +68,10 @@ def mutate(body: list, rng: random.Random | None = None) -> list:
         for r, c in chosen:
             candidate[r, c] = rng.choice(TYPES)
         if _is_valid(candidate):
-            return body_to_list(candidate)
-    return body_to_list(original)
+            info = {"op": "voxel", "n_voxels": len(chosen), "retries": attempt, "fallback_to_parent": False}
+            return body_to_list(candidate), info
+    info = {"op": "voxel", "n_voxels": 0, "retries": MAX_RETRIES, "fallback_to_parent": True}
+    return body_to_list(original), info
 
 
 # ---------------------------------------------------------------------------

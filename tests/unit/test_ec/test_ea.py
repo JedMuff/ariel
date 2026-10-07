@@ -398,3 +398,93 @@ def test_ea_run_zero_steps(tmp_path) -> None:
     ea = _ea(tmp_path, num_steps=0)
     ea.run()
     assert ea.current_generation == 0
+
+
+# ---------------------------------------------------------------------------
+# EA — restart
+# ---------------------------------------------------------------------------
+
+
+@EAOperation
+def plus_select(population: Population) -> Population:
+    """(mu+lambda) with one child per parent: half the children beat their
+    parent, half are hopeless, and only the best len(population) survive."""
+    parents = population.to_list()
+    children = []
+    for i, parent in enumerate(parents):
+        child = Individual()
+        child.genotype = [0.0]
+        child.fitness = parent.fitness + (1.5 if i % 2 == 0 else -100.0)
+        children.append(child)
+    everyone = parents + children
+    survivors = {id(ind) for ind in sorted(everyone, key=lambda ind: -ind.fitness)[: len(parents)]}
+    for ind in everyone:
+        ind.alive = id(ind) in survivors
+    return Population(everyone)
+
+
+def _source_run(tmp_path: Path, steps: int = 2) -> tuple[Path, list[set[int]]]:
+    """Run plus_select for `steps` generations; return the db path and the
+    ids of the survivors after each generation (index = generation)."""
+    db = tmp_path / "source.db"
+    ea = EA(population=_make_pop(4), operations=[plus_select],
+            db_file_path=db, quiet=True)
+    survivors = [{ind.id for ind in ea._fetch()}]
+    for _ in range(steps):
+        ea.step()
+        survivors.append({ind.id for ind in ea._fetch()})
+    ea.engine.dispose()
+    return db, survivors
+
+
+def _all_ids(ea: EA) -> list[int]:
+    return [ind.id for ind in ea._fetch(only_alive=False)]
+
+
+def test_ea_restart_restores_only_survivors(tmp_path) -> None:
+    """Restart restores the last generation's survivors, not its losers."""
+    db, survivors = _source_run(tmp_path)
+    ea = EA(operations=[plus_select], restart=db,
+            db_file_path=tmp_path / "part2.db", quiet=True)
+    restored = ea._fetch()
+    assert {ind.id for ind in restored} == survivors[-1]
+    assert len(restored) == 4
+
+
+def test_ea_restart_from_generation_restores_its_survivors(tmp_path) -> None:
+    """A (path, generation) restart restores that generation's survivors."""
+    db, survivors = _source_run(tmp_path, steps=3)
+    ea = EA(operations=[plus_select], restart=(db, 1),
+            db_file_path=tmp_path / "part2.db", quiet=True)
+    assert {ind.id for ind in ea._fetch()} == survivors[1]
+
+
+def test_ea_restart_keeps_ids_and_numbers_new_ones_after_source(tmp_path) -> None:
+    """Restored individuals keep their ids; new ones never reuse a source id."""
+    db, survivors = _source_run(tmp_path)
+    source = EA(operations=[noop], restart=db,
+                db_file_path=tmp_path / "probe.db", quiet=True)
+    source_max = max(_all_ids(source) + list(survivors[-1]))
+    source.engine.dispose()
+
+    ea = EA(operations=[plus_select], restart=db,
+            db_file_path=tmp_path / "part2.db", quiet=True)
+    ea.step()
+    ids = _all_ids(ea)
+    new_ids = set(ids) - survivors[-1]
+    assert survivors[-1] <= set(ids)
+    assert len(new_ids) == 4
+    assert min(new_ids) > source_max
+    assert len(ids) == len(set(ids))
+
+
+def test_ea_restart_continues_generation_numbering(tmp_path) -> None:
+    """After restarting at generation g, the first new births are at g + 1."""
+    db, _ = _source_run(tmp_path, steps=2)
+    ea = EA(operations=[plus_select], restart=db,
+            db_file_path=tmp_path / "part2.db", quiet=True)
+    assert ea.current_generation == 2
+    ea.step()
+    births = {ind.time_of_birth for ind in ea._fetch(only_alive=False)
+              if ind.time_of_birth > 2}
+    assert births == {3}

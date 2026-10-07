@@ -270,7 +270,11 @@ class EA:
         restart from the latest recorded generation, or a
         ``(path, generation)`` tuple to restart from a specific
         generation. Overrides ``population`` and auto-sets
-        ``first_generation_id`` when not specified. Default is ``None``.
+        ``first_generation_id`` when not specified. Only the survivors of
+        that generation are restored, under their original ids; new
+        individuals get ids above the source database's highest id, so ids
+        are unique across the source and the new database (a restored
+        individual appears in both under the same id). Default is ``None``.
     num_steps : int or None, optional
         Total number of generational steps to run. Falls back to
         ``config.num_steps`` when ``None``. Default is ``None``.
@@ -321,6 +325,10 @@ class EA:
             msg = "'operations' is required."
             raise ValueError(msg)
 
+        # Next id to hand out in _commit; only set on restart; fresh runs let
+        # SQLite assign ids.
+        self._next_id: int | None = None
+
         if restart is not None:
             source_db, restart_gen = (
                 (Path(restart), None)
@@ -341,14 +349,22 @@ class EA:
                         msg = "Source database contains no individuals."
                         raise ValueError(msg)
 
-                rows = list(
-                    session.exec(
+                # Survivors of generation ``restart_gen``: still around in a
+                # later generation, or (for the last recorded generation)
+                # still flagged alive. Individuals that merely took part in
+                # that generation's selection and lost have
+                # time_of_death == restart_gen and alive == False.
+                rows = [
+                    ind
+                    for ind in session.exec(
                         select(Individual)
                         .where(Individual.time_of_birth <= restart_gen)
                         .where(Individual.time_of_death >= restart_gen)
                         .where(Individual.requires_eval == False)  # noqa: E712
                     ).all()
-                )
+                    if ind.time_of_death > restart_gen or ind.alive
+                ]
+                source_max_id = session.exec(select(func.max(Individual.id))).one()
 
             if not rows:
                 msg = (
@@ -357,9 +373,14 @@ class EA:
                 )
                 raise ValueError(msg)
 
+            # Restored survivors keep their ids, and new individuals are
+            # numbered after the source database's highest id (see _commit),
+            # so ids stay unique across a run's database parts and stored
+            # references (e.g. parent/donor ids in tags) stay valid.
             population = Population(
                 [
                     Individual(
+                        id=ind.id,
                         alive=True,
                         time_of_birth=ind.time_of_birth,
                         time_of_death=-1,
@@ -372,8 +393,12 @@ class EA:
                     for ind in rows
                 ]
             )
+            self._next_id = source_max_id + 1
+            # The restored survivors are re-committed at restart_gen (their
+            # last generation); step() then increments, so the first new
+            # births are at restart_gen + 1.
             if first_generation_id is None:
-                first_generation_id = restart_gen + 1
+                first_generation_id = restart_gen
 
         elif population is None:
             msg = "Provide either 'population' or 'restart'."
@@ -459,9 +484,14 @@ class EA:
           has not yet been assigned a birth time (i.e. ``time_of_birth == -1``).
         - Updates ``time_of_death`` to ``current_generation``, reflecting the
           last generation in which the individual was present.
+        - After a restart, assigns new individuals ids above the source
+          database's highest id.
         """
         with Session(self.engine) as session:
             for ind in self.population:
+                if ind.id is None and self._next_id is not None:
+                    ind.id = self._next_id
+                    self._next_id += 1
                 if ind.time_of_birth == -1:
                     ind.time_of_birth = self.current_generation
                 ind.time_of_death = self.current_generation

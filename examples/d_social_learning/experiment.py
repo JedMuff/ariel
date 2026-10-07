@@ -225,11 +225,11 @@ def build_ops(
             if i % len(parent_pool) == 0:
                 _random.shuffle(parent_pool)
             parent = parent_pool[i % len(parent_pool)]
-            child_morph = simulator_dependent_functions.mutate(parent)
+            child_morph, mutation_info = simulator_dependent_functions.mutate(parent)
             child = Individual()
             parent_brain = parent.genotype_.get("brain") or []
             child.genotype = {"morph": child_morph, "brain": parent_brain}
-            child.tags = {"parent_id": parent.id}
+            child.tags = {"parent_id": parent.id, "mutation": mutation_info}
             offspring_list.append(child)
 
         pop_out = Population(list(population))
@@ -251,56 +251,74 @@ def build_ops(
         else:
             novelties = compute_novelty(descs)
 
-        all_state = _pop_state(all_alive)
         scheme_fn = SCHEMES[scheme_name]
 
         from ariel.simulation.controllers.distributed_mlp import DistributedMLP
         n_params = DistributedMLP(n_neighbors=simulator_dependent_functions.n_neighbours(), hidden=hidden).n_params
 
-        worker_args = []
-        eval_seeds = []
-        for i, ind in enumerate(all_alive):
-            if not ind.requires_eval:
+        # On the first step the initial population (no parent) is evaluated
+        # in the same generation as its offspring. Evaluate it first so the
+        # offspring can inherit from it like in every later generation;
+        # otherwise no brain exists yet and every scheme falls back to a
+        # random init for generation 1.
+        to_eval = [i for i, ind in enumerate(all_alive) if ind.requires_eval]
+        phases = [
+            [i for i in to_eval if (all_alive[i].tags_ or {}).get("parent_id") is None],
+            [i for i in to_eval if (all_alive[i].tags_ or {}).get("parent_id") is not None],
+        ]
+        evaluated = {}  # index in all_alive -> (result, eval_seed, init_theta)
+        for phase in phases:
+            if not phase:
                 continue
-            init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params, k_inherit)
-            # Drawn here in the (seeded) main process, in a fixed order, so
-            # each individual's inner learning is reproducible no matter
-            # which pool worker ends up running it.
-            eval_seed = random.getrandbits(32)
-            eval_seeds.append(eval_seed)
-            worker_args.append((
-                ind.genotype_["morph"],
-                init_mean_arr.tolist(),
-                donor_ids,
-                inner_gens,
-                inner_pop,
-                sigma,
-                hidden,
-                eval_seed,
-            ))
+            all_state = _pop_state(all_alive)
+            worker_args = []
+            eval_seeds = []
+            init_thetas = []
+            for i in phase:
+                init_mean_arr, donor_ids = scheme_fn(all_state, i, n_params, k_inherit)
+                # Drawn here in the (seeded) main process, in a fixed order, so
+                # each individual's inner learning is reproducible no matter
+                # which pool worker ends up running it.
+                eval_seed = random.getrandbits(32)
+                eval_seeds.append(eval_seed)
+                init_thetas.append(init_mean_arr.tolist())
+                worker_args.append((
+                    all_alive[i].genotype_["morph"],
+                    init_thetas[-1],
+                    donor_ids,
+                    inner_gens,
+                    inner_pop,
+                    sigma,
+                    hidden,
+                    eval_seed,
+                ))
 
-        if num_workers > 1:
-            results = _evaluate_with_timeout(worker_args, num_workers, eval_timeout, platform)
-        else:
-            # evaluate_individual reseeds random/np.random with each eval_seed;
-            # in-process that would clobber the main stream, so restore it.
-            rng_state = random.getstate(), np.random.get_state()
-            results = [evaluate_individual(a) for a in worker_args]
-            random.setstate(rng_state[0])
-            np.random.set_state(rng_state[1])
+            if num_workers > 1:
+                results = _evaluate_with_timeout(worker_args, num_workers, eval_timeout, platform)
+            else:
+                # evaluate_individual reseeds random/np.random with each eval_seed;
+                # in-process that would clobber the main stream, so restore it.
+                rng_state = random.getstate(), np.random.get_state()
+                results = [evaluate_individual(a) for a in worker_args]
+                random.setstate(rng_state[0])
+                np.random.set_state(rng_state[1])
+
+            for i, r, eval_seed, init_theta in zip(phase, results, eval_seeds, init_thetas):
+                evaluated[i] = (r, eval_seed, init_theta)
+                # Expose the learned brain to the next phase's donor schemes
+                # (_pop_state reads these tags).
+                all_alive[i].tags = {"theta": r["best_theta"], "distance": r["distance"]}
 
         distances = []
-        i_evaluated = 0
         for i, ind in enumerate(all_alive):
-            if ind.requires_eval:
-                r = results[i_evaluated]
-                eval_seed = eval_seeds[i_evaluated]
-                i_evaluated += 1
+            if i in evaluated:
+                r, eval_seed, init_theta = evaluated[i]
                 theta_list = r["best_theta"]
             else:
                 r = ind.tags
                 theta_list = ind.tags["theta"]
                 eval_seed = ind.tags.get("eval_seed")
+                init_theta = ind.tags.get("init_theta")
             distance = r["distance"]
             distances.append(distance)
             novelty = float(novelties[i])
@@ -317,6 +335,9 @@ def build_ops(
                 "novelty": novelty,
                 "descriptor": desc.tolist(),
                 "theta": theta_list,
+                # Brain the inner learner started from (donor mean, parent's
+                # brain, or a random draw), before any learning.
+                "init_theta": init_theta,
                 "init_fitness": r["init_fitness"],
                 "learning_curve": r["learning_curve"],
                 "donor_ids": r["donor_ids"],

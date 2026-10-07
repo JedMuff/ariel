@@ -24,10 +24,17 @@ def random_individual() -> dict:
 
 
 def mutate(genome_dict: dict) -> dict:
-    """Return a mutated copy of *genome_dict*.
+    """Return a mutated copy of *genome_dict* (see `mutate_with_info`)."""
+    return mutate_with_info(genome_dict)[0]
+
+
+def mutate_with_info(genome_dict: dict) -> tuple[dict, dict]:
+    """Return a mutated copy of *genome_dict* and a record of what was done.
 
     Applies exactly one structural mutation (point/subtree/shrink/hoist)
-    with optional 25% chance of additional rotation mutation.
+    with optional 25% chance of additional rotation mutation. The record is
+    ``{"op": <structural mutation>, "rotation": bool, "n_pruned": int}``,
+    where ``n_pruned`` counts subtrees removed for self-collision.
     """
     genome = TreeGenome.from_dict(copy.deepcopy(genome_dict))
 
@@ -45,14 +52,16 @@ def mutate(genome_dict: dict) -> dict:
     else:
         mutate_hoist(genome)
 
-    if random.random() < _ROTATION_PROB:
+    rotation = random.random() < _ROTATION_PROB
+    if rotation:
         _mutate_rotation(genome)
 
     # Point/rotation changes and grafted subtrees can make parts overlap;
     # drop any subtree that now collides (FCL, real module geometry).
-    prune_colliding_subtrees(genome)
+    n_pruned = prune_colliding_subtrees(genome)
 
-    return genome.to_dict()
+    info = {"op": mutation_type, "rotation": rotation, "n_pruned": n_pruned}
+    return genome.to_dict(), info
 
 
 def _mutate_rotation(genome: TreeGenome) -> None:

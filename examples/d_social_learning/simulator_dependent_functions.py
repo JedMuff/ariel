@@ -14,14 +14,15 @@ def get_descriptor(ind):
         return None
 
 def mutate(parent):
+    """Return (child morphology, mutation record) for *parent*."""
     if simulator == SIMULATOR_ARIEL:
-        from sim_ariel.morphology_ops import mutate as ariel_mutate
+        from sim_ariel.morphology_ops import mutate_with_info as ariel_mutate
         return ariel_mutate(parent.genotype_["morph"])
     elif simulator == SIMULATOR_EVOGYM:
-        from sim_evogym.morphology_ops import mutate as evogym_mutate
+        from sim_evogym.morphology_ops import mutate_with_info as evogym_mutate
         return evogym_mutate(parent.genotype_["morph"])
     else:
-        return None
+        return None, {}
 
 def random_individual():
     if simulator == SIMULATOR_ARIEL:
