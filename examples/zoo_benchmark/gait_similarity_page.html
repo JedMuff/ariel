@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gait Similarity Map</title>
+<!-- Template for gait_similarity_page.py, which fills in the data below. -->
+<style>
+:root {
+  --surface-0: #f5f5f3; --surface-1: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --border: #e1e0d9; --accent: #2a78d6; --accent-soft: rgba(42,120,214,.12);
+  --bar: #9ec5f4; --bar-track: #ecebe6; --link: #898781;
+  --ramp: #6da7ec,#3987e5,#256abf,#184f95,#0d366b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface-0: #111110; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --border: #2c2c2a; --accent: #5598e7; --accent-soft: rgba(85,152,231,.16);
+    --bar: #2a78d6; --bar-track: #2c2c2a; --link: #6a6964;
+    --ramp: #1c5cab,#2a78d6,#5598e7,#86b6ef,#cde2fb;
+  }
+}
+:root[data-theme="dark"] {
+  --surface-0: #111110; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --border: #2c2c2a; --accent: #5598e7; --accent-soft: rgba(85,152,231,.16);
+  --bar: #2a78d6; --bar-track: #2c2c2a; --link: #6a6964;
+  --ramp: #1c5cab,#2a78d6,#5598e7,#86b6ef,#cde2fb;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--surface-0); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1480px; margin: 0 auto; padding: 24px 16px 40px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.sub { color: var(--ink-2); margin: 0 0 18px; max-width: 80ch; }
+.layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(360px, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.map-card { position: sticky; top: 16px; }
+@media (max-width: 960px) { .map-card { position: static; } }
+.map-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.map-head h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.map-head .note { color: var(--muted); font-size: 12px; }
+svg#map { width: 100%; height: auto; display: block; margin-top: 8px; user-select: none; }
+svg text { font-family: inherit; }
+.axis text { fill: var(--muted); font-size: 11px; }
+.axis line.grid { stroke: var(--grid); stroke-width: 1; }
+.axis-title { fill: var(--ink-2); font-size: 12px; }
+.dot { stroke: var(--surface-1); stroke-width: 2; cursor: pointer; transition: opacity .12s; }
+.dot.dim { opacity: .25; }
+.dot-label { fill: var(--ink-2); font-size: 11.5px; pointer-events: none; transition: opacity .12s; }
+.dot-label.dim { opacity: .3; }
+.dot-label.on { fill: var(--ink); font-weight: 600; }
+.ring { fill: none; stroke: var(--ink); stroke-width: 2; pointer-events: none; }
+.ring.peek { stroke: var(--accent); stroke-dasharray: 3 2; }
+.link { stroke: var(--link); stroke-width: 1.5; stroke-dasharray: 4 3; pointer-events: none; }
+.link-label { fill: var(--muted); font-size: 10.5px; pointer-events: none; paint-order: stroke; stroke: var(--surface-1); stroke-width: 3; }
+.legend { display: flex; gap: 24px; flex-wrap: wrap; align-items: center; margin-top: 8px; color: var(--ink-2); font-size: 12px; }
+.legend .ramp { width: 140px; height: 10px; border-radius: 3px; }
+.legend .ticks { display: flex; justify-content: space-between; width: 140px; color: var(--muted); font-size: 11px; }
+.legend .sizes { display: flex; gap: 10px; align-items: center; }
+.legend .sizes span { display: inline-flex; align-items: center; gap: 4px; }
+.legend .sizes i { display: inline-block; border-radius: 50%; background: var(--muted); }
+.tip {
+  position: fixed; pointer-events: none; background: var(--surface-1); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; z-index: 10; white-space: nowrap;
+}
+.tip b { font-weight: 600; }
+.tip .m { color: var(--ink-2); }
+/* Detail panel */
+.empty { color: var(--ink-2); padding: 40px 8px; text-align: center; }
+.detail-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.detail-head h2 { font-size: 20px; margin: 0; font-weight: 600; }
+.pin { font-size: 12px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; background: none; cursor: pointer; font-family: inherit; }
+.pin.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.stats { display: flex; gap: 20px; flex-wrap: wrap; margin: 8px 0 12px; }
+.stat .k { color: var(--muted); font-size: 11.5px; }
+.stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.video { width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 8px; overflow: hidden; display: grid; place-items: center; color: #aaa; }
+.video video { width: 100%; height: 100%; object-fit: contain; display: block; }
+h3 { font-size: 13px; font-weight: 600; margin: 18px 0 6px; }
+h3 .h3note { color: var(--muted); font-weight: 400; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11.5px; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 13px; }
+td.num, th.num { text-align: right; }
+.sim tbody tr { cursor: pointer; }
+.sim tbody tr:hover, .sim tbody tr.hl { background: var(--accent-soft); }
+.sim .sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+.barcell { width: 34%; }
+.bar { height: 6px; border-radius: 3px; background: var(--bar-track); position: relative; }
+.bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--bar); }
+.desc td.name { color: var(--ink-2); }
+.desc tr.group td { color: var(--ink); font-weight: 600; font-size: 12px; padding-top: 12px; border-bottom: none; }
+.desc .rank { color: var(--muted); font-size: 11.5px; }
+.more { margin-top: 6px; font: inherit; font-size: 12px; color: var(--accent); background: none; border: none; cursor: pointer; padding: 0; }
+.na { color: var(--muted); }
+.controls { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin: 10px 0 2px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; padding: 2px; gap: 2px; }
+.seg-label { color: var(--muted); font-size: 12px; margin-right: 6px; }
+.seg button { font: inherit; font-size: 12.5px; border: none; background: none; color: var(--ink-2); padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.frame-note { color: var(--ink-2); font-size: 12.5px; margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Gait similarity</h1>
+  <p class="sub" id="sub"></p>
+  <div class="layout">
+    <section class="card map-card">
+      <div class="map-head">
+        <h2>2D map of gait distances</h2>
+        <span class="note" id="stress"></span>
+      </div>
+      <div class="controls">
+        <div><span class="seg-label">Compare</span><span class="seg" id="frameSeg"></span></div>
+        <div id="leftoverCtl"><span class="seg-label">Leftover modules</span><span class="seg" id="leftoverSeg"></span></div>
+        <div><span class="seg-label">Colour</span><span class="seg" id="colorSeg"></span></div>
+      </div>
+      <p class="frame-note" id="frameNote"></p>
+      <svg id="map" role="img" aria-label="MDS map of gait similarity"></svg>
+      <div class="legend">
+        <div>
+          <div id="colorTitle"></div>
+          <div class="ramp" id="ramp"></div>
+          <div class="ticks" id="rampTicks"></div>
+        </div>
+        <div>
+          <div>hinges</div>
+          <div class="sizes" id="sizes"></div>
+        </div>
+      </div>
+    </section>
+    <section class="card" id="detail"></section>
+  </div>
+</main>
+<div class="tip" id="tip"></div>
+<script>
+const DATA = /*__DATA__*/null;
+
+const DESCRIPTOR_INFO = {
+  net_displacement: ["net displacement", "m"], path_length: ["path length", "m"],
+  mean_speed: ["mean path speed", "m/s"], straightness: ["straightness", ""],
+  axis_displacement: ["displacement along +x", "m"], lateral_drift: ["lateral drift", "m"],
+  yaw_total: ["total yaw", "rad"], mean_abs_yaw_rate: ["mean |yaw rate|", "rad/s"],
+  core_height_mean: ["core height, mean", "m"], core_height_std: ["core height, std", "m"],
+  core_tilt_mean: ["core tilt, mean", "rad"], core_tilt_std: ["core tilt, std", "rad"],
+  duty_factor_mean: ["duty factor", ""], n_contact_bodies_mean: ["bodies in contact", ""],
+  frac_bodies_ever_contact: ["bodies ever in contact", "frac"], contact_entropy_bits: ["contact-pattern entropy", "bits"],
+  c_hinge: ["rotor touchdowns", ""],
+  gait_frequency_hz: ["gait frequency", "Hz"], joint_amplitude_mean: ["joint amplitude", "rad"],
+  joint_corr_abs_mean: ["|joint correlation|", ""],
+  mirror_pair_frac: ["mirror-paired hinges", "frac"], mirror_pair_corr_mean: ["mirror-pair correlation", ""],
+  mirror_pair_phase_lag: ["mirror-pair phase lag", "rad"], mirror_pair_amp_asym: ["mirror-pair amplitude asym.", ""],
+  mirror_plane: ["mirror plane (0=x, 1=y)", ""],
+  ctrl_abs_mean: ["|control|, mean", "rad"], ctrl_jerk_mean: ["control jerk", "rad"],
+};
+
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs = {}, parent) => {
+  const el = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (parent) parent.appendChild(el);
+  return el;
+};
+const fmt = (v, digits = 3) => {
+  if (v === null || v === undefined) return '<span class="na">–</span>';
+  if (Number.isInteger(v)) return String(v);
+  const a = Math.abs(v);
+  if (a !== 0 && (a < 1e-3 || a >= 1e4)) return v.toExponential(2);
+  return v.toFixed(a >= 100 ? 1 : a >= 10 ? 2 : digits);
+};
+
+const gaits = DATA.gaits;
+const byLabel = Object.fromEntries(gaits.map((g) => [g.label, g]));
+const FRAME_KEYS = Object.keys(DATA.frames);
+const FRAME_NOTE = {
+  cycle_shape: "Mean gait cycles scaled to the same amplitude: only the shape and timing of the motion count. " +
+    "Distance is dimensionless (0 = identical shape, about 1.4 = unrelated).",
+  cycle: "Mean gait cycles in metres: amplitude counts too, and it grows with body size, so large bodies sit apart.",
+  core: "Whole episodes in the core's frame, sample by sample (speed and phase dependent).",
+  world: "Whole episodes in the world frame, sample by sample (travel counts).",
+};
+const LEFTOVER = {
+  charge: ["charged", "Each unmatched module of the larger robot is charged its best match."],
+  ignore: ["ignored", "Unmatched modules of the larger robot are ignored: only the smaller robot's modules, " +
+    "each with its matched partner, count."],
+};
+const COLOR_BY = {
+  xspeed: { name: "x-speed", title: "champion x-speed (m/s)", get: (g) => g.xspeed, digits: 2 },
+  rel_amplitude: { name: "amplitude / size", title: "cycle amplitude / body size", get: (g) => g.cycle.rel_amplitude, digits: 2 },
+};
+
+$("title").textContent = DATA.title;
+$("sub").textContent = "Each dot is the best-seed champion gait on one body. Distances between dots approximate " +
+  "the distances between gaits. Hover a dot to inspect it, click to pin it.";
+
+let frameKey = FRAME_KEYS[0], leftoverKey = DATA.leftovers[0], colorKey = "xspeed";
+const frame = () => DATA.frames[frameKey][leftoverKey];
+const similar = (label) => frame().similar[label];
+// Distance as shown: millimetres for metric comparisons, 3 decimals for dimensionless ones.
+const distUnit = () => (frame().unit === "m" ? "mm" : "");
+const fmtDist = (d) => (frame().unit === "m" ? (d * 1000).toFixed(0) : d.toFixed(3));
+const distText = (d) => fmtDist(d) + (distUnit() ? " " + distUnit() : "");
+
+function segmented(el, options, current, onPick) {
+  el.innerHTML = "";
+  for (const [key, label] of options) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.setAttribute("aria-pressed", key === current);
+    b.addEventListener("click", () => {
+      el.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b));
+      onPick(key);
+    });
+    el.appendChild(b);
+  }
+}
+segmented($("frameSeg"), FRAME_KEYS.map((k) => [k, DATA.frames[k][leftoverKey].name]), frameKey, (k) => { frameKey = k; drawMap(); render(shown); });
+if (DATA.leftovers.length > 1) {
+  segmented($("leftoverSeg"), DATA.leftovers.map((k) => [k, LEFTOVER[k][0]]), leftoverKey, (k) => { leftoverKey = k; drawMap(); render(shown); });
+} else $("leftoverCtl").style.display = "none";
+segmented($("colorSeg"), Object.entries(COLOR_BY).map(([k, c]) => [k, c.name]), colorKey, (k) => { colorKey = k; paintDots(); render(shown); });
+
+// ── Colour scale ─────────────────────────────────────────────────────────────
+let ramp = [];
+function readRamp() {
+  ramp = getComputedStyle(document.documentElement).getPropertyValue("--ramp").split(",").map((s) => s.trim());
+  $("ramp").style.background = `linear-gradient(90deg, ${ramp.join(",")})`;
+}
+const hex2rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+function colorOf(g) {
+  const c = COLOR_BY[colorKey], vals = gaits.map(c.get).filter((v) => v !== null);
+  const lo = Math.min(...vals), hi = Math.max(...vals), v = c.get(g);
+  if (v === null) return "var(--muted)";
+  const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo || 1))) * (ramp.length - 1);
+  const i = Math.min(Math.floor(t), ramp.length - 2), f = t - i;
+  const a = hex2rgb(ramp[i]), b = hex2rgb(ramp[i + 1]);
+  return `rgb(${a.map((x, k) => Math.round(x + (b[k] - x) * f)).join(",")})`;
+}
+function drawLegend() {
+  const c = COLOR_BY[colorKey], vals = gaits.map(c.get).filter((v) => v !== null);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  $("colorTitle").textContent = c.title;
+  $("rampTicks").innerHTML = [lo, (lo + hi) / 2, hi].map((v) => `<span>${v.toFixed(c.digits)}</span>`).join("");
+}
+
+// Marker area grows with hinge count, as in the PNG (s = 30 + 12 * hinges, in pt^2).
+const radius = (h) => Math.sqrt(30 + 12 * h) * 0.75;
+const hingeVals = gaits.map((g) => g.n_hinges);
+const hMin = Math.min(...hingeVals), hMax = Math.max(...hingeVals);
+$("sizes").innerHTML = [...new Set([hMin, Math.round((hMin + hMax) / 2), hMax])].map((h) => {
+  const d = 2 * radius(h);
+  return `<span><i style="width:${d}px;height:${d}px"></i>${h}</span>`;
+}).join("");
+
+// ── Map ──────────────────────────────────────────────────────────────────────
+const W = 760, H = 640, M = { l: 56, r: 24, t: 16, b: 46 };
+const svg = $("map");
+svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+let sx, sy, linkLayer, ringLayer;
+const nodes = {};
+const pos = (label) => frame().xy[label];
+
+const niceStep = (span) => {
+  const raw = span / 6, p = 10 ** Math.floor(Math.log10(raw)), n = raw / p;
+  return p * (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10);
+};
+
+function drawMap() {
+  svg.innerHTML = "";
+  const f = frame();
+  const stressNote = f.stress > 0.1 ? " — 2D distances are approximate; the ranking table uses the true ones" : "";
+  $("stress").textContent = `MDS stress-1 = ${f.stress.toFixed(2)}${stressNote}`;
+  $("frameNote").textContent = (FRAME_NOTE[frameKey] || f.title) +
+    (DATA.leftovers.length > 1 ? " " + LEFTOVER[leftoverKey][1] : "");
+
+  const xs = gaits.map((g) => pos(g.label)[0]), ys = gaits.map((g) => pos(g.label)[1]);
+  let [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const pad = 0.08 * Math.max(x1 - x0, y1 - y0);
+  x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
+  // Equal aspect: one distance unit is the same length on both axes.
+  const pw = W - M.l - M.r, ph = H - M.t - M.b;
+  const k = Math.min(pw / (x1 - x0), ph / (y1 - y0));
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  sx = (x) => M.l + pw / 2 + (x - cx) * k;
+  sy = (y) => M.t + ph / 2 - (y - cy) * k;
+
+  const axis = svgEl("g", { class: "axis" }, svg);
+  const step = niceStep(Math.max(pw, ph) / k);
+  const xLo = cx - pw / 2 / k, xHi = cx + pw / 2 / k, yLo = cy - ph / 2 / k, yHi = cy + ph / 2 / k;
+  const tick = (v) => (+v.toFixed(6)).toString();
+  for (let v = Math.ceil(xLo / step) * step; v <= xHi + 1e-12; v += step) {
+    svgEl("line", { class: "grid", x1: sx(v), x2: sx(v), y1: M.t, y2: H - M.b }, axis);
+    svgEl("text", { x: sx(v), y: H - M.b + 16, "text-anchor": "middle" }, axis).textContent = tick(v);
+  }
+  for (let v = Math.ceil(yLo / step) * step; v <= yHi + 1e-12; v += step) {
+    svgEl("line", { class: "grid", x1: M.l, x2: W - M.r, y1: sy(v), y2: sy(v) }, axis);
+    svgEl("text", { x: M.l - 8, y: sy(v) + 4, "text-anchor": "end" }, axis).textContent = tick(v);
+  }
+  const u = f.unit ? ` (${f.unit})` : "";
+  svgEl("text", { class: "axis-title", x: M.l + pw / 2, y: H - 8, "text-anchor": "middle" }, svg).textContent = "MDS 1" + u;
+  svgEl("text", { class: "axis-title", transform: `translate(14 ${M.t + ph / 2}) rotate(-90)`, "text-anchor": "middle" }, svg).textContent = "MDS 2" + u;
+
+  linkLayer = svgEl("g", {}, svg);
+  const dotLayer = svgEl("g", {}, svg);
+  const labelLayer = svgEl("g", {}, svg);
+  ringLayer = svgEl("g", {}, svg);
+
+  // Draw large markers first so small ones stay on top.
+  [...gaits].sort((a, b) => b.n_hinges - a.n_hinges).forEach((g) => {
+    const r = radius(g.n_hinges), [x, y] = pos(g.label);
+    const c = svgEl("circle", { class: "dot", cx: sx(x), cy: sy(y), r }, dotLayer);
+    // Invisible, larger hit target.
+    const hit = svgEl("circle", { cx: sx(x), cy: sy(y), r: Math.max(r + 5, 12), fill: "transparent", style: "cursor:pointer" }, dotLayer);
+    hit.addEventListener("mouseenter", (e) => onEnter(g.label, e));
+    hit.addEventListener("mousemove", moveTip);
+    hit.addEventListener("mouseleave", onLeave);
+    hit.addEventListener("click", (e) => { e.stopPropagation(); togglePin(g.label); });
+    nodes[g.label] = { dot: c, r };
+  });
+
+  // Greedy label placement: try right, left, above, below; keep the first spot clear of
+  // labels and dots placed so far.
+  const placed = gaits.map((g) => {
+    const [x, y] = pos(g.label), r = radius(g.n_hinges);
+    return { x0: sx(x) - r, x1: sx(x) + r, y0: sy(y) - r, y1: sy(y) + r };
+  });
+  const overlaps = (b) => placed.some((p) => b.x0 < p.x1 && b.x1 > p.x0 && b.y0 < p.y1 && b.y1 > p.y0);
+  gaits.forEach((g) => {
+    const [gx, gy] = pos(g.label), x = sx(gx), y = sy(gy), r = radius(g.n_hinges) + 3;
+    const w = g.label.length * 6.6, h = 12;
+    const options = [
+      { x: x + r, y: y + 4, a: "start", b: { x0: x + r, x1: x + r + w, y0: y - 6, y1: y + 6 } },
+      { x: x - r, y: y + 4, a: "end", b: { x0: x - r - w, x1: x - r, y0: y - 6, y1: y + 6 } },
+      { x, y: y - r - 3, a: "middle", b: { x0: x - w / 2, x1: x + w / 2, y0: y - r - 3 - h, y1: y - r - 3 } },
+      { x, y: y + r + 11, a: "middle", b: { x0: x - w / 2, x1: x + w / 2, y0: y + r, y1: y + r + h } },
+    ];
+    const o = options.find((o) => !overlaps(o.b)) || options[0];
+    placed.push(o.b);
+    const t = svgEl("text", { class: "dot-label", x: o.x, y: o.y, "text-anchor": o.a }, labelLayer);
+    t.textContent = g.label;
+    nodes[g.label].label = t;
+  });
+  paintDots();
+}
+
+function paintDots() {
+  drawLegend();
+  for (const g of gaits) nodes[g.label].dot.setAttribute("fill", colorOf(g));
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+let pinned = null, shown = null;
+svg.addEventListener("click", () => { if (pinned) { pinned = null; render(shown); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinned) { pinned = null; render(shown); } });
+
+function onEnter(label, e) {
+  if (pinned) { setPeek(label); showTip(label, e); }
+  else render(label);
+}
+function onLeave() {
+  hideTip();
+  if (pinned) setPeek(null);
+}
+function togglePin(label) {
+  pinned = pinned === label ? null : label;
+  setPeek(null); hideTip();
+  render(label);
+}
+
+function setPeek(label) {
+  ringLayer.querySelectorAll(".peek").forEach((n) => n.remove());
+  document.querySelectorAll(".sim tbody tr").forEach((tr) => tr.classList.toggle("hl", tr.dataset.label === label));
+  if (!label || label === shown) return;
+  const [x, y] = pos(label);
+  svgEl("circle", { class: "ring peek", cx: sx(x), cy: sy(y), r: nodes[label].r + 4 }, ringLayer);
+  nodes[label].dot.classList.remove("dim"); nodes[label].label.classList.remove("dim");
+}
+
+const tip = $("tip");
+function showTip(label, e) {
+  if (!shown || label === shown) { hideTip(); return; }
+  const list = similar(shown), s = list.find((x) => x.label === label);
+  tip.innerHTML = `<b>${label}</b> <span class="m">#${list.indexOf(s) + 1} nearest to ${shown} · ${distText(s.distance)}</span>`;
+  tip.style.display = "block";
+  moveTip(e);
+}
+function moveTip(e) {
+  if (tip.style.display !== "block") return;
+  const pad = 14, w = tip.offsetWidth;
+  tip.style.left = Math.min(e.clientX + pad, window.innerWidth - w - 8) + "px";
+  tip.style.top = e.clientY + pad + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+let showAll = false;
+
+function drawSelection(label) {
+  linkLayer.innerHTML = ""; ringLayer.innerHTML = "";
+  for (const g of gaits) {
+    nodes[g.label].dot.classList.remove("dim"); nodes[g.label].label.classList.remove("dim", "on");
+  }
+  if (!label) return;
+  const [gx, gy] = pos(label);
+  const near = similar(label).slice(0, DATA.top);
+  const nearSet = new Set([label, ...near.map((s) => s.label)]);
+  for (const s of near) {
+    const [ox, oy] = pos(s.label);
+    svgEl("line", { class: "link", x1: sx(gx), y1: sy(gy), x2: sx(ox), y2: sy(oy) }, linkLayer);
+  }
+  for (const o of gaits) {
+    if (!nearSet.has(o.label)) { nodes[o.label].dot.classList.add("dim"); nodes[o.label].label.classList.add("dim"); }
+  }
+  nodes[label].label.classList.add("on");
+  svgEl("circle", { class: "ring", cx: sx(gx), cy: sy(gy), r: nodes[label].r + 4 }, ringLayer);
+}
+
+function rankOf(name, value, group) {
+  // Rank 1 = largest value among gaits that have one.
+  const vals = gaits.map((g) => (group === "cycle" ? g.cycle : g.descriptors)[name]).filter((v) => v !== null);
+  if (value === null || !vals.length) return null;
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  return { rank: vals.filter((v) => v > value).length + 1, n: vals.length, frac: hi > lo ? (value - lo) / (hi - lo) : 1 };
+}
+
+function descriptorRows(g) {
+  let html = "";
+  for (const [group, names] of Object.entries(DATA.groups)) {
+    const isCycle = group === "Gait cycle";
+    html += `<tr class="group"><td colspan="4">${group}</td></tr>`;
+    for (const name of names) {
+      const v = (isCycle ? g.cycle : g.descriptors)[name];
+      const [nice, unit] = isCycle ? [DATA.cycle_names[name], ""] : (DESCRIPTOR_INFO[name] || [name, ""]);
+      const r = rankOf(name, v, isCycle ? "cycle" : "desc");
+      html += `<tr title="${name}">
+        <td class="name">${nice}${unit ? ` <span class="na">(${unit})</span>` : ""}</td>
+        <td class="num">${fmt(v)}</td>
+        <td class="barcell">${r ? `<div class="bar"><i style="width:${Math.max(2, r.frac * 100)}%"></i></div>` : ""}</td>
+        <td class="num rank">${r ? `${r.rank}/${r.n}` : ""}</td></tr>`;
+    }
+  }
+  return html;
+}
+
+function similarRows(label) {
+  const list = similar(label);
+  const maxD = Math.max(...gaits.flatMap((g) => similar(g.label).map((s) => s.distance)));
+  const hasAlign = list.some((s) => s.mirrored !== undefined);
+  const rows = (showAll ? list : list.slice(0, 10)).map((s, i) => `
+    <tr data-label="${s.label}">
+      <td class="num">${i + 1}</td>
+      <td><span class="sw" style="background:${colorOf(byLabel[s.label])}"></span>${s.label}</td>
+      <td class="num">${fmtDist(s.distance)}</td>
+      <td class="barcell"><div class="bar"><i style="width:${(s.distance / maxD) * 100}%"></i></div></td>
+      ${hasAlign ? `<td>${s.mirrored ? "yes" : "no"}</td><td class="num">${s.yaw_deg.toFixed(0)}°</td>
+      <td class="num">${s.phase_shift.toFixed(2)}</td>` : ""}
+    </tr>`).join("");
+  const head = distUnit() ? `distance (${distUnit()})` : "distance";
+  return `<table class="sim"><thead><tr><th class="num">#</th><th>body</th><th class="num">${head}</th><th></th>
+    ${hasAlign ? '<th>mirrored</th><th class="num">yaw</th><th class="num">phase</th>' : ""}</tr></thead>
+    <tbody>${rows}</tbody></table>
+    ${list.length > 10 ? `<button class="more" id="more">${showAll ? "Show top 10" : `Show all ${list.length}`}</button>` : ""}`;
+}
+
+let videoFor = null;
+function render(label) {
+  shown = label;
+  const hash = pinned ? "#" + encodeURIComponent(pinned) : "";
+  if (location.hash !== hash) history.replaceState(null, "", hash || location.pathname + location.search);
+  drawSelection(label);
+  const el = $("detail");
+  if (!label) {
+    videoFor = null;
+    el.innerHTML = '<div class="empty">Hover a gait on the map to see its video, behavioural descriptors and most similar gaits.</div>';
+    return;
+  }
+  const g = byLabel[label];
+  const nearest = similar(label)[0];
+  // Keep the playing video when only the comparison or colour changed.
+  const keepVideo = videoFor === label && el.querySelector(".video");
+  const video = keepVideo ? el.querySelector(".video") : null;
+  el.innerHTML = `
+    <div class="detail-head">
+      <h2>${label}</h2>
+      <button class="pin ${pinned === label ? "on" : ""}" id="pinBtn">${pinned === label ? "Pinned · click to release" : "Click dot to pin"}</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">x-speed</div><div class="v">${g.xspeed.toFixed(3)} m/s</div></div>
+      <div class="stat"><div class="k">hinges</div><div class="v">${g.n_hinges}</div></div>
+      <div class="stat"><div class="k">gait period</div><div class="v">${g.cycle.period_s === null ? "–" : g.cycle.period_s.toFixed(2) + " s"}</div></div>
+      <div class="stat"><div class="k">amplitude / size</div><div class="v">${fmt(g.cycle.rel_amplitude, 2)}</div></div>
+      <div class="stat"><div class="k">nearest gait</div><div class="v">${nearest.label} <span style="font-weight:400;color:var(--ink-2)">${distText(nearest.distance)}</span></div></div>
+      <div class="stat"><div class="k">seed</div><div class="v">${g.seed}</div></div>
+    </div>
+    <div id="videoSlot"></div>
+    <h3>Most similar gaits <span class="h3note">${frame().name}${DATA.leftovers.length > 1 ? ", leftovers " + LEFTOVER[leftoverKey][0] : ""}${nearest.mirrored !== undefined ? "; best mirror, yaw and phase shift of the other gait" : ""}</span></h3>
+    ${similarRows(label)}
+    <h3>Behavioural descriptors <span class="h3note">bar and rank: position among all ${gaits.length} gaits (1 = largest)</span></h3>
+    <table class="desc"><tbody>${descriptorRows(g)}</tbody></table>`;
+  if (video) { $("videoSlot").replaceWith(video); video.querySelector("video")?.play().catch(() => {}); }
+  else $("videoSlot").outerHTML = `<div class="video">${g.video ? `<video src="${g.video}" autoplay muted loop playsinline controls></video>` : "no video"}</div>`;
+  videoFor = label;
+  $("pinBtn").addEventListener("click", () => togglePin(label));
+  const more = $("more");
+  if (more) more.addEventListener("click", () => { showAll = !showAll; render(label); });
+  el.querySelectorAll(".sim tbody tr").forEach((tr) => {
+    tr.addEventListener("mouseenter", () => setPeek(tr.dataset.label));
+    tr.addEventListener("mouseleave", () => setPeek(null));
+    tr.addEventListener("click", () => { pinned = tr.dataset.label; render(pinned); });
+  });
+}
+
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readRamp(); paintDots(); render(shown); });
+readRamp(); drawMap();
+// #<body> in the URL pins that gait, so a view can be linked.
+const fromHash = () => { const l = decodeURIComponent(location.hash.slice(1)); pinned = byLabel[l] ? l : null; render(pinned); };
+window.addEventListener("hashchange", fromHash);
+fromHash();
+</script>
+</body>
+</html>
