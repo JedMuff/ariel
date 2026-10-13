@@ -398,7 +398,7 @@ def _train_pipeline_for_body(
     waypoints: list[np.ndarray],
     seed: int,
 ) -> dict[str, Any]:
-    loco_w, loco_curve, loco_time = train_skill_for_body(
+    loco_w, loco_curve, loco_time, _ = train_skill_for_body(
         SkillReward(kind="translate", angle_deg=0.0, duration=LOCO_DURATION),
         genome_dict, LOCO_BUDGET, BRAIN_WORKERS, seed, to_spec_fn=ADAPTER.to_spec,
         brain_kind=BRAIN,
@@ -425,12 +425,12 @@ def _train_pipeline_for_body(
             "skill_pct":            {},
         }
 
-    left_w, left_curve, left_time = train_skill_for_body(
+    left_w, left_curve, left_time, _ = train_skill_for_body(
         SkillReward(kind="rotate", turn_sign=+1, duration=TURN_DURATION),
         genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 1, to_spec_fn=ADAPTER.to_spec,
         brain_kind=BRAIN,
     )
-    right_w, right_curve, right_time = train_skill_for_body(
+    right_w, right_curve, right_time, _ = train_skill_for_body(
         SkillReward(kind="rotate", turn_sign=-1, duration=TURN_DURATION),
         genome_dict, TURN_BUDGET, BRAIN_WORKERS, seed + 2, to_spec_fn=ADAPTER.to_spec,
         brain_kind=BRAIN,

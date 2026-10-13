@@ -295,6 +295,105 @@ def genome_to_spec(genome_dict: dict) -> Optional[mujoco.MjSpec]:
         return None
 
 
+# kgd's zoo modules (examples/zoo_benchmark/zoo_modules.py; test_zoo_modules.py
+# keeps these in sync). Only the values differ: the local module classes, and
+# so their face layout (incl. the brick TOP/BOTTOM faces kgd's lack), are kept,
+# and every site position scales with the dimensions.
+ZOO_HINGE_KP          = 1.3605113362038874
+ZOO_HINGE_KV          = 0.3555497840137177
+ZOO_HINGE_ARMATURE    = 0.08117047736037042
+ZOO_HINGE_RANGE       = (-math.pi / 2, math.pi / 2)  # hard joint limit, same as the ctrl range
+ZOO_CORE_MASS         = 1.363
+ZOO_STATOR_MASS       = 0.065
+ZOO_ROTOR_MASS        = 0.040
+ZOO_BRICK_MASS        = 0.055
+ZOO_CORE_DIMENSIONS   = (0.075, 0.075, 0.075)  # half-extents (m)
+ZOO_BRICK_DIMENSIONS  = (0.0375, 0.0375, 0.0375)
+ZOO_STATOR_DIMENSIONS = (0.026, 0.022, 0.026)
+ZOO_ROTOR_DIMENSIONS  = (0.026, 0.0155, 0.026)
+
+_ZOO_LOCK = threading.RLock()
+
+
+def _zoo_module_overrides() -> list[tuple[Any, str, Any]]:
+    """(module, attribute, zoo value) for the module-level constants the local
+    module classes read when they are instantiated."""
+    from ariel.body_phenotypes.robogen_lite.modules import brick, core, hinge  # noqa: PLC0415
+
+    brick_config = brick.ariel_modules_config.model_copy(
+        update={"BRICK_MASS": ZOO_BRICK_MASS, "BRICK_DIMENSIONS": ZOO_BRICK_DIMENSIONS},
+    )
+    return [
+        (core, "CORE_MASS", ZOO_CORE_MASS),
+        (core, "CORE_DIMENSIONS", ZOO_CORE_DIMENSIONS),
+        (hinge, "STATOR_MASS", ZOO_STATOR_MASS),
+        (hinge, "ROTOR_MASS", ZOO_ROTOR_MASS),
+        (hinge, "STATOR_DIMENSIONS", ZOO_STATOR_DIMENSIONS),
+        (hinge, "ROTOR_DIMENSIONS", ZOO_ROTOR_DIMENSIONS),
+        (brick, "ariel_modules_config", brick_config),
+    ]
+
+
+def _set_module_constants(values: list[tuple[Any, str, Any]]) -> None:
+    from ariel.body_phenotypes.robogen_lite.collision_utils import module_template  # noqa: PLC0415
+
+    for mod, name, value in values:
+        setattr(mod, name, value)
+    module_template.cache_clear()  # collision geometry is compiled from the module classes and cached
+
+
+@contextlib.contextmanager
+def zoo_module_constants():
+    """Build modules with kgd's zoo sizes and masses inside this block; the
+    previous values (local ones, or zoo ones after use_zoo_modules_globally)
+    are restored on exit."""
+    with _ZOO_LOCK:
+        overrides = _zoo_module_overrides()
+        saved = [(mod, name, getattr(mod, name)) for mod, name, _ in overrides]
+        _set_module_constants(overrides)
+        try:
+            yield
+        finally:
+            _set_module_constants(saved)
+
+
+def use_zoo_modules_globally() -> None:
+    """Zoo sizes and masses for the rest of this process (and forked workers),
+    so the genome operators' collision checks use the zoo geometry too."""
+    _set_module_constants(_zoo_module_overrides())
+
+
+def apply_zoo_modules(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """Give a robot spec kgd's zoo hinge actuator (kp, kv, armature, a +-90 deg
+    joint limit), in place. Hard-coded in hinge.py, so set after construction."""
+    for a in spec.actuators:
+        a.gainprm[0] = ZOO_HINGE_KP
+        a.biasprm[1] = -ZOO_HINGE_KP
+        a.biasprm[2] = -ZOO_HINGE_KV
+    scale = 180.0 / math.pi if spec.compiler.degree else 1.0
+    for j in spec.joints:
+        if j.type == mujoco.mjtJoint.mjJNT_HINGE:
+            j.armature = ZOO_HINGE_ARMATURE
+            j.range = [r * scale for r in ZOO_HINGE_RANGE]
+            j.limited = mujoco.mjtLimited.mjLIMITED_TRUE
+    return spec
+
+
+def zoo_modules_spec(genome_dict: dict, to_spec_fn=genome_to_spec) -> Optional[mujoco.MjSpec]:
+    """to_spec_fn(genome_dict) built with kgd's zoo modules: sizes and masses
+    (zoo_module_constants) and hinge actuator (apply_zoo_modules). Picklable
+    via with_zoo_modules."""
+    with zoo_module_constants():
+        spec = to_spec_fn(genome_dict)
+    return apply_zoo_modules(spec) if spec is not None else None
+
+
+def with_zoo_modules(to_spec_fn=genome_to_spec):
+    """A to_spec_fn that builds bodies with kgd's zoo modules (--zoo-modules)."""
+    import functools  # noqa: PLC0415
+    return functools.partial(zoo_modules_spec, to_spec_fn=to_spec_fn)
+
+
 def build_world_for_body(
     genome_dict: dict,
     reach_radius: float,
@@ -943,6 +1042,7 @@ CTRL_ALPHA               = 0.5
 HEIGHT_PENALTY_THRESHOLD  = 0.21
 JERK_PENALTY_WEIGHT       = 3.0   # penalty per unit of mean absolute ctrl delta, above JERK_THRESHOLD
 JERK_THRESHOLD            = 0.15  # hurdle: mean_jerk below this is free
+ROWING_RECORD_EVERY_N     = 10    # rowing penalty: body poses sampled every N sim steps (50Hz, as behavior_50hz)
 
 # The core-mounted camera's local mount (euler + position) is fixed in
 # core.py and never rotated relative to the world, since every body here
@@ -987,6 +1087,35 @@ def floor_id(model: mujoco.MjModel) -> int:
     return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
 
 
+def robot_bodies(model: mujoco.MjModel) -> list[int]:
+    """Robot bodies that own at least one geom (core, stators, rotors, bricks)."""
+    has_geom = set(int(b) for b in model.geom_bodyid)
+    return [
+        b for b in range(model.nbody)
+        if model.body(b).name.startswith("robot1_") and b in has_geom
+    ]
+
+
+def rowing_scaled_disp(disp: float, rowing_frac: float) -> float:
+    """Displacement after the rowing penalty: a forward displacement loses the
+    rowing share of the stroke (rowing_detect's rowing_frac, in [0, 1]); a
+    backward one is left alone, so scaling it never helps."""
+    return disp * (1.0 - rowing_frac) if disp > 0 else disp
+
+
+def rowing_info(poses: list[np.ndarray], quats: list[np.ndarray], dt: float) -> dict[str, Any]:
+    """rowing_detect's (rowing_frac, rowing_label) of post-settle body poses
+    sampled every dt s, core first. A detector failure counts as no rowing."""
+    from rowing_detect import analyse_episode  # lazy: pulls in zoo_benchmark/gait_similarity
+
+    try:
+        ind, _ = analyse_episode(np.asarray(poses), np.asarray(quats), dt)
+        return {"rowing_frac": float(ind["rowing_frac"]), "rowing_label": str(ind["rowing_label"])}
+    except Exception as exc:  # noqa: BLE001
+        print(f"rowing_detect failed ({exc!r}); no rowing penalty", flush=True)
+        return {"rowing_frac": 0.0, "rowing_label": "error"}
+
+
 def build_loco_world_for_body(genome_dict: dict, to_spec_fn=genome_to_spec) -> tuple[mujoco.MjModel, mujoco.MjData]:
     """Plain flat-world body, no food target/camera — used for skill training."""
     spec = to_spec_fn(genome_dict)
@@ -1009,6 +1138,7 @@ _skill_worker_ctx: Optional[dict[str, Any]] = None
 def _skill_worker_init(
     seed: int, reward: SkillReward, genome_dict: dict, to_spec_fn, control_step_freq: int,
     brain_kind: str = "ann",
+    rowing_penalty: bool = False,
 ) -> None:
     global _skill_worker_ctx  # noqa: PLW0603
     torch.set_num_threads(1)
@@ -1018,10 +1148,14 @@ def _skill_worker_init(
     _skill_worker_ctx = {
         "model": model, "data": data, "brain": brain, "reward": reward,
         "control_step_freq": control_step_freq,
+        "rowing_bodies": robot_bodies(model) if rowing_penalty else None,
     }
 
 
-def _skill_worker_eval(weights_list: list[float]) -> float:
+def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]]:
+    """(fitness, info) of one candidate. info holds raw_score (displacement or
+    accumulated yaw) and, with the rowing penalty on, rowing_frac and
+    rowing_label."""
     assert _skill_worker_ctx is not None
     ctx       = _skill_worker_ctx
     model     = ctx["model"]
@@ -1029,11 +1163,14 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
     brain     = ctx["brain"]
     reward: SkillReward = ctx["reward"]
     control_step_freq: int = ctx["control_step_freq"]
+    rowing_bodies: Optional[list[int]] = ctx["rowing_bodies"]
     brain.set_params(np.array(weights_list, dtype=np.float32))
     mujoco.mj_resetData(model, data)
 
+    sim_step = 0
     while data.time < SETTLE_DURATION:
         mujoco.mj_step(model, data)
+        sim_step += 1
 
     core_id        = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
     initial_height = float(data.xpos[core_id, 2])
@@ -1042,6 +1179,8 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
     prev_ctrl: Optional[np.ndarray] = None
     jerk_sum       = 0.0
     ctrl_step      = 0
+    poses: list[np.ndarray] = []
+    quats: list[np.ndarray] = []
 
     if reward.kind == "translate":
         xy0           = np.array([data.qpos[0], data.qpos[1]])
@@ -1072,18 +1211,30 @@ def _skill_worker_eval(weights_list: list[float]) -> float:
             accumulated += max(0.0, delta * reward.turn_sign)
             r_prev = r_curr.copy()
 
+        # Same sampling as behavior_common.replay_skill_episode's pose rows,
+        # whose 50Hz replays the rowing detector was validated on.
+        if rowing_bodies is not None and sim_step % ROWING_RECORD_EVERY_N == 0:
+            poses.append(data.xpos[rowing_bodies].copy())
+            quats.append(data.xquat[rowing_bodies].copy())
+
         step += 1
+        sim_step += 1
 
     mean_jerk    = jerk_sum / max(ctrl_step - 1, 1)
     jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
 
     height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
     if reward.kind == "translate":
-        xy_now   = np.array([data.qpos[0], data.qpos[1]])
-        fwd_disp = float(np.dot(xy_now - xy0, reward_axis))
-        return -(fwd_disp - height_penalty - jerk_penalty)
+        xy_now = np.array([data.qpos[0], data.qpos[1]])
+        raw    = float(np.dot(xy_now - xy0, reward_axis))
     else:
-        return -(accumulated - height_penalty - jerk_penalty)
+        raw = accumulated
+    info: dict[str, Any] = {"raw_score": raw}
+    score = raw
+    if rowing_bodies is not None:
+        info.update(rowing_info(poses, quats, ROWING_RECORD_EVERY_N * float(model.opt.timestep)))
+        score = rowing_scaled_disp(raw, info["rowing_frac"])
+    return -(score - height_penalty - jerk_penalty), info
 
 
 def train_skill_for_body(
@@ -1095,14 +1246,18 @@ def train_skill_for_body(
     to_spec_fn=genome_to_spec,
     control_step_freq: int = CONTROL_STEP_FREQ,
     brain_kind: str = "ann",
-) -> tuple[np.ndarray, list[float], float]:
+    rowing_penalty: bool = False,
+) -> tuple[np.ndarray, list[float], float, dict[str, Any]]:
     """Train one skill via CMA-ES for a specific body.
 
     control_step_freq is the number of physics steps between controller
     updates (see CONTROL_STEP_FREQ). brain_kind selects the controller
     (see make_brain); the returned vector is that brain's flat parameters.
+    rowing_penalty scales a forward displacement by 1 - rowing_frac (see
+    rowing_scaled_disp), the share of the stroke rowing_detect calls rowing.
 
-    Returns (best_weights, learning_curve, eval_time_s).
+    Returns (best_weights, learning_curve, eval_time_s, best_info), best_info
+    being _skill_worker_eval's info for best_weights.
     """
     t_start = time.perf_counter()
 
@@ -1119,13 +1274,14 @@ def train_skill_for_body(
 
     best_fit = float("inf")
     best_w   = np.array(x0, dtype=np.float32)
+    best_info: dict[str, Any] = {}
     learning_curve: list[float] = []
 
     effective_workers = min(CMA_POPSIZE, workers)
     with ProcessPoolExecutor(
         max_workers=effective_workers,
         initializer=_skill_worker_init,
-        initargs=(seed, reward, genome_dict, to_spec_fn, control_step_freq, brain_kind),
+        initargs=(seed, reward, genome_dict, to_spec_fn, control_step_freq, brain_kind, rowing_penalty),
     ) as pool:
         gen = 0
         while gen < budget:
@@ -1133,15 +1289,18 @@ def train_skill_for_body(
                 break
 
             solutions = es.ask()
-            fits      = list(pool.map(_skill_worker_eval, [s.tolist() for s in solutions]))
+            results   = list(pool.map(_skill_worker_eval, [s.tolist() for s in solutions]))
+            fits      = [f for f, _ in results]
             es.tell(solutions, fits)
 
             gen_best = min(fits)
             if gen_best < best_fit:
-                best_fit = gen_best
-                best_w   = np.array(solutions[fits.index(gen_best)], dtype=np.float32)
+                best_fit  = gen_best
+                i_best    = fits.index(gen_best)
+                best_w    = np.array(solutions[i_best], dtype=np.float32)
+                best_info = results[i_best][1]
                 learning_curve.append(best_fit)
 
             gen += 1
 
-    return best_w, learning_curve, time.perf_counter() - t_start
+    return best_w, learning_curve, time.perf_counter() - t_start, best_info

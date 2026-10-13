@@ -28,7 +28,8 @@ these tasks is a genuine average across skills rather than a gated pipeline.
 
 Data saved per individual during evolution (run_data.jsonl):
   gen, ind_id, parent_ids, fitness, task, genome_type,
-  per_skill: {name: {fitness, learning_curve, eval_time_s}},
+  per_skill: {name: {fitness, learning_curve, eval_time_s, raw_score
+              [, rowing_frac, rowing_label with --rowing-penalty]}},
   yz_symmetry, genome_hash, eval_time_s
 """
 
@@ -56,6 +57,8 @@ from shared import (
     SkillReward,
     nsga2_survivor_selection,
     train_skill_for_body,
+    use_zoo_modules_globally,
+    with_zoo_modules,
 )
 
 install()
@@ -99,6 +102,12 @@ parser.add_argument("--brain",         choices=BRAIN_KINDS, default="ann",
                     help="Controller trained per skill: 'ann' (closed-loop MLP on "
                          "proprioception), 'cpg' (open-loop sine oscillators) or "
                          "'revolve_cpg' (revolve's coupled-oscillator CPG)")
+parser.add_argument("--rowing-penalty", action="store_true",
+                    help="Scale a skill's forward displacement by 1 - rowing_frac, the "
+                         "share of the stroke rowing_detect.py calls rowing")
+parser.add_argument("--zoo-modules", action="store_true",
+                    help="Build bodies with kgd's zoo modules: sizes, masses and hinge "
+                         "(kp, kv, armature, +-90 deg joint limit); see shared.zoo_modules_spec")
 parser.add_argument("--time-limit",    type=float, default=None,
                     help="Wall-clock seconds; stop after current generation completes")
 args = parser.parse_args()
@@ -118,6 +127,8 @@ REPEAT_EVALS   = args.repeat_evals
 TIME_LIMIT     = args.time_limit
 CTRL_STRIDE    = args.control_step_freq
 BRAIN          = args.brain
+ROWING_PENALTY = args.rowing_penalty
+ZOO_MODULES    = args.zoo_modules
 
 TOURNAMENT_SIZE = 4
 N_DIRECTIONS    = 5   # multidirection: 360 / 5 = 72 degrees apart
@@ -136,6 +147,9 @@ with (DATA / "run_config.json").open("w") as _fh:
     json.dump(vars(args), _fh, indent=2)
 
 ADAPTER = genome_adapter.genome_adapter_from_cli(GENOME_TYPE, NUM_MODULES)
+TO_SPEC = with_zoo_modules(ADAPTER.to_spec) if ZOO_MODULES else ADAPTER.to_spec
+if ZOO_MODULES:
+    use_zoo_modules_globally()  # the genome operators' collision checks use the zoo geometry too
 
 
 # ── Skill sets per task ────────────────────────────────────────────────────────
@@ -171,11 +185,12 @@ def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
     weights: dict[str, Optional[np.ndarray]] = {}
 
     for i, (name, reward) in enumerate(SKILLS):
-        w, learning_curve, eval_time = train_skill_for_body(
+        w, learning_curve, eval_time, best_info = train_skill_for_body(
             reward, genome_dict, SKILL_BUDGET, BRAIN_WORKERS, seed + i,
-            to_spec_fn=ADAPTER.to_spec,
+            to_spec_fn=TO_SPEC,
             control_step_freq=CTRL_STRIDE,
             brain_kind=BRAIN,
+            rowing_penalty=ROWING_PENALTY,
         )
         fitness = float(min(learning_curve)) if learning_curve else float("inf")
         console.log(f"    {name}: best_fitness={fitness:.4f}")
@@ -185,6 +200,7 @@ def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
             "fitness":        fitness,
             "learning_curve": learning_curve,
             "eval_time_s":    eval_time,
+            **best_info,  # raw_score (unpenalised), rowing_frac / rowing_label with --rowing-penalty
         }
 
     return {

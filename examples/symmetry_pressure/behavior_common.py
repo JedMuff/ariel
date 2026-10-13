@@ -4,7 +4,8 @@ checkpoints (forward / multidirection / turn_avg locomotion runs).
 
 ``replay_skill_episode`` mirrors ``shared._skill_worker_eval`` step for step
 (settle, stride-gated control with CTRL_ALPHA smoothing, rotor-floor contact
-counting, yaw accumulation, jerk / height penalties) so its recomputed fitness
+counting, yaw accumulation, jerk / height penalties, and the rowing penalty
+for --rowing-penalty runs) so its recomputed fitness
 reproduces the stored per-skill fitness, and additionally records:
 
   - saved traces, subsampled every ``record_every_n`` sim steps: hinge
@@ -41,6 +42,7 @@ from shared import (
     JERK_PENALTY_WEIGHT,
     JERK_THRESHOLD,
     LOCO_DURATION,
+    ROWING_RECORD_EVERY_N,
     SETTLE_DURATION,
     TURN_DURATION,
     _rotate_2d,
@@ -48,8 +50,12 @@ from shared import (
     floor_id,
     genome_to_spec,
     make_brain_for_model,
+    robot_bodies,
     rotor_geom_ids,
+    rowing_info,
+    rowing_scaled_disp,
     signed_vertical_yaw_delta,
+    with_zoo_modules,
 )
 
 N_DIRECTIONS = 5  # must match gecko_skill_tasks.py
@@ -83,7 +89,8 @@ def resolve_replay_config(ckpt_dir: Path, max_modules: Optional[int] = None) -> 
     exactly as it was trained. Checkpoints live at <run>/checkpoints/<ckpt>;
     run_config.json sits in <run>. Runs predating --control-step-freq / --brain
     have no such keys and used the shared default / the ANN brain. ``max_modules`` overrides run_config's value
-    (itself defaulting to 25) for the cppn decoder.
+    (itself defaulting to 25) for the cppn decoder. --zoo-modules runs get
+    shared.with_zoo_modules wrapped around the decoder.
     """
     meta_path = ckpt_dir / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -97,9 +104,18 @@ def resolve_replay_config(ckpt_dir: Path, max_modules: Optional[int] = None) -> 
         if meta.get("genome_type") == "cppn"
         else genome_to_spec
     )
+    if run_config.get("zoo_modules", False):  # gecko_skill_tasks.py --zoo-modules
+        to_spec_fn = with_zoo_modules(to_spec_fn)
     control_step_freq = run_config.get("control_step_freq", CONTROL_STEP_FREQ)
     brain_kind = run_config.get("brain", "ann")
     return to_spec_fn, control_step_freq, brain_kind
+
+
+def run_rowing_penalty(ckpt_dir: Path) -> bool:
+    """Whether the checkpoint's run trained with gecko_skill_tasks.py --rowing-penalty."""
+    run_config_path = ckpt_dir.parent.parent / "run_config.json"
+    run_config = json.loads(run_config_path.read_text()) if run_config_path.exists() else {}
+    return bool(run_config.get("rowing_penalty", False))
 
 
 # ── Recording replay ──────────────────────────────────────────────────────────
@@ -113,6 +129,7 @@ class EpisodeTrace:
     dt: float
     replayed_fitness: float = float("nan")
     raw_score: float = float("nan")  # displacement along skill axis, or accumulated yaw
+    rowing_frac: float = float("nan")  # rowing_detect's rowing share; only for rowing-penalty runs
     mean_jerk: float = 0.0
     c_hinge: int = 0
     initial_height: float = 0.0
@@ -138,13 +155,7 @@ class EpisodeTrace:
     joint_anchors_core: Optional[np.ndarray] = None  # (J, 3) rest pose, in core frame
 
 
-def _robot_bodies(model: mujoco.MjModel) -> list[int]:
-    """Robot bodies that own at least one geom (core, stators, rotors, bricks)."""
-    has_geom = set(int(b) for b in model.geom_bodyid)
-    return [
-        b for b in range(model.nbody)
-        if model.body(b).name.startswith("robot1_") and b in has_geom
-    ]
+_robot_bodies = robot_bodies  # old name, still imported by zoo_benchmark/gait_similarity_page.py
 
 
 def replay_skill_episode(
@@ -156,6 +167,7 @@ def replay_skill_episode(
     control_step_freq: int = CONTROL_STEP_FREQ,
     record_every_n: int = 100,
     brain_kind: str = "ann",
+    rowing_penalty: bool = False,
 ) -> EpisodeTrace:
     """Replay one trained skill; see module docstring. The control/fitness
     logic must stay in lockstep with shared._skill_worker_eval.
@@ -173,7 +185,7 @@ def replay_skill_episode(
     hinge_joints = [j for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
     qpos_adr = np.array([model.jnt_qposadr[j] for j in hinge_joints], dtype=int)
     dof_adr = np.array([model.jnt_dofadr[j] for j in hinge_joints], dtype=int)
-    bodies = _robot_bodies(model)
+    bodies = robot_bodies(model)
     body_col = {b: i for i, b in enumerate(bodies)}
     jnt_col = {j: i for i, j in enumerate(hinge_joints)}
 
@@ -242,6 +254,7 @@ def replay_skill_episode(
     r_prev = np.array(data.xmat[core_id]).reshape(3, 3).copy()
 
     core_xy, core_z, core_tilt, yaw_delta = [], [], [], []
+    row_poses, row_quats = [], []  # 50Hz poses for the rowing penalty, as shared._skill_worker_eval
     joint_angles, body_contact, ctrl_applied = [], [], []
 
     episode_end = SETTLE_DURATION + reward_spec["duration"]
@@ -291,6 +304,9 @@ def replay_skill_episode(
         joint_angles.append(data.qpos[qpos_adr].copy())
         body_contact.append(contacts)
         record_step(sim_step, contacts)
+        if rowing_penalty and sim_step % ROWING_RECORD_EVERY_N == 0:
+            row_poses.append(data.xpos[bodies].copy())
+            row_quats.append(data.xquat[bodies].copy())
 
         step += 1
         sim_step += 1
@@ -303,8 +319,12 @@ def replay_skill_episode(
         raw_score = float(np.dot(xy_now - xy0, reward_axis))
     else:
         raw_score = accumulated
+    score = raw_score
+    if rowing_penalty:
+        trace.rowing_frac = rowing_info(row_poses, row_quats, ROWING_RECORD_EVERY_N * float(model.opt.timestep))["rowing_frac"]
+        score = rowing_scaled_disp(raw_score, trace.rowing_frac)
     # c_hinge is a behavioural descriptor only; training no longer scores it.
-    fitness = -(raw_score - height_penalty - jerk_penalty)
+    fitness = -(score - height_penalty - jerk_penalty)
 
     trace.replayed_fitness = fitness
     trace.raw_score = raw_score

@@ -66,6 +66,7 @@ from behavior_common import (
     drop_full_rate,
     replay_skill_episode,
     resolve_replay_config,
+    run_rowing_penalty,
     skills_for_task,
     trace_descriptors,
 )
@@ -165,7 +166,7 @@ def _replay_worker(job: tuple) -> tuple[int, int, str, EpisodeTrace | None, dict
         trace = replay_skill_episode(
             genome, weights, skill, reward_spec,
             to_spec_fn=to_spec_fn, control_step_freq=stride, record_every_n=record_every_n,
-            brain_kind=brain_kind,
+            brain_kind=brain_kind, rowing_penalty=run_rowing_penalty(ckpt),
         )
         desc = trace_descriptors(trace)
         drop_full_rate(trace)
@@ -216,7 +217,7 @@ def write_results(
             "n_joints": len(trace.joint_names), "n_bodies": len(trace.body_names),
             "stored_fitness": stored_fit if stored_fit is not None else float("nan"),
             "replayed_fitness": trace.replayed_fitness,
-            "raw_score": trace.raw_score, "mean_jerk": trace.mean_jerk,
+            "raw_score": trace.raw_score, "rowing_frac": trace.rowing_frac, "mean_jerk": trace.mean_jerk,
             "initial_height": trace.initial_height,
             "yz_symmetry": rec.get("yz_symmetry", float("nan")),
             "wall_time_s": trace.wall_time_s,
