@@ -17,6 +17,13 @@
 # and submit with --array=0-<N-1>, e.g.
 #   sbatch --array=0-56 slurm/run_behavior_extract_array.sh
 #
+# 50Hz traces for gait-cycle analysis (stride_gait_similarity.py), written to
+# <sweep_root>/behavior_50hz/ so the 5Hz output is kept:
+#   RECORD_EVERY_N=10 BEHAVIOR_SUBDIR=behavior_50hz SWEEP_ROOTS=/scratch/jed/ariel_control_stride_sweep \
+#       sbatch --array=9-26 slurm/run_behavior_extract_array.sh
+# (9-26 = the tree and tree_symmetric runs in --list-runs order, 0-8 are cppn;
+# ~200MB behavior.npz per run, all 50Hz tables kept.)
+#
 # Dry-run a single task locally (no sbatch; set SWEEP_ROOTS to local copies):
 #   SLURM_ARRAY_TASK_ID=0 SWEEP_ROOTS="__data__/ariel_symmetry_pressure_sweep __data__/ariel_control_stride_sweep" \
 #       REPO=$PWD bash slurm/run_behavior_extract_array.sh
@@ -36,7 +43,8 @@ SCRIPTS_DIR=$REPO/examples/symmetry_pressure
 SWEEP_ROOTS=${SWEEP_ROOTS:-"/scratch/jed/ariel_symmetry_pressure_sweep /scratch/jed/ariel_control_stride_sweep"}
 
 WORKERS=${SLURM_CPUS_PER_TASK:-16}
-RECORD_EVERY_N=100   # 5Hz trace rows at dt=0.002s; descriptors always use every step
+RECORD_EVERY_N=${RECORD_EVERY_N:-100}   # 100 = 5Hz trace rows at dt=0.002s; descriptors always use every step
+BEHAVIOR_SUBDIR=${BEHAVIOR_SUBDIR:-behavior}   # e.g. behavior_50hz with RECORD_EVERY_N=10, next to the 5Hz output
 
 if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "SLURM_ARRAY_TASK_ID not set (run via sbatch, or export it for a local dry-run)"
@@ -58,7 +66,7 @@ if (( SLURM_ARRAY_TASK_ID >= ${#RUNS[@]} )); then
 fi
 
 RUN_DIR=${RUNS[$SLURM_ARRAY_TASK_ID]}
-OUT_DIR=$(dirname "$RUN_DIR")/behavior/$(basename "$RUN_DIR")
+OUT_DIR=$(dirname "$RUN_DIR")/$BEHAVIOR_SUBDIR/$(basename "$RUN_DIR")
 
 echo "========================================================"
 echo "Node:           $(hostname)"

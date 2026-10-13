@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gait Convergence Map</title>
+<!-- Template for stride_gait_page.py, which fills in the data below. Styling follows
+     examples/zoo_benchmark/gait_similarity_page.html. -->
+<style>
+:root {
+  --surface-0: #f5f5f3; --surface-1: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --border: #e1e0d9; --accent: #2a78d6; --accent-soft: rgba(42,120,214,.12);
+  --bar: #9ec5f4; --bar-track: #ecebe6; --link: #898781; --band: rgba(42,120,214,.10);
+  --g-medoid: #0b0b0b; --g-near: #2a78d6; --g-mid: #1baf7a; --g-far: #eb6834; --g-run: #b5b3ac; --g-pool: #b5b3ac;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface-0: #111110; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --border: #2c2c2a; --accent: #5598e7; --accent-soft: rgba(85,152,231,.16);
+    --bar: #2a78d6; --bar-track: #2c2c2a; --link: #6a6964; --band: rgba(85,152,231,.14);
+    --g-medoid: #ffffff; --g-near: #3987e5; --g-mid: #199e70; --g-far: #d95926; --g-run: #5c5b57; --g-pool: #5c5b57;
+  }
+}
+:root[data-theme="dark"] {
+  --surface-0: #111110; --surface-1: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --border: #2c2c2a; --accent: #5598e7; --accent-soft: rgba(85,152,231,.16);
+  --bar: #2a78d6; --bar-track: #2c2c2a; --link: #6a6964; --band: rgba(85,152,231,.14);
+  --g-medoid: #ffffff; --g-near: #3987e5; --g-mid: #199e70; --g-far: #d95926; --g-run: #5c5b57; --g-pool: #5c5b57;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--surface-0); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1480px; margin: 0 auto; padding: 24px 16px 40px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.sub { color: var(--ink-2); margin: 0 0 16px; max-width: 95ch; }
+.layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(360px, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.overview { margin-bottom: 16px; }
+.map-card { position: sticky; top: 16px; }
+@media (max-width: 960px) { .map-card { position: static; } }
+.map-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.map-head h2, .overview h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.map-head .note { color: var(--muted); font-size: 12px; }
+svg.chart { width: 100%; height: auto; display: block; margin-top: 8px; user-select: none; }
+svg text { font-family: inherit; }
+.axis text { fill: var(--muted); font-size: 11px; }
+.axis line.grid { stroke: var(--grid); stroke-width: 1; }
+.axis-title { fill: var(--ink-2); font-size: 12px; }
+.dot { stroke: var(--surface-1); stroke-width: 2; transition: opacity .12s; }
+.dot.hollow { fill: none !important; stroke-width: 1.5; }
+.dot.dim { opacity: .2; }
+.dot-label { fill: var(--ink-2); font-size: 11.5px; pointer-events: none; transition: opacity .12s; paint-order: stroke; stroke: var(--surface-1); stroke-width: 3; }
+.dot-label.dim { opacity: .3; }
+.dot-label.on { fill: var(--ink); font-weight: 600; }
+.ring { fill: none; stroke: var(--ink); stroke-width: 2; pointer-events: none; }
+.ring.peek { stroke: var(--accent); stroke-dasharray: 3 2; }
+.link { stroke: var(--link); stroke-width: 1.5; stroke-dasharray: 4 3; pointer-events: none; }
+.band { fill: var(--band); }
+.median-line { stroke: var(--ink-2); stroke-width: 2; }
+.band-label { fill: var(--ink-2); font-size: 11px; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin-top: 8px; color: var(--ink-2); font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+.legend i.hollow { background: none !important; border: 1.5px solid var(--g-pool); }
+.tip {
+  position: fixed; pointer-events: none; background: var(--surface-1); color: var(--ink);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; z-index: 10; white-space: nowrap;
+}
+.tip b { font-weight: 600; }
+.tip .m { color: var(--ink-2); }
+.empty { color: var(--ink-2); padding: 40px 8px; text-align: center; }
+.detail-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.detail-head h2 { font-size: 20px; margin: 0; font-weight: 600; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); margin-left: 8px; font-weight: 400; }
+.chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.pin { font-size: 12px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; background: none; cursor: pointer; font-family: inherit; }
+.pin.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.stats { display: flex; gap: 20px; flex-wrap: wrap; margin: 8px 0 12px; }
+.stat .k { color: var(--muted); font-size: 11.5px; }
+.stat .v { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.video { width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 8px; overflow: hidden; display: grid; place-items: center; color: #aaa; font-size: 13px; text-align: center; padding: 12px; }
+.video video { width: 100%; height: 100%; object-fit: contain; display: block; }
+h3 { font-size: 13px; font-weight: 600; margin: 18px 0 6px; }
+h3 .h3note { color: var(--muted); font-weight: 400; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11.5px; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 13px; }
+td.num, th.num { text-align: right; }
+.sim tbody tr { cursor: pointer; }
+.sim tbody tr:hover, .sim tbody tr.hl { background: var(--accent-soft); }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+.sw.hollow { background: none !important; border: 1.5px solid var(--g-pool); }
+.barcell { width: 30%; }
+.bar { height: 6px; border-radius: 3px; background: var(--bar-track); position: relative; }
+.bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--bar); }
+.desc td.name { color: var(--ink-2); }
+.desc tr.group td { color: var(--ink); font-weight: 600; font-size: 12px; padding-top: 12px; border-bottom: none; }
+.desc .rank { color: var(--muted); font-size: 11.5px; }
+.more { margin-top: 6px; font: inherit; font-size: 12px; color: var(--accent); background: none; border: none; cursor: pointer; padding: 0; }
+.na { color: var(--muted); }
+.controls { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin: 10px 0 2px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; padding: 2px; gap: 2px; }
+.seg-label { color: var(--muted); font-size: 12px; margin-right: 6px; }
+.seg button { font: inherit; font-size: 12.5px; border: none; background: none; color: var(--ink-2); padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.frame-note { color: var(--ink-2); font-size: 12.5px; margin: 6px 0 0; }
+/* Overview table */
+.ov { margin-top: 10px; }
+.ov td.cell { cursor: pointer; border-radius: 6px; }
+.ov td.cell:hover { background: var(--accent-soft); }
+.ov td.cell.on { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.ov .vals { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.ov .vals .m { color: var(--muted); font-size: 12px; }
+.range { position: relative; height: 10px; margin-top: 5px; }
+.range .track { position: absolute; left: 0; right: 0; top: 4px; height: 2px; background: var(--bar-track); border-radius: 1px; }
+.range .iqr { position: absolute; top: 1px; height: 8px; border-radius: 4px; background: var(--bar); }
+.range .med { position: absolute; top: -1px; width: 2px; height: 12px; background: var(--ink); border-radius: 1px; }
+.ov-foot { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Gait convergence</h1>
+  <p class="sub" id="sub"></p>
+  <section class="card overview">
+    <h2>Spread around the most central gait</h2>
+    <table class="ov" id="overview"></table>
+    <div class="ov-foot" id="ovFoot"></div>
+  </section>
+  <div class="controls">
+    <div><span class="seg-label">Genome</span><span class="seg" id="genomeSeg"></span></div>
+    <div><span class="seg-label">Stride</span><span class="seg" id="strideSeg"></span></div>
+    <div><span class="seg-label">Compare</span><span class="seg" id="variantSeg"></span></div>
+  </div>
+  <p class="frame-note" id="variantNote"></p>
+  <div class="layout" style="margin-top:12px">
+    <section class="card map-card">
+      <div class="map-head">
+        <h2 id="mapTitle">2D map of gait distances</h2>
+        <span class="note" id="stress"></span>
+      </div>
+      <svg id="map" class="chart" role="img" aria-label="MDS map of gait similarity"></svg>
+      <div class="legend" id="legend"></div>
+      <div class="map-head" style="margin-top:16px">
+        <h2>Distance from the medoid</h2>
+        <span class="note" id="stripNote"></span>
+      </div>
+      <svg id="strip" class="chart" role="img" aria-label="Distances from the medoid to every pooled individual"></svg>
+    </section>
+    <section class="card" id="detail"></section>
+  </div>
+</main>
+<div class="tip" id="tip"></div>
+<script>
+const DATA = /*__DATA__*/null;
+
+const DESCRIPTOR_INFO = {
+  net_displacement: ["net displacement", "m"], path_length: ["path length", "m"],
+  mean_speed: ["mean path speed", "m/s"], straightness: ["straightness", ""],
+  axis_displacement: ["displacement along the reward axis", "m"], lateral_drift: ["lateral drift", "m"],
+  yaw_total: ["total yaw", "rad"], mean_abs_yaw_rate: ["mean |yaw rate|", "rad/s"],
+  core_height_mean: ["core height, mean", "m"], core_height_std: ["core height, std", "m"],
+  core_tilt_mean: ["core tilt, mean", "rad"], core_tilt_std: ["core tilt, std", "rad"],
+  duty_factor_mean: ["duty factor", ""], n_contact_bodies_mean: ["bodies in contact", ""],
+  frac_bodies_ever_contact: ["bodies ever in contact", "frac"], contact_entropy_bits: ["contact-pattern entropy", "bits"],
+  c_hinge: ["rotor touchdowns", ""],
+  gait_frequency_hz: ["gait frequency", "Hz"], joint_amplitude_mean: ["joint amplitude", "rad"],
+  joint_corr_abs_mean: ["|joint correlation|", ""],
+  mirror_pair_frac: ["mirror-paired hinges", "frac"], mirror_pair_corr_mean: ["mirror-pair correlation", ""],
+  mirror_pair_phase_lag: ["mirror-pair phase lag", "rad"], mirror_pair_amp_asym: ["mirror-pair amplitude asym.", ""],
+  mirror_plane: ["mirror plane (0=x, 1=y)", ""],
+  ctrl_abs_mean: ["|control|, mean", "rad"], ctrl_jerk_mean: ["control jerk", "rad"],
+};
+const GENOME_LABEL = { tree: "tree", tree_symmetric: "tree (symmetric)" };
+const GROUPS = {
+  medoid: "medoid (most central gait)", near: `${DATA.k} nearest in its run`, mid: "in between",
+  far: `${DATA.k} farthest in its run`, run: "rest of its run", pool: "other reps",
+};
+const GROUP_ORDER = ["medoid", "near", "mid", "far", "run", "pool"];
+const VIDEO_GROUPS = new Set(["medoid", "near", "mid", "far"]);
+
+const $ = (id) => document.getElementById(id);
+const NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs = {}, parent) => {
+  const el = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  if (parent) parent.appendChild(el);
+  return el;
+};
+const fmt = (v, digits = 3) => {
+  if (v === null || v === undefined) return '<span class="na">–</span>';
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (Number.isInteger(v)) return String(v);
+  const a = Math.abs(v);
+  if (a !== 0 && (a < 1e-3 || a >= 1e4)) return v.toExponential(2);
+  return v.toFixed(a >= 100 ? 1 : a >= 10 ? 2 : digits);
+};
+const gcolor = (group) => `var(--g-${group})`;
+const swatch = (group) => `<span class="sw${group === "pool" ? " hollow" : ""}" style="background:${gcolor(group)}"></span>`;
+
+// ── State ────────────────────────────────────────────────────────────────────
+const EXPS = Object.fromEntries(DATA.experiments.map((e) => [e.key, e]));
+const GENOMES = [...new Set(DATA.experiments.map((e) => e.genome))];
+const STRIDES = [...new Set(DATA.experiments.map((e) => e.stride))].sort((a, b) => a - b);
+let genome = GENOMES.includes("tree_symmetric") ? "tree_symmetric" : GENOMES[0];
+let stride = STRIDES[0], variant = DATA.variants[0];
+let pinned = null, shown = null, showAll = false, videoFor = null;
+let exp, inds, byLabel, index;
+
+function setExperiment() {
+  exp = EXPS[`${genome}_s${stride}`];
+  inds = exp ? exp.individuals : [];
+  byLabel = Object.fromEntries(inds.map((g) => [g.label, g]));
+  index = Object.fromEntries(inds.map((g, i) => [g.label, i]));
+}
+const V = () => exp.variants[variant];
+const dist = (a, b) => V().dist[index[a]][index[b]];
+const unitMm = () => V().unit === "m";
+const fmtDist = (d) => (unitMm() ? (d * 1000).toFixed(1) : d.toFixed(3));
+const distText = (d) => fmtDist(d) + (unitMm() ? " mm" : "");
+const short = (g) => (g.run === exp.medoid_run ? `b${String(g.body_idx).padStart(2, "0")}` : g.label);
+const ranked = (label) => inds.filter((g) => g.label !== label)
+  .map((g) => ({ g, d: dist(label, g.label) })).sort((a, b) => a.d - b.d);
+
+$("title").textContent = DATA.title;
+$("sub").innerHTML = "Each individual of the final generation, with the 3 reps of a genome × stride pooled, is " +
+  "compared by its mean gait cycle in the core's frame, aligned over phase, yaw and mirroring. The <b>medoid</b> is the gait with the " +
+  "smallest median distance to the rest. If symmetric bodies converge on a shared gait such as rowing, the rest of " +
+  "their pool sits closer to the medoid, so its median distance and IQR are smaller. Videos are shown for the medoid's own run.";
+
+function segmented(el, options, current, onPick) {
+  el.innerHTML = "";
+  for (const [key, label] of options) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.setAttribute("aria-pressed", key === current);
+    b.addEventListener("click", () => onPick(key));
+    el.appendChild(b);
+  }
+}
+function drawControls() {
+  segmented($("genomeSeg"), GENOMES.map((g) => [g, GENOME_LABEL[g] || g]), genome, (g) => switchTo(g, stride));
+  segmented($("strideSeg"), STRIDES.map((s) => [s, `${s} (~${Math.round(500 / s)} Hz)`]), stride, (s) => switchTo(genome, s));
+  segmented($("variantSeg"), DATA.variants.map((v) => [v, DATA.experiments[0].variants[v].name]), variant,
+    (v) => { variant = v; drawAll(); });
+}
+function switchTo(g, s) {
+  if (g === genome && s === stride) return;
+  genome = g; stride = s; pinned = null; showAll = false; videoFor = null;
+  setExperiment(); drawAll();
+}
+
+// ── Overview ────────────────────────────────────────────────────────────────
+function drawOverview() {
+  const rows = DATA.overview.filter((r) => r.variant === variant);
+  const k = rows.length && DATA.experiments[0].variants[variant].unit === "m" ? 1000 : 1;
+  const hi = Math.max(...rows.map((r) => r.medoid_q75)) * 1.05 || 1;
+  const d = (v) => (v * k).toFixed(k === 1 ? 3 : 1);
+  let html = `<thead><tr><th>stride</th>${GENOMES.map((g) => `<th>${GENOME_LABEL[g] || g}</th>`).join("")}<th class="num">IQR ratio sym/tree</th></tr></thead><tbody>`;
+  for (const s of STRIDES) {
+    html += `<tr><td>${s} <span class="na">(~${Math.round(500 / s)} Hz)</span></td>`;
+    const iqr = {};
+    for (const g of GENOMES) {
+      const r = rows.find((r) => r.genome === g && r.stride === s);
+      if (!r) { html += "<td class=\"na\">–</td>"; continue; }
+      iqr[g] = r.medoid_iqr;
+      const on = g === genome && s === stride ? " on" : "";
+      html += `<td class="cell${on}" data-g="${g}" data-s="${s}" title="Medoid ${r.medoid_label}, n = ${r.n}">
+        <div class="vals"><span>median <b>${d(r.medoid_median)}</b> · IQR <b>${d(r.medoid_iqr)}</b></span>
+        <span class="m">all pairs ${d(r.pairs_median)}</span></div>
+        <div class="range"><div class="track"></div>
+          <div class="iqr" style="left:${(r.medoid_q25 / hi) * 100}%;width:${((r.medoid_q75 - r.medoid_q25) / hi) * 100}%"></div>
+          <div class="med" style="left:${(r.medoid_median / hi) * 100}%"></div></div></td>`;
+    }
+    const ratio = iqr.tree && iqr.tree_symmetric !== undefined ? (iqr.tree_symmetric / iqr.tree).toFixed(2) : "–";
+    html += `<td class="num">${ratio}</td></tr>`;
+  }
+  $("overview").innerHTML = html + "</tbody>";
+  $("ovFoot").textContent = "Medoid's distance to every other pooled individual: bar = IQR, tick = median" +
+    (k === 1000 ? " (mm)" : "") + ". \"all pairs\" = median over every pair in the pool, for scale. Click a cell to open that experiment.";
+  $("overview").querySelectorAll("td.cell").forEach((td) =>
+    td.addEventListener("click", () => switchTo(td.dataset.g, +td.dataset.s)));
+}
+
+// ── Map ──────────────────────────────────────────────────────────────────────
+const radius = (h) => Math.sqrt(30 + 12 * h) * 0.7;
+const W = 760, H = 560, M = { l: 56, r: 24, t: 16, b: 46 };
+const map = $("map");
+map.setAttribute("viewBox", `0 0 ${W} ${H}`);
+let sx, sy, linkLayer, ringLayer;
+const nodes = {};
+const pos = (label) => V().xy[index[label]];
+const niceStep = (span) => {
+  const raw = span / 6, p = 10 ** Math.floor(Math.log10(raw)), n = raw / p;
+  return p * (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10);
+};
+function hoverable(el, label) {
+  el.style.cursor = "pointer";
+  el.addEventListener("mouseenter", (e) => onEnter(label, e));
+  el.addEventListener("mousemove", moveTip);
+  el.addEventListener("mouseleave", onLeave);
+  el.addEventListener("click", (e) => { e.stopPropagation(); togglePin(label); });
+}
+
+function drawMap() {
+  map.innerHTML = "";
+  for (const k of Object.keys(nodes)) delete nodes[k];
+  const v = V();
+  $("mapTitle").textContent = `${GENOME_LABEL[genome] || genome}, stride ${stride}: 2D map of gait distances`;
+  $("stress").textContent = `MDS stress-1 = ${v.stress.toFixed(2)}` + (v.stress > 0.1 ? " (approximate; tables use true distances)" : "");
+  $("variantNote").textContent = v.note;
+  const xs = inds.map((g) => pos(g.label)[0]), ys = inds.map((g) => pos(g.label)[1]);
+  let [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+  const pad = 0.08 * Math.max(x1 - x0, y1 - y0);
+  x0 -= pad; x1 += pad; y0 -= pad; y1 += pad;
+  const pw = W - M.l - M.r, ph = H - M.t - M.b;
+  const k = Math.min(pw / (x1 - x0), ph / (y1 - y0));
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  sx = (x) => M.l + pw / 2 + (x - cx) * k;
+  sy = (y) => M.t + ph / 2 - (y - cy) * k;
+  const axis = svgEl("g", { class: "axis" }, map);
+  const step = niceStep(Math.max(pw, ph) / k);
+  const scale = unitMm() ? 1000 : 1;
+  const tick = (val) => (+(val * scale).toFixed(6)).toString();
+  for (let t = Math.ceil((cx - pw / 2 / k) / step) * step; t <= cx + pw / 2 / k + 1e-12; t += step) {
+    svgEl("line", { class: "grid", x1: sx(t), x2: sx(t), y1: M.t, y2: H - M.b }, axis);
+    svgEl("text", { x: sx(t), y: H - M.b + 16, "text-anchor": "middle" }, axis).textContent = tick(t);
+  }
+  for (let t = Math.ceil((cy - ph / 2 / k) / step) * step; t <= cy + ph / 2 / k + 1e-12; t += step) {
+    svgEl("line", { class: "grid", x1: M.l, x2: W - M.r, y1: sy(t), y2: sy(t) }, axis);
+    svgEl("text", { x: M.l - 8, y: sy(t) + 4, "text-anchor": "end" }, axis).textContent = tick(t);
+  }
+  const u = unitMm() ? " (mm)" : "";
+  svgEl("text", { class: "axis-title", x: M.l + pw / 2, y: H - 8, "text-anchor": "middle" }, map).textContent = "MDS 1" + u;
+  svgEl("text", { class: "axis-title", transform: `translate(14 ${M.t + ph / 2}) rotate(-90)`, "text-anchor": "middle" }, map).textContent = "MDS 2" + u;
+
+  linkLayer = svgEl("g", {}, map);
+  const dotLayer = svgEl("g", {}, map), labelLayer = svgEl("g", {}, map);
+  ringLayer = svgEl("g", {}, map);
+  // Background groups first, the medoid last.
+  const order = [...inds].sort((a, b) => GROUP_ORDER.indexOf(b.group) - GROUP_ORDER.indexOf(a.group));
+  for (const g of order) {
+    const r = radius(g.n_hinges) * (g.group === "medoid" ? 1.25 : 1), [x, y] = pos(g.label);
+    const c = svgEl("circle", { class: "dot" + (g.group === "pool" ? " hollow" : ""), cx: sx(x), cy: sy(y), r }, dotLayer);
+    if (g.group === "pool") c.style.stroke = gcolor("pool"); else c.style.fill = gcolor(g.group);
+    hoverable(svgEl("circle", { cx: sx(x), cy: sy(y), r: Math.max(r + 4, 10), fill: "transparent" }, dotLayer), g.label);
+    nodes[g.label] = { dot: c, r };
+  }
+  const placed = inds.map((g) => {
+    const [x, y] = pos(g.label), r = nodes[g.label].r;
+    return { x0: sx(x) - r, x1: sx(x) + r, y0: sy(y) - r, y1: sy(y) + r };
+  });
+  const overlaps = (b) => placed.some((p) => b.x0 < p.x1 && b.x1 > p.x0 && b.y0 < p.y1 && b.y1 > p.y0);
+  for (const g of order.reverse().filter((g) => VIDEO_GROUPS.has(g.group))) {
+    const [gx, gy] = pos(g.label), x = sx(gx), y = sy(gy), r = nodes[g.label].r + 3;
+    const text = g.group === "medoid" ? `medoid ${short(g)}` : short(g);
+    const w = text.length * 6.6, h = 12;
+    const options = [
+      { x: x + r, y: y + 4, a: "start", b: { x0: x + r, x1: x + r + w, y0: y - 6, y1: y + 6 } },
+      { x: x - r, y: y + 4, a: "end", b: { x0: x - r - w, x1: x - r, y0: y - 6, y1: y + 6 } },
+      { x, y: y - r - 3, a: "middle", b: { x0: x - w / 2, x1: x + w / 2, y0: y - r - 3 - h, y1: y - r - 3 } },
+      { x, y: y + r + 11, a: "middle", b: { x0: x - w / 2, x1: x + w / 2, y0: y + r, y1: y + r + h } },
+    ];
+    const o = options.find((o) => !overlaps(o.b)) || options[0];
+    placed.push(o.b);
+    const t = svgEl("text", { class: "dot-label", x: o.x, y: o.y, "text-anchor": o.a }, labelLayer);
+    t.textContent = text;
+    nodes[g.label].label = t;
+  }
+  $("legend").innerHTML = GROUP_ORDER.filter((grp) => inds.some((g) => g.group === grp)).map((grp) =>
+    `<span><i class="${grp === "pool" ? "hollow" : ""}" style="background:${gcolor(grp)}"></i>${GROUPS[grp]}</span>`).join("") +
+    '<span style="color:var(--muted)">dot size = hinge count</span>';
+}
+
+// ── Strip: distance from the medoid ──────────────────────────────────────────
+const SW = 760, SH = 150, SM = { l: 16, r: 16, t: 26, b: 34 };
+const strip = $("strip");
+strip.setAttribute("viewBox", `0 0 ${SW} ${SH}`);
+const stripNodes = {};
+let stripRing;
+function drawStrip() {
+  strip.innerHTML = "";
+  for (const k of Object.keys(stripNodes)) delete stripNodes[k];
+  const v = V(), med = exp.medoid;
+  const others = ranked(med);
+  const hi = Math.max(...others.map((o) => o.d)) * 1.04;
+  const pw = SW - SM.l - SM.r, ph = SH - SM.t - SM.b;
+  const px = (d) => SM.l + (d / hi) * pw;
+  const axis = svgEl("g", { class: "axis" }, strip);
+  const scale = unitMm() ? 1000 : 1, step = niceStep(hi * scale) / scale;
+  for (let t = 0; t <= hi + 1e-12; t += step) {
+    svgEl("line", { class: "grid", x1: px(t), x2: px(t), y1: SM.t, y2: SH - SM.b }, axis);
+    svgEl("text", { x: px(t), y: SH - SM.b + 15, "text-anchor": "middle" }, axis).textContent = (+(t * scale).toFixed(6)).toString();
+  }
+  svgEl("text", { class: "axis-title", x: SM.l + pw / 2, y: SH - 4, "text-anchor": "middle" }, strip).textContent =
+    `distance to medoid ${short(byLabel[med])}` + (unitMm() ? " (mm)" : "");
+  svgEl("rect", { class: "band", x: px(v.medoid_q25), y: SM.t, width: px(v.medoid_q75) - px(v.medoid_q25), height: ph }, strip);
+  svgEl("line", { class: "median-line", x1: px(v.medoid_median), x2: px(v.medoid_median), y1: SM.t - 4, y2: SH - SM.b }, strip);
+  svgEl("text", { class: "band-label", x: px(v.medoid_median), y: SM.t - 8, "text-anchor": "middle" }, strip).textContent =
+    `median ${distText(v.medoid_median)} · IQR ${distText(v.medoid_iqr)}`;
+  stripRing = svgEl("g", {}, strip);
+  const layer = svgEl("g", {}, strip);
+  // Deterministic jitter; highlighted groups on a lane above the rest.
+  others.sort((a, b) => GROUP_ORDER.indexOf(b.g.group) - GROUP_ORDER.indexOf(a.g.group)).forEach(({ g, d }, i) => {
+    const lane = VIDEO_GROUPS.has(g.group) ? 0.3 : 0.72;
+    const y = SM.t + ph * (lane + 0.2 * (((i * 0.618034) % 1) - 0.5));
+    const c = svgEl("circle", { class: "dot" + (g.group === "pool" ? " hollow" : ""), cx: px(d), cy: y, r: VIDEO_GROUPS.has(g.group) ? 6 : 4.5 }, layer);
+    if (g.group === "pool") c.style.stroke = gcolor("pool"); else c.style.fill = gcolor(g.group);
+    hoverable(c, g.label);
+    stripNodes[g.label] = { x: px(d), y, r: +c.getAttribute("r") };
+  });
+  const mc = svgEl("circle", { class: "dot", cx: px(0), cy: SM.t + ph * 0.3, r: 7 }, layer);
+  mc.style.fill = gcolor("medoid");
+  hoverable(mc, med);
+  stripNodes[med] = { x: px(0), y: SM.t + ph * 0.3, r: 7 };
+  const nRun = inds.filter((g) => g.run === exp.medoid_run).length;
+  $("stripNote").textContent = `${inds.length} pooled · ${nRun} in the medoid's run (rep ${byLabel[med].rep})`;
+}
+
+// ── Hover & pin ──────────────────────────────────────────────────────────────
+map.addEventListener("click", () => { if (pinned) { pinned = null; render(shown); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinned) { pinned = null; render(shown); } });
+function onEnter(label, e) {
+  if (pinned) { setPeek(label); showTip(label, e); } else render(label);
+}
+function onLeave() { hideTip(); if (pinned) setPeek(null); }
+function togglePin(label) { pinned = pinned === label ? null : label; setPeek(null); hideTip(); render(label); }
+function ringAt(label, cls) {
+  const [x, y] = pos(label);
+  svgEl("circle", { class: cls, cx: sx(x), cy: sy(y), r: nodes[label].r + 4 }, ringLayer);
+  const s = stripNodes[label];
+  if (s) svgEl("circle", { class: cls, cx: s.x, cy: s.y, r: s.r + 3 }, stripRing);
+}
+function setPeek(label) {
+  ringLayer.querySelectorAll(".peek").forEach((n) => n.remove());
+  stripRing.querySelectorAll(".peek").forEach((n) => n.remove());
+  document.querySelectorAll(".sim tbody tr").forEach((tr) => tr.classList.toggle("hl", tr.dataset.label === label));
+  if (!label || label === shown) return;
+  ringAt(label, "ring peek");
+  nodes[label].dot.classList.remove("dim"); nodes[label].label?.classList.remove("dim");
+}
+const tip = $("tip");
+function showTip(label, e) {
+  if (!shown || label === shown) { hideTip(); return; }
+  const list = ranked(shown), i = list.findIndex((x) => x.g.label === label);
+  tip.innerHTML = `<b>${short(byLabel[label])}</b> <span class="m">#${i + 1} nearest to ${short(byLabel[shown])} · ${distText(list[i].d)}</span>`;
+  tip.style.display = "block";
+  moveTip(e);
+}
+function moveTip(e) {
+  if (tip.style.display !== "block") return;
+  tip.style.left = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = e.clientY + 14 + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+function drawSelection(label) {
+  linkLayer.innerHTML = ""; ringLayer.innerHTML = ""; stripRing.innerHTML = "";
+  for (const g of inds) { nodes[g.label].dot.classList.remove("dim"); nodes[g.label].label?.classList.remove("dim", "on"); }
+  if (!label) return;
+  const [gx, gy] = pos(label);
+  const near = ranked(label).slice(0, DATA.k);
+  const keep = new Set([label, ...near.map((s) => s.g.label)]);
+  for (const s of near) {
+    const [ox, oy] = pos(s.g.label);
+    svgEl("line", { class: "link", x1: sx(gx), y1: sy(gy), x2: sx(ox), y2: sy(oy) }, linkLayer);
+  }
+  for (const g of inds) if (!keep.has(g.label)) { nodes[g.label].dot.classList.add("dim"); nodes[g.label].label?.classList.add("dim"); }
+  nodes[label].label?.classList.add("on");
+  ringAt(label, "ring");
+}
+
+// ── Detail ───────────────────────────────────────────────────────────────────
+function rankOf(name, value, isCycle) {
+  const vals = inds.map((g) => (isCycle ? g.cycle : g.descriptors)[name]).filter((v) => v !== null && v !== undefined);
+  if (value === null || value === undefined || typeof value === "boolean" || !vals.length) return null;
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  return { rank: vals.filter((v) => v > value).length + 1, n: vals.length, frac: hi > lo ? (value - lo) / (hi - lo) : 1 };
+}
+function descriptorRows(g) {
+  let html = "";
+  for (const [group, names] of Object.entries(DATA.groups)) {
+    const isCycle = group === "Gait cycle";
+    html += `<tr class="group"><td colspan="4">${group}</td></tr>`;
+    for (const name of names) {
+      const v = (isCycle ? g.cycle : g.descriptors)[name];
+      const [nice, unit] = isCycle ? [DATA.cycle_names[name], ""] : (DESCRIPTOR_INFO[name] || [name, ""]);
+      const r = rankOf(name, v, isCycle);
+      html += `<tr title="${name}"><td class="name">${nice}${unit ? ` <span class="na">(${unit})</span>` : ""}</td>
+        <td class="num">${fmt(v)}</td>
+        <td class="barcell">${r ? `<div class="bar"><i style="width:${Math.max(2, r.frac * 100)}%"></i></div>` : ""}</td>
+        <td class="num rank">${r ? `${r.rank}/${r.n}` : ""}</td></tr>`;
+    }
+  }
+  return html;
+}
+function similarRows(label) {
+  const list = ranked(label), v = V(), i = index[label];
+  const maxD = Math.max(...v.dist.flat());
+  const rows = (showAll ? list : list.slice(0, 10)).map(({ g, d }, n) => {
+    const j = index[g.label];
+    return `<tr data-label="${g.label}"><td class="num">${n + 1}</td>
+      <td>${swatch(g.group)}${short(g)}</td>
+      <td class="num">${fmtDist(d)}</td>
+      <td class="barcell"><div class="bar"><i style="width:${(d / maxD) * 100}%"></i></div></td>
+      <td>${v.mirror[i][j] ? "yes" : "no"}</td><td class="num">${v.yaw[i][j]}°</td><td class="num">${v.phase[i][j].toFixed(2)}</td></tr>`;
+  }).join("");
+  return `<table class="sim"><thead><tr><th class="num">#</th><th>individual</th>
+    <th class="num">distance${unitMm() ? " (mm)" : ""}</th><th></th><th>mirrored</th><th class="num">yaw</th><th class="num">phase</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    ${list.length > 10 ? `<button class="more" id="more">${showAll ? "Show top 10" : `Show all ${list.length}`}</button>` : ""}`;
+}
+
+function render(label) {
+  shown = label;
+  const hash = "#" + encodeURIComponent(exp.key) + (pinned ? "/" + encodeURIComponent(pinned) : "");
+  if (location.hash !== hash) history.replaceState(null, "", hash);
+  drawSelection(label);
+  const el = $("detail");
+  if (!label) {
+    videoFor = null;
+    el.innerHTML = '<div class="empty">Hover an individual on the map or the strip to see its video, gait-cycle stats and most similar gaits. The medoid is the large dark dot.</div>';
+    return;
+  }
+  const g = byLabel[label], med = exp.medoid;
+  const toMed = label === med ? null : ranked(med).findIndex((x) => x.g.label === label);
+  const keepVideo = videoFor === label && el.querySelector(".video");
+  const video = keepVideo ? el.querySelector(".video") : null;
+  const c = g.cycle;
+  el.innerHTML = `
+    <div class="detail-head">
+      <h2>${short(g)}<span class="chip">${swatch(g.group)}${GROUPS[g.group]}</span></h2>
+      <button class="pin ${pinned === label ? "on" : ""}" id="pinBtn">${pinned === label ? "Pinned · click to release" : "Click dot to pin"}</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">fitness (lower = better)</div><div class="v">${fmt(g.fitness)}</div></div>
+      <div class="stat"><div class="k">distance to medoid</div><div class="v">${toMed === null ? "–" : `${distText(dist(label, med))} <span style="font-weight:400;color:var(--ink-2)">#${toMed + 1}/${inds.length - 1}</span>`}</div></div>
+      <div class="stat"><div class="k">gait period</div><div class="v">${c.period_s === null ? "–" : c.period_s.toFixed(2) + " s"}${c.aperiodic ? ' <span class="na">(aperiodic)</span>' : ""}</div></div>
+      <div class="stat"><div class="k">amplitude / size</div><div class="v">${fmt(c.rel_amplitude, 2)}</div></div>
+      <div class="stat"><div class="k">hinges</div><div class="v">${g.n_hinges}</div></div>
+      <div class="stat"><div class="k">rep · gen · body</div><div class="v">${g.rep} · ${g.gen} · ${g.body_idx}</div></div>
+    </div>
+    <div id="videoSlot"></div>
+    <h3>Most similar gaits in the pool <span class="h3note">${V().name}; best mirror, yaw and phase shift of the other gait</span></h3>
+    ${similarRows(label)}
+    <h3>Behavioural descriptors <span class="h3note">bar and rank: position among the ${inds.length} pooled individuals (1 = largest)</span></h3>
+    <table class="desc"><tbody>${descriptorRows(g)}</tbody></table>`;
+  if (video) { $("videoSlot").replaceWith(video); video.querySelector("video")?.play().catch(() => {}); }
+  else $("videoSlot").outerHTML = `<div class="video">${g.video ? `<video src="${g.video}" autoplay muted loop playsinline controls></video>`
+    : VIDEO_GROUPS.has(g.group) ? "video not rendered" : "No video: only the medoid's run (medoid, nearest, farthest and in between) is rendered."}</div>`;
+  videoFor = label;
+  $("pinBtn").addEventListener("click", () => togglePin(label));
+  $("more")?.addEventListener("click", () => { showAll = !showAll; render(label); });
+  el.querySelectorAll(".sim tbody tr").forEach((tr) => {
+    tr.addEventListener("mouseenter", () => setPeek(tr.dataset.label));
+    tr.addEventListener("mouseleave", () => setPeek(null));
+    tr.addEventListener("click", () => { pinned = tr.dataset.label; render(pinned); });
+  });
+}
+
+function drawAll() {
+  drawControls(); drawOverview();
+  if (!exp) { $("detail").innerHTML = '<div class="empty">No data for this experiment.</div>'; return; }
+  drawMap(); drawStrip();
+  render(pinned && byLabel[pinned] ? pinned : exp.medoid);
+}
+
+// #<genome>_s<stride>[/<label>] in the URL opens that experiment (and pins the individual).
+function fromHash() {
+  const [key, label] = decodeURIComponent(location.hash.slice(1)).split("/");
+  if (EXPS[key]) { genome = EXPS[key].genome; stride = EXPS[key].stride; }
+  setExperiment();
+  pinned = label && byLabel[label] ? label : null;
+  drawAll();
+}
+window.addEventListener("hashchange", fromHash);
+fromHash();
+</script>
+</body>
+</html>
