@@ -49,14 +49,15 @@ args = parser.parse_args()
 # Ordinal blue ramp (light = fast control, dark = slow control).
 STRIDE_COLOR = {9: "#a6c8f2", 20: "#6aa6ec", 25: "#3987e5", 33: "#2470cc", 50: "#1c5cab", 100: "#0d366b"}
 STRIDE_MARKER = {9: "o", 20: "s", 25: "v", 33: "P", 50: "^", 100: "D"}
-GENOME_LABEL = {"tree": "tree", "tree_symmetric": "tree (symmetric)", "cppn": "cppn"}
+GENOME_LABEL = {"tree": "tree", "tree_symmetric": "tree (symmetric)", "tree_tied": "tree (random-tied)",
+                "cppn": "cppn"}
 # Same genome colors as plot_task_genome_summary.py.
-GENOME_COLOR = {"tree": "#2a78d6", "tree_symmetric": "#eb6834", "cppn": "#1baf7a"}
+GENOME_COLOR = {"tree": "#2a78d6", "tree_symmetric": "#eb6834", "tree_tied": "#7a5ccf", "cppn": "#1baf7a"}
 DIFF_COLOR = "#3d3d3a"
 CI_ALPHA = 0.15
 
 _STRIDE_TAG_RE = re.compile(
-    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_(?P<job>\d+)_\d+$"
+    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree_tied|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_(?P<job>\d+)_\d+$"
 )
 
 

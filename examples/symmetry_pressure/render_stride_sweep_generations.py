@@ -38,7 +38,7 @@ BASELINE_STRIDE = 9  # shared.CONTROL_STEP_FREQ, used by the symmetry-pressure s
 BASELINE_REPS = {0, 1, 2}  # seeds 42-44, matching the stride sweep
 
 _STRIDE_TAG_RE = re.compile(
-    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_\d+_\d+$"
+    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree_tied|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_\d+_\d+$"
 )
 
 parser = argparse.ArgumentParser()

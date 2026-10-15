@@ -70,7 +70,7 @@ GENOME_COLOR = {"tree": "#2a78d6", "tree_symmetric": "#eb6834", "cppn": "#1baf7a
 CI_ALPHA = 0.15
 
 _STRIDE_TAG_RE = re.compile(
-    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_\d+_\d+$"
+    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree_tied|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_\d+_\d+$"
 )
 
 # behavior_common.DESCRIPTOR_NAMES, grouped (not imported: that module pulls in

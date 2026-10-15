@@ -47,6 +47,7 @@ from rich.console import Console
 from rich.traceback import install
 
 from ariel.ec import EA, EAOperation, EASettings, Individual, Population
+from ariel.ec.genotypes.tree.tying import tied_fraction
 
 import genome_adapter
 from shared import (
@@ -74,10 +75,14 @@ parser.add_argument("--task",
                     choices=["forward", "multidirection", "turn_avg"],
                     required=True)
 parser.add_argument("--genome-type",
-                    choices=["tree", "tree_symmetric", "cppn"],
+                    choices=["tree", "tree_symmetric", "tree_tied", "cppn"],
                     default="tree",
                     help="Body genome representation: plain TreeGenome, TreeGenome with "
-                         "enforced y_zero bilateral symmetry, or a CPPN-NEAT genome")
+                         "enforced y_zero bilateral symmetry, TreeGenome with modules tied to "
+                         "randomly placed twins (the dimensionality control for symmetry, "
+                         "see ariel.ec.genotypes.tree.tying), or a CPPN-NEAT genome")
+parser.add_argument("--tie-prob",      type=float, default=genome_adapter.DEFAULT_TIE_PROB,
+                    help="tree_tied: chance a placed module gets a randomly placed twin")
 parser.add_argument("--budget",        type=int,   default=40)
 parser.add_argument("--pop",           type=int,   default=20,  help="mu")
 parser.add_argument("--lam",           type=int,   default=20,  help="lambda")
@@ -146,7 +151,7 @@ RNG = np.random.default_rng(BASE_SEED)
 with (DATA / "run_config.json").open("w") as _fh:
     json.dump(vars(args), _fh, indent=2)
 
-ADAPTER = genome_adapter.genome_adapter_from_cli(GENOME_TYPE, NUM_MODULES)
+ADAPTER = genome_adapter.genome_adapter_from_cli(GENOME_TYPE, NUM_MODULES, tie_prob=args.tie_prob)
 TO_SPEC = with_zoo_modules(ADAPTER.to_spec) if ZOO_MODULES else ADAPTER.to_spec
 if ZOO_MODULES:
     use_zoo_modules_globally()  # the genome operators' collision checks use the zoo geometry too
@@ -378,6 +383,7 @@ class BodyBrainEvolution:
             "genome_type": GENOME_TYPE,
             "per_skill":   ind.tags.get("per_skill", {}),
             "yz_symmetry": ind.tags.get("yz_symmetry", 0.0),
+            "tied_frac":   tied_fraction(ind.genotype[ADAPTER.genotype_key]) if GENOME_TYPE == "tree_tied" else None,
             "genome_hash": ADAPTER.hash(ind.genotype[ADAPTER.genotype_key]),
             "eval_time_s": ind.tags.get("eval_time_s", 0.0),
         }

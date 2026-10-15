@@ -26,7 +26,7 @@ N_REPS = 5
 
 _RUN_TAG_RE = re.compile(
     r"^sympress_(?P<task>forward|multidirection|turn_avg|food)_"
-    r"(?P<genome>tree_symmetric|tree|cppn)_rep(?P<rep>\d+)_"
+    r"(?P<genome>tree_symmetric|tree_tied|tree|cppn)_rep(?P<rep>\d+)_"
     r"(?P<jobid>\d+)_(?P<taskidx>\d+)$"
 )
 

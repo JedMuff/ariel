@@ -38,7 +38,13 @@ from ariel.utils.morphological_descriptor import MorphologicalMeasures
 
 import shared
 
-GenomeType = Literal["tree", "tree_symmetric", "cppn"]
+GenomeType = Literal["tree", "tree_symmetric", "tree_tied", "cppn"]
+
+# tree_tied: chance a placed module gets a randomly placed twin. 0.47 makes
+# ~64% of modules tied (2p / (1 + p)), the mirrored share of tree_symmetric
+# bodies in the zoo-module runs. Under random drift with mild size selection
+# the tied share (0.82) matches tree_symmetric's mirrored share (0.80).
+DEFAULT_TIE_PROB = 0.47
 
 # CPPN inputs: 6 values per face from the decoder; which ones depends on the
 # genotype's decoder_version (see _CPPN_DECODER_FLAGS below and
@@ -88,14 +94,15 @@ def _tree_module_count(genotype_dict: dict) -> int:
         return 0
 
 
-def _make_tree_adapter(symmetry_axis: Optional[MirrorAxis]) -> GenomeAdapter:
+def _make_tree_adapter(symmetry_axis: Optional[MirrorAxis], tie_prob: Optional[float] = None) -> GenomeAdapter:
     def _create_individual(rng: np.random.Generator, num_modules: int, max_depth: int) -> Individual:
-        return shared.create_individual(num_modules, max_depth, symmetry_axis=symmetry_axis)
+        return shared.create_individual(num_modules, max_depth, symmetry_axis=symmetry_axis, tie_prob=tie_prob)
 
     def _make_offspring(
         parents: list[Individual], lam: int, rng: np.random.Generator, num_modules: int, max_depth: int
     ) -> list[Individual]:
-        return shared.make_offspring(parents, lam, rng, num_modules, max_depth, symmetry_axis=symmetry_axis)
+        return shared.make_offspring(parents, lam, rng, num_modules, max_depth, symmetry_axis=symmetry_axis,
+                                     tie_prob=tie_prob)
 
     def _symmetry_score(genotype_dict: dict) -> float:
         axis_str = "y_zero" if symmetry_axis in (None, MirrorAxis.Y_ZERO) else "x_equals_y"
@@ -308,11 +315,13 @@ def _make_cppn_adapter(max_modules: int) -> GenomeAdapter:
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 
-def genome_adapter_from_cli(name: GenomeType, max_modules: int) -> GenomeAdapter:
+def genome_adapter_from_cli(name: GenomeType, max_modules: int, tie_prob: float = DEFAULT_TIE_PROB) -> GenomeAdapter:
     if name == "tree":
         return _make_tree_adapter(None)
     if name == "tree_symmetric":
         return _make_tree_adapter(MirrorAxis.Y_ZERO)
+    if name == "tree_tied":
+        return _make_tree_adapter(None, tie_prob=tie_prob)
     if name == "cppn":
         return _make_cppn_adapter(max_modules)
     raise ValueError(f"Unknown genome type: {name!r}")

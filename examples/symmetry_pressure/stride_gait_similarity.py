@@ -66,7 +66,7 @@ SETTLE_S = 3.0  # shared.SETTLE_DURATION: poses before this are the settle phase
 VARIANTS = ("cycle_shape", "cycle")
 GENOMES = ("tree", "tree_symmetric")
 STRIDE_TAG_RE = re.compile(
-    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_\d+_\d+$"
+    r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree_tied|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_\d+_\d+$"
 )
 META_COLS = ("gen", "body_idx", "ind_id", "stored_fitness", "replayed_fitness", "n_joints", "n_bodies")
 CYCLE_COLS = ("period_s", "autocorr", "aperiodic", "cycle_rms_m", "body_size_m", "rel_amplitude")

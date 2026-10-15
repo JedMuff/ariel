@@ -19,7 +19,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional, cast
+from typing import Any, Callable, Literal, Optional, cast
 
 import cma
 import cv2
@@ -55,6 +55,7 @@ from ariel.ec.genotypes.tree.collision import (
 )
 from ariel.ec.genotypes.tree.symmetry import MirrorAxis, symmetrize_genome
 from ariel.ec.genotypes.tree.tree_genome import TreeGenome
+from ariel.ec.genotypes.tree.tying import crossover_tied, mutate_morph_tied, random_tree_tied
 from ariel.ec.genotypes.tree.validation import validate_genome_dict
 from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
 from ariel.simulation.environments import SimpleFlatWorld
@@ -830,20 +831,55 @@ def joint_count(genome: TreeGenome) -> int:
     return sum(1 for d in genome.nodes.values() if d.get("type") == "HINGE")
 
 
+def _morph_ops(
+    num_modules: int, symmetry_axis: Optional[MirrorAxis], tie_prob: Optional[float]
+) -> tuple[Callable[[], dict], Callable[[dict, dict], tuple[dict, dict]], Callable[[dict, np.random.Generator], dict]]:
+    """(random genome, crossover, mutate) on genome dicts for the body genome in use:
+    tree, tree_symmetric (symmetry_axis) or tree_tied (tie_prob, ariel...tree.tying)."""
+    if tie_prob is not None:
+        return (lambda: random_tree_tied(num_modules, tie_prob).to_dict(),
+                crossover_tied,
+                lambda d, rng: mutate_morph_tied(d, rng, num_modules, tie_prob))
+
+    def random_genome() -> dict:
+        if symmetry_axis is not None:
+            return random_tree_symmetric(num_modules, symmetry_axis).to_dict()
+        return random_tree(num_modules).to_dict()
+
+    def crossover(a: dict, b: dict) -> tuple[dict, dict]:
+        t1, t2 = TreeGenome.from_dict(a), TreeGenome.from_dict(b)
+        if symmetry_axis is not None:
+            c1, c2 = crossover_subtree_symmetric(t1, t2, symmetry_axis)
+        else:
+            c1, c2 = crossover_subtree(t1, t2)
+        return c1.to_dict(), c2.to_dict()
+
+    def mutate(d: dict, rng: np.random.Generator) -> dict:
+        t = TreeGenome.from_dict(d)
+        if symmetry_axis is not None:
+            return mutate_morph_symmetric(t, rng, num_modules, symmetry_axis).to_dict()
+        return mutate_morph(t, rng, num_modules).to_dict()
+
+    return random_genome, crossover, mutate
+
+
+def _morph_ok(genome_dict: dict, max_depth: int) -> bool:
+    genome = TreeGenome.from_dict(genome_dict)
+    return joint_count(genome) >= MIN_HINGES and validate_tree_depth(genome, max_depth)
+
+
 def create_individual(
-    num_modules: int, max_depth: int, symmetry_axis: Optional[MirrorAxis] = None
+    num_modules: int, max_depth: int, symmetry_axis: Optional[MirrorAxis] = None,
+    tie_prob: Optional[float] = None,
 ) -> Individual:
+    random_genome, _, _ = _morph_ops(num_modules, symmetry_axis, tie_prob)
     while True:
-        genome = (
-            random_tree_symmetric(num_modules, symmetry_axis)
-            if symmetry_axis is not None
-            else random_tree(num_modules)
-        )
-        if joint_count(genome) >= MIN_HINGES and validate_tree_depth(genome, max_depth):
+        genome = random_genome()
+        if _morph_ok(genome, max_depth):
             break
     ind = Individual()
     ind.id = _next_ind_id()
-    ind.genotype = {"morph": genome.to_dict()}
+    ind.genotype = {"morph": genome}
     ind.tags = {"ps": False, "valid": True, "best_brain": []}
     return ind
 
@@ -855,46 +891,37 @@ def make_offspring(
     num_modules: int,
     max_depth: int,
     symmetry_axis: Optional[MirrorAxis] = None,
+    tie_prob: Optional[float] = None,
 ) -> list[Individual]:
     """Generate lam offspring via subtree crossover + mutation."""
+    _, crossover, mutate = _morph_ops(num_modules, symmetry_axis, tie_prob)
     offspring: list[Individual] = []
     while len(offspring) < lam:
         use_sexual = len(parents) >= 2 and rng.random() < 0.6
         if use_sexual:
             p1, p2 = random.sample(parents, 2)
-            t1 = TreeGenome.from_dict(p1.genotype["morph"])
-            t2 = TreeGenome.from_dict(p2.genotype["morph"])
-            if symmetry_axis is not None:
-                c1, c2 = crossover_subtree_symmetric(t1, t2, symmetry_axis)
-            else:
-                c1, c2 = crossover_subtree(t1, t2)
+            c1, c2 = crossover(p1.genotype["morph"], p2.genotype["morph"])
             child_morph = c1 if rng.random() < 0.5 else c2
             parent_ids = [p1.id, p2.id]
         else:
             p = random.choice(parents)
-            child_morph = TreeGenome.from_dict(p.genotype["morph"])
+            child_morph = p.genotype["morph"]
             parent_ids = [p.id]
 
-        if symmetry_axis is not None:
-            child_morph = mutate_morph_symmetric(child_morph, rng, num_modules, symmetry_axis)
-        else:
-            child_morph = mutate_morph(child_morph, rng, num_modules)
+        child_morph = mutate(child_morph, rng)
 
         attempts = 0
         valid = False
         while attempts < 50:
-            if joint_count(child_morph) >= MIN_HINGES and validate_tree_depth(child_morph, max_depth):
+            if _morph_ok(child_morph, max_depth):
                 valid = True
                 break
-            if symmetry_axis is not None:
-                child_morph = mutate_morph_symmetric(child_morph, rng, num_modules, symmetry_axis)
-            else:
-                child_morph = mutate_morph(child_morph, rng, num_modules)
+            child_morph = mutate(child_morph, rng)
             attempts += 1
 
         child = Individual()
         child.id = _next_ind_id()
-        child.genotype = {"morph": child_morph.to_dict(), "parent_ids": parent_ids}
+        child.genotype = {"morph": child_morph, "parent_ids": parent_ids}
         child.tags = {"ps": False, "valid": valid, "best_brain": []}
         child.requires_eval = True
         if not valid:

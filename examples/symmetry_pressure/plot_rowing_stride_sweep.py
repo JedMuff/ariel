@@ -43,8 +43,8 @@ from scipy import stats  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GENOMES = ("tree", "tree_symmetric")
-GENOME_LABEL = {"tree": "tree", "tree_symmetric": "tree (symmetric)"}
-GENOME_COLOR = {"tree": "#2a78d6", "tree_symmetric": "#eb6834"}
+GENOME_LABEL = {"tree": "tree", "tree_symmetric": "tree (symmetric)", "tree_tied": "tree (random-tied)"}
+GENOME_COLOR = {"tree": "#2a78d6", "tree_symmetric": "#eb6834", "tree_tied": "#1baf7a"}
 INK, INK_2, MUTED, GRID = "#0b0b0b", "#52514e", "#898781", "#e1e0d9"
 CI_ALPHA = 0.18
 EARLY_LATE_GENS = 5
