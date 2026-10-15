@@ -24,7 +24,7 @@
 #SBATCH --job-name=social-zoo
 #SBATCH --output=out_files/social-zoo-%A_%a.out
 #SBATCH --error=out_files/social-zoo-%A_%a.err
-#SBATCH --time=06:00:00
+#SBATCH --time=03:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=40G
 #SBATCH --partition=genoa
