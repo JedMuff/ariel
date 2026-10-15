@@ -5,10 +5,12 @@ Usage:
         --scheme lamarckian --x 0.5 --rep 0 [--gens 100] [--pop 20] [--lam 100] \
         [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N] \
         [--comma-selection] [--selection elitist|tournament] [--tournament-size 4] \
-        [--novelty-metric DESCR|STRUCT] [--k-inherit 3] [--seed N]
+        [--novelty-metric DESCR|STRUCT|TOPDOWN] [--k-inherit 3] [--seed N] \
+        [--sim-preset legacy|zoo] [--out-root DIR]
 
 Each invocation without --resume-dir creates a fresh, timestamped output
-directory (__data__/social/{platform}/{scheme}/x{x}/k{k}/rep_{rep}[_sel]_nov{M}_{timestamp})
+directory ({out_root}/{scheme}/x{x}/k{k}/rep_{rep}[_sel]_nov{M}_{timestamp}, where
+--out-root defaults to __data__/social/{platform})
 so re-running the same scheme/x/k/rep never clobbers a previous run, and prints
 that directory as `RUN_DIR=<path>` (and the seed as `SEED=<n>`) on their own
 stdout lines.
@@ -18,6 +20,10 @@ rep). It seeds `random` and `np.random` in the main process; each evaluated
 individual also gets its own seed drawn from that stream (stored in its tags
 as `eval_seed`) which seeds the worker that runs its inner CMA-ES. The seed,
 args and git commit are saved to run_config.json in the run directory.
+
+Every generation's novelty, fitness and survival of each selection-pool member
+is kept in tags['novelty_history'] and, when the run finishes, written to the
+database's novelty_history table (see core/novelty_history.py).
 
 To continue a run, pass that exact directory back in:
     uv run examples/d_social_learning/experiment.py \
@@ -62,6 +68,7 @@ from evaluate import evaluate_individual
 from core.fitness import combined_fitness
 from core.inheritance import SCHEMES
 from core.novelty import compute_novelty, compute_novelty_ted
+from core.novelty_history import history_entry, write_table_from_tags
 
 console = Console()
 
@@ -70,8 +77,17 @@ console = Console()
 # ---------------------------------------------------------------------------
 
 
+def _distance_fns() -> dict:
+    """Structural morphology distances for the similar_* schemes."""
+    fns = {"STRUCT": simulator_dependent_functions.similarity_function("STRUCT"), "TOPDOWN": None}
+    if simulator_dependent_functions.simulator == simulator_dependent_functions.SIMULATOR_ARIEL:
+        fns["TOPDOWN"] = simulator_dependent_functions.similarity_function("TOPDOWN")
+    return fns
+
+
 def _pop_state(individuals: list[Individual]) -> list[dict]:
     """Build lightweight state list for inheritance scheme functions."""
+    distance_fns = _distance_fns()
     states = []
     for ind in individuals:
         theta = ind.tags_.get("theta") if ind.tags_ else None
@@ -87,7 +103,7 @@ def _pop_state(individuals: list[Individual]) -> list[dict]:
             "db_id": ind.id,
             "parent_id": parent_id,
             "morphology": ind.genotype["morph"],
-            "similarity_function": simulator_dependent_functions.similarity_function()
+            "distance_fns": distance_fns,
         })
     return states
 
@@ -148,7 +164,10 @@ def _evaluate_with_timeout(
     safe since a fresh Pool is created for every generation anyway.
     """
     from evaluate import init_worker
-    pool = Pool(processes=num_workers, initializer=init_worker, initargs=(platform,))
+    pool = Pool(
+        processes=num_workers, initializer=init_worker,
+        initargs=(platform, simulator_dependent_functions.sim_preset),
+    )
     try:
         async_results = [pool.apply_async(evaluate_individual, (a,)) for a in worker_args]
         results = []
@@ -243,9 +262,13 @@ def build_ops(
         offspring = [ind for ind in population if ind.alive and ind.requires_eval]
         all_alive = parents + offspring
 
+        # Generation of this selection step: alive individuals carry
+        # time_of_death = the last committed generation; offspring are still -1.
+        generation = 1 + max(ind.time_of_death for ind in all_alive if ind.time_of_death >= 0)
+
         descs = _compute_descriptors(all_alive)
-        if novelty_metric == "STRUCT":
-            dist_fn = simulator_dependent_functions.similarity_function()
+        if novelty_metric in ("STRUCT", "TOPDOWN"):
+            dist_fn = simulator_dependent_functions.similarity_function(novelty_metric)
             morphs = [ind.genotype_["morph"] for ind in all_alive]
             novelties = compute_novelty_ted(morphs, dist_fn)
         else:
@@ -372,8 +395,13 @@ def build_ops(
         else:
             survivors = selection_pool.best(n=mu).to_list()
         survivor_ids = {id(s) for s in survivors}
-        for ind in all_alive:
+        for i, ind in enumerate(all_alive):
             ind.alive = id(ind) in survivor_ids
+            history = list(ind.tags_.get("novelty_history", []))
+            history.append(history_entry(
+                generation, novelty_metric, float(novelties[i]), float(ind.fitness_), ind.alive,
+            ))
+            ind.tags = {"novelty_history": history}
 
         return Population(all_alive)
 
@@ -497,13 +525,31 @@ def main() -> None:
              "Saved to run_config.json in the run directory. Ignored with "
              "--resume-dir if that directory already has a run_config.json.",
     )
+    parser.add_argument(
+        "--allow-novelty-change", action="store_true",
+        help="With --resume-dir, allow a --novelty-metric different from the one the run "
+             "was started with (otherwise an error: it changes selection mid-run).",
+    )
     parser.add_argument("--platform", type=str, choices=["ariel", "evogym"], default="ariel")
     parser.add_argument(
-        "--novelty-metric", choices=["DESCR", "STRUCT"], default="DESCR",
+        "--sim-preset", choices=["legacy", "zoo"], default="legacy",
+        help="Simulation constants (sim_ariel/evaluator.py PRESETS): legacy = the original "
+             "local modules, 30 s episodes at 55.6 Hz control and absolute final x; zoo = kgd's "
+             "zoo module physics, 15 s episodes at 20 Hz control, displacement from the start "
+             "(--platform ariel only).",
+    )
+    parser.add_argument(
+        "--out-root", type=str, default=None,
+        help="Directory the {scheme}/x{x}/k{k}/rep_* run directories are created under "
+             "(default __data__/social/{platform}).",
+    )
+    parser.add_argument(
+        "--novelty-metric", choices=["DESCR", "STRUCT", "TOPDOWN"], default="DESCR",
         help="Distance metric used for the fitness-blend novelty term (core/fitness.py's "
              "combined_fitness): DESCR = Euclidean distance on the morphological-descriptors "
-             "vector (default), STRUCT = tree edit distance (--platform ariel) or hamming distance "
-             "(--platform evogym).",
+             "vector (default), STRUCT = time-budgeted graph edit distance (--platform ariel) or "
+             "hamming distance (--platform evogym), TOPDOWN = exact top-down tree edit "
+             "distance (--platform ariel only).",
     )
     args = parser.parse_args()
 
@@ -512,6 +558,12 @@ def main() -> None:
 
     if args.selection == "tournament" and args.tournament_size < 2:
         parser.error("--tournament-size must be >= 2 when --selection=tournament")
+
+    if args.platform != "ariel" and (args.novelty_metric == "TOPDOWN" or args.scheme.endswith("_TOPDOWN")):
+        parser.error("TOPDOWN (novelty metric and similar_*_TOPDOWN schemes) is ariel-only")
+
+    if args.platform != "ariel" and args.sim_preset != "legacy":
+        parser.error("--sim-preset other than legacy is ariel-only")
 
     simulator_dependent_functions.simulator = args.platform
 
@@ -531,6 +583,21 @@ def main() -> None:
         if config_path.exists():
             config = json.loads(config_path.read_text())
             seed, seed_source = config["seed"], config["seed_source"]
+            started_metric = (config.get("args") or {}).get("novelty_metric")
+            if (started_metric and started_metric != args.novelty_metric
+                    and not args.allow_novelty_change):
+                parser.error(
+                    f"run was started with --novelty-metric {started_metric}, resuming with "
+                    f"{args.novelty_metric} would change selection mid-run "
+                    "(pass --allow-novelty-change to do it anyway)"
+                )
+            # Runs from before --sim-preset existed are legacy.
+            started_preset = (config.get("args") or {}).get("sim_preset", "legacy")
+            if started_preset != args.sim_preset:
+                parser.error(
+                    f"run was started with --sim-preset {started_preset}, resuming with "
+                    f"{args.sim_preset} would change the simulation mid-run"
+                )
         else:
             # Run predates run_config.json: record the seed it would have had.
             config = {"seed": seed, "seed_source": seed_source, "args": None,
@@ -564,9 +631,10 @@ def main() -> None:
         if args.selection == "tournament":
             sel_bits.append(f"tourn{args.tournament_size}")
         sel_suffix = ("_" + "_".join(sel_bits)) if sel_bits else ""
-        novelty_suffix = "_novSTRUCT" if args.novelty_metric == "STRUCT" else "_novDESCR"
-        out_dir = Path(
-            f"__data__/social/{args.platform}/{args.scheme}/x{x_str}/k{args.k_inherit}/rep_{args.rep}{sel_suffix}{novelty_suffix}_{timestamp}"
+        novelty_suffix = f"_nov{args.novelty_metric}"
+        out_root = Path(args.out_root or f"__data__/social/{args.platform}")
+        out_dir = out_root / (
+            f"{args.scheme}/x{x_str}/k{args.k_inherit}/rep_{args.rep}{sel_suffix}{novelty_suffix}_{timestamp}"
         )
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / RUN_CONFIG).write_text(json.dumps({
@@ -574,6 +642,10 @@ def main() -> None:
             "started": now.isoformat(timespec="seconds"), "git_commit": _git_commit(),
         }, indent=2))
         _seed_all(seed)
+
+    # Before anything builds a body: the zoo preset also changes the module
+    # geometry that random_tree's collision checks use.
+    simulator_dependent_functions.set_sim_preset(args.sim_preset)
 
     # Printed on its own line (not via `console`, whose rich markup/box-drawing
     # would make this harder to grep) so calling scripts can pick up exactly
@@ -602,22 +674,27 @@ def main() -> None:
     )
 
     if args.resume_dir:
+        db_path = _next_db_path(out_dir)
         ea = EA(
             restart=_latest_db_path(out_dir),
             operations=ops,
             num_steps=args.gens,
-            db_file_path=_next_db_path(out_dir),
+            db_file_path=db_path,
             db_handling="delete",
         )
     else:
+        db_path = out_dir / "database.db"
         ea = EA(
             population=make_initial_population(args.pop),
             operations=ops,
             num_steps=args.gens,
-            db_file_path=out_dir / "database.db",
+            db_file_path=db_path,
             db_handling="delete",
         )
     ea.run()
+    ea.engine.dispose()
+    n_rows = write_table_from_tags(db_path)
+    console.log(f"novelty_history: {n_rows} rows written to {db_path}")
 
     console.rule("[bold green]Done")
 

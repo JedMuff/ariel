@@ -489,6 +489,12 @@ def main() -> None:
     if not db_path.exists():
         console.print(f"[red]No such database: {db_path}[/red]")
         return
+    config_path = db_path.parent / "run_config.json"
+    if config_path.exists():
+        preset = (json.loads(config_path.read_text()).get("args") or {}).get("sim_preset", "legacy")
+        if preset != "legacy":
+            # The replay loop here copies the legacy evaluator's constants.
+            parser.error(f"{db_path} is a --sim-preset {preset} run; only legacy runs can be replayed")
 
     con = sqlite3.connect(db_path)
     n_experiment = con.execute(

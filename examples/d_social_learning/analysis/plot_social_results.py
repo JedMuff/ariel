@@ -44,6 +44,7 @@ def main() -> None:
         "darwinian", "lamarckian", "random", "random_many",
         "best", "best_many", "similar_DESCR", "similar_many_DESCR",
         "similar_STRUCT", "similar_many_STRUCT",
+        "similar_TOPDOWN", "similar_many_TOPDOWN",
     ]
     X_VALUES = [0.0, 0.5, 1.0]
     DOMAINS = ["ariel", "evogym"]

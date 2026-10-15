@@ -16,8 +16,9 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 import simulator_dependent_functions
 import numpy as np
 
-def init_worker(simulator):
+def init_worker(simulator, sim_preset="legacy"):
     simulator_dependent_functions.simulator = simulator
+    simulator_dependent_functions.set_sim_preset(sim_preset)
 
 def evaluate_individual(args: tuple) -> dict:
     """Picklable worker: run inner CMA-ES for one individual.

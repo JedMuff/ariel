@@ -20,6 +20,41 @@ CTRL_ALPHA = 0.5   # control blending factor (0=no change, 1=instant) — damps 
 HEIGHT_PENALTY_THRESHOLD = 0.5  # m — only penalise spawn height above this
 JERK_PENALTY_WEIGHT = 3.0  # penalty per unit of mean absolute ctrl delta, applied above JERK_THRESHOLD
 JERK_THRESHOLD = 0.15  # hurdle: mean_jerk below this is free; at/above it, the full weight*mean_jerk applies
+ZOO_MODULES = False  # build bodies with kgd's zoo modules (sim_ariel/zoo_modules.py)
+DISPLACEMENT_FROM_START = False  # fitness uses x travelled since the settle phase, not the absolute x
+
+# Simulation presets (experiment.py --sim-preset). "legacy" is the module
+# defaults above, used by every run before the zoo preset existed. "zoo" uses
+# kgd's zoo module physics and timing (15 s episodes, 20 Hz control), keeps the
+# settle phase, smoothing and jerk penalty, and measures displacement from the
+# start. CTRL_ALPHA and the jerk constants act per control step, so they are
+# rescaled from legacy's 9-step control period to 25 steps: same smoothing
+# time constant, and the same penalty per second of control change.
+_ZOO_STEP_RATIO = 25 / 9
+PRESETS = {
+    "legacy": {
+        "DURATION": DURATION, "CTRL_EVERY": CTRL_EVERY, "CTRL_ALPHA": CTRL_ALPHA,
+        "JERK_PENALTY_WEIGHT": JERK_PENALTY_WEIGHT, "JERK_THRESHOLD": JERK_THRESHOLD,
+        "ZOO_MODULES": False, "DISPLACEMENT_FROM_START": False,
+    },
+    "zoo": {
+        "DURATION": 15.0, "CTRL_EVERY": 25,  # 500Hz physics / 25 = 20Hz control
+        "CTRL_ALPHA": 1.0 - (1.0 - CTRL_ALPHA) ** _ZOO_STEP_RATIO,
+        "JERK_PENALTY_WEIGHT": JERK_PENALTY_WEIGHT / _ZOO_STEP_RATIO,
+        "JERK_THRESHOLD": JERK_THRESHOLD * _ZOO_STEP_RATIO,
+        "ZOO_MODULES": True, "DISPLACEMENT_FROM_START": True,
+    },
+}
+
+
+def apply_preset(name: str) -> None:
+    """Set this module's simulation constants to preset *name* for the rest of
+    the process. The zoo preset also switches the module classes to zoo sizes
+    and masses, so genome collision checks use the zoo geometry."""
+    globals().update(PRESETS[name])
+    if ZOO_MODULES:
+        from sim_ariel.zoo_modules import use_zoo_modules_globally
+        use_zoo_modules_globally()
 
 
 def _scale_actions(raw: np.ndarray) -> np.ndarray:
@@ -38,6 +73,9 @@ def initialize_world(genome_dict):
     graph = genome.to_networkx()
 
     core = construct_mjspec_from_graph(graph)
+    if ZOO_MODULES:
+        from sim_ariel.zoo_modules import apply_zoo_modules
+        apply_zoo_modules(core.spec)
     world = SimpleFlatWorld()
     world.spawn(core.spec, position=SPAWN_POS, rotation=(0, 0, 90))
     model = world.spec.compile()
@@ -82,6 +120,7 @@ def run_episode(theta: np.ndarray, brain, simulator_specifics: dict) -> dict:
     while data.time < SETTLE_TIME:
         mujoco.mj_step(model, data)
         sim_step += 1
+    start_x = float(data.qpos[0])
 
     # Rollout phase
     c_hinge = 0
@@ -122,7 +161,7 @@ def run_episode(theta: np.ndarray, brain, simulator_specifics: dict) -> dict:
 
     mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
 
-    d = float(data.qpos[0])
+    d = float(data.qpos[0]) - (start_x if DISPLACEMENT_FROM_START else 0.0)
     height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
     # Hurdle penalty (see learn_gecko_gait.py's gecko sweep): a linear
     # penalty from zero pushed CMA-ES toward a near-static "don't move

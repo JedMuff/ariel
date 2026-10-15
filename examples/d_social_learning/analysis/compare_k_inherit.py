@@ -34,7 +34,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from curve_utils import rep_db_parts
+from curve_utils import NOVELTY_METRIC, load_history_by_gen, rep_db_parts
 
 K_DIR_RE = re.compile(r"^k(?P<k>\d+)$")
 K_COLORS = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b2"]
@@ -147,12 +147,12 @@ def main() -> None:
                 continue
             print(f"  k={k} {rep_dir.name}: {last + 1} generations")
             distance[k].append(dist)
-            novelty[k].append(load_tag(rep_dir, "novelty"))
+            novelty[k].append(load_history_by_gen(rep_dir, "novelty") or {})
 
     fig, (ax_d, ax_n) = plt.subplots(1, 2, figsize=(14, 5.5))
     plot_panel(ax_d, distance, "distance", show_best=True)
     ax_d.set_title("Distance")
-    plot_panel(ax_n, novelty, "novelty (STRUCT)", show_best=False)
+    plot_panel(ax_n, novelty, f"novelty ({NOVELTY_METRIC}, selection pool)", show_best=False)
     ax_n.set_title("Novelty")
     fig.suptitle("k_inherit pilot: best_many, x=1.0 (mean ± std across reps)")
     fig.tight_layout()

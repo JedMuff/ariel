@@ -78,7 +78,7 @@ else
     SELECTION_FLAG=()
 fi
 
-NOVELTY_METRIC=STRUCT
+NOVELTY_METRIC=TOPDOWN
 
 echo "Scheme: $SCHEME  x=$X  k=$K  rep=$REP  (array idx=$IDX)"
 echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS comma_selection=$COMMA_SELECTION novelty_metric=$NOVELTY_METRIC k_inherit=$K"

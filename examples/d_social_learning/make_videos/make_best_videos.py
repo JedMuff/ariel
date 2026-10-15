@@ -6,7 +6,11 @@ penalty) to pick the best theta per scheme, regardless of stored fitness values.
 Usage:
     uv run examples/d_social_learning/make_best_videos.py \
         [--data-dir __data__/social/ariel] [--out-dir __data__/social/videos] \
-        [--duration 30.0] [--settle 3.0] [--fps 50]
+        [--duration SECONDS] [--settle 3.0] [--fps 50] [--sim-preset legacy|zoo]
+
+The simulation preset (experiment.py --sim-preset) is read from the runs'
+run_config.json files unless --sim-preset is given; --duration defaults to
+the preset's episode length.
 """
 
 from __future__ import annotations
@@ -26,6 +30,10 @@ for _p in [str(_SOCIAL_DIR), ""]:
     if _p in sys.path:
         sys.path.remove(_p)
 
+# Appended, not prepended: the installed ariel package still wins over the
+# ariel/ directory here.
+sys.path.append(str(_SOCIAL_DIR.parent))  # for sim_ariel
+
 import imageio
 import mujoco
 import numpy as np
@@ -36,6 +44,8 @@ from ariel.ec.genotypes.tree.tree_genome import TreeGenome
 from ariel.simulation.controllers import DistributedMLP
 from ariel.simulation.controllers.morphology_adapter import MorphologyAdapter
 from ariel.simulation.environments import SimpleFlatWorld
+from sim_ariel import evaluator as sim_evaluator
+from sim_ariel.zoo_modules import apply_zoo_modules
 
 console = Console()
 
@@ -47,11 +57,14 @@ FEATURES_PER_NODE = 8
 HEIGHT_PENALTY_THRESHOLD = 0.5
 JERK_PENALTY_WEIGHT = 3.0
 JERK_THRESHOLD = 0.15
+ZOO_MODULES = False
+DISPLACEMENT_FROM_START = False
 
 SCHEMES = [
     "darwinian", "lamarckian", "random", "random_many",
     "best", "best_many", "similar_DESCR", "similar_many_DESCR",
     "similar_STRUCT", "similar_many_STRUCT",
+    "similar_TOPDOWN", "similar_many_TOPDOWN",
 ]
 
 
@@ -88,10 +101,30 @@ def load_all_candidates(db_path: Path) -> list[tuple[dict, np.ndarray]]:
     return candidates
 
 
+def _apply_preset(name: str) -> None:
+    """Use the evaluator's constants for preset *name* (see experiment.py
+    --sim-preset), including the zoo module geometry."""
+    sim_evaluator.apply_preset(name)
+    globals().update(sim_evaluator.PRESETS[name])
+
+
+def _runs_preset(data_dir: Path, schemes: list[str]) -> str:
+    """The --sim-preset the runs under *data_dir* were made with."""
+    presets = set()
+    for scheme in schemes:
+        for config in data_dir.glob(f"{scheme}/**/run_config.json"):
+            presets.add((json.loads(config.read_text()).get("args") or {}).get("sim_preset", "legacy"))
+    if len(presets) > 1:
+        raise SystemExit(f"runs under {data_dir} mix sim presets {sorted(presets)}; pass --sim-preset")
+    return presets.pop() if presets else "legacy"
+
+
 def _build_model(morph_dict: dict):
     genome = TreeGenome.from_dict(morph_dict)
     graph = genome.to_networkx()
     core = construct_mjspec_from_graph(graph)
+    if ZOO_MODULES:
+        apply_zoo_modules(core.spec)
     world = SimpleFlatWorld()
     world.spawn(core.spec, position=SPAWN_POS, rotation=(0, 0, 90))
     model = world.spec.compile()
@@ -117,6 +150,7 @@ def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float
     while data.time < settle:
         mujoco.mj_step(model, data)
         sim_step += 1
+    start_x = float(data.qpos[0])
 
     ctrl_step = 0
     prev_ctrl = np.zeros(model.nu, dtype=np.float32)
@@ -140,7 +174,7 @@ def evaluate(morph_dict: dict, theta: np.ndarray, duration: float, settle: float
         sim_step += 1
 
     mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
-    d = float(data.qpos[0])
+    d = float(data.qpos[0]) - (start_x if DISPLACEMENT_FROM_START else 0.0)
     height_penalty = core_height if core_height > HEIGHT_PENALTY_THRESHOLD else 0.0
     jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
     return d - height_penalty - jerk_penalty
@@ -220,7 +254,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="__data__/social/ariel")
     parser.add_argument("--out-dir", default="__data__/social/videos")
-    parser.add_argument("--duration", type=float, default=30.0)
+    parser.add_argument("--duration", type=float, default=None,
+                        help="Rollout length (s); default: the sim preset's episode length")
+    parser.add_argument("--sim-preset", choices=sorted(sim_evaluator.PRESETS), default=None,
+                        help="default: read from the runs' run_config.json")
     parser.add_argument("--settle", type=float, default=3.0)
     parser.add_argument("--fps", type=int, default=50)
     parser.add_argument("--schemes", nargs="*", default=SCHEMES)
@@ -229,6 +266,12 @@ def main() -> None:
     data_dir = Path(args.data_dir)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    preset = args.sim_preset or _runs_preset(data_dir, args.schemes)
+    _apply_preset(preset)
+    if args.duration is None:
+        args.duration = DURATION
+    console.log(f"sim preset: {preset}  (duration {args.duration}s, control every {CTRL_EVERY} steps)")
 
     for scheme in args.schemes:
         all_candidates: list[tuple[dict, np.ndarray, Path]] = []

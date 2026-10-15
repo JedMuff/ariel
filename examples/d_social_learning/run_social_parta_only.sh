@@ -48,7 +48,7 @@ cd "$REPO_ROOT"
 # Map array index -> (scheme, x, rep)
 # ---------------------------------------------------------------------------
 
-SCHEMES=(darwinian lamarckian random random_many best best_many similar_STRUCT similar_many_STRUCT)
+SCHEMES=(darwinian lamarckian random random_many best best_many similar_TOPDOWN similar_many_TOPDOWN)
 X_VALUES=(0 0.5 1)
 N_REPS=5
 
@@ -95,11 +95,13 @@ else
 fi
 
 # Distance metric used for the fitness-blend novelty term: DESCR = Euclidean
-# distance on the morphological-descriptor vector, STRUCT = tree edit distance
-# for ariel and hamming distance for evogym. Applies uniformly to every task
-# in this submission (not swept per array index) -- flip back to DESCR and
-# resubmit for an DESCR sweep.
-NOVELTY_METRIC=STRUCT
+# distance on the morphological-descriptor vector, STRUCT = time-budgeted
+# graph edit distance (ariel) / hamming distance (evogym), TOPDOWN = exact
+# top-down tree edit distance (ariel only; deterministic and ~3000x faster
+# than STRUCT). Applies uniformly to every task in this submission (not swept
+# per array index). Keep it in step with the similar_* schemes in SCHEMES.
+# Runs up to 2026-10 (job 27759199 and earlier) used STRUCT.
+NOVELTY_METRIC=TOPDOWN
 
 # Number of neighbors/donors for the inheritance schemes. 5 was picked from the
 # run_k_inherit_sweep.sh pilot (best_many, x=1.0, k in {3, 5, 8}).

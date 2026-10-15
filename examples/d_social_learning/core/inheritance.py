@@ -8,6 +8,9 @@ Population state is a list of dicts with keys:
   - "theta": np.ndarray or None  (None = no prior brain)
   - "fitness": float or None
   - "db_id": int or None  (database primary key, for donor tracking)
+  - "morphology": raw stored morphology
+  - "distance_fns": {"STRUCT": fn, "TOPDOWN": fn or None} structural
+    distances between two morphologies (TOPDOWN is ariel-only)
 
 K_INHERIT controls how many neighbours are averaged in *_many schemes.
 """
@@ -148,32 +151,41 @@ def similar_many_DESCR(
     return thetas.mean(axis=0), donor_ids
 
 
+def _nearest_by_structure(
+    pop_state: list[dict], idx: int, metric: str, k: int,
+) -> list[dict] | None:
+    """The k candidates (other individuals with a brain) nearest to idx by
+    ``pop_state[idx]["distance_fns"][metric]`` applied to the raw morphology
+    -- *not* the descriptor vector. Morphology is passed through as-is (not
+    cast to a numeric array): ariel's morphology is a genome dict, not an
+    array. None if there are no candidates."""
+    distance_fn = pop_state[idx]["distance_fns"][metric]
+    target_morphology = pop_state[idx]["morphology"]
+    candidates = [s for i, s in enumerate(pop_state) if i != idx and s["theta"] is not None]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda s: distance_fn(s["morphology"], target_morphology))
+    return candidates[:k]
+
+
+def _inherit_from(donors: list[dict]) -> tuple[np.ndarray, list[int]]:
+    thetas = np.array([s["theta"] for s in donors], dtype=np.float64)
+    donor_ids = [s.get("db_id") for s in donors if s.get("db_id") is not None]
+    return thetas.mean(axis=0), donor_ids
+
+
 def similar_STRUCT(
     pop_state: list[dict],
     idx: int,
     n_params: int,
     k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
-    """Donor = nearest neighbour by ``similarity_function`` (tree edit distance
-    for ariel, aligned Hamming distance on the voxel grid for evogym) applied
-    to the raw morphology -- *not* the descriptor vector. Morphology is passed
-    through as-is (not cast to a numeric array): ariel's morphology is a
-    genome dict, not an array."""
-    similarity_function = pop_state[idx]['similarity_function']
-    target_morphology = pop_state[idx]["morphology"]
-    candidates = [
-        (i, s) for i, s in enumerate(pop_state)
-        if i != idx and s["theta"] is not None
-    ]
-    if not candidates:
+    """Donor = nearest neighbour by the STRUCT distance (tree edit distance
+    for ariel, aligned Hamming distance on the voxel grid for evogym)."""
+    donors = _nearest_by_structure(pop_state, idx, "STRUCT", 1)
+    if donors is None:
         return darwinian(pop_state, idx, n_params, k_inherit)
-    nearest_i, nearest_s = min(
-        candidates,
-        key=lambda t: similarity_function(t[1]["morphology"], target_morphology),
-    )
-    db_id = nearest_s.get("db_id")
-    donor_ids = [db_id] if db_id is not None else []
-    return np.asarray(nearest_s["theta"], dtype=np.float64), donor_ids
+    return _inherit_from(donors)
 
 
 def similar_many_STRUCT(
@@ -183,20 +195,37 @@ def similar_many_STRUCT(
     k_inherit: int = K_INHERIT,
 ) -> tuple[np.ndarray, list[int]]:
     """Like ``similar_STRUCT``, averaged over the K_INHERIT nearest donors."""
-    similarity_function = pop_state[idx]['similarity_function']
-    target_morphology = pop_state[idx]["morphology"]
-    candidates = [
-        (i, s) for i, s in enumerate(pop_state)
-        if i != idx and s["theta"] is not None
-    ]
-    if not candidates:
+    donors = _nearest_by_structure(pop_state, idx, "STRUCT", k_inherit)
+    if donors is None:
         return darwinian(pop_state, idx, n_params, k_inherit)
+    return _inherit_from(donors)
 
-    candidates.sort(key=lambda t: similarity_function(t[1]["morphology"], target_morphology))
-    top = candidates[:k_inherit]
-    thetas = np.array([s["theta"] for _, s in top], dtype=np.float64)
-    donor_ids = [s.get("db_id") for _, s in top if s.get("db_id") is not None]
-    return thetas.mean(axis=0), donor_ids
+
+def similar_TOPDOWN(
+    pop_state: list[dict],
+    idx: int,
+    n_params: int,
+    k_inherit: int = K_INHERIT,
+) -> tuple[np.ndarray, list[int]]:
+    """Donor = nearest neighbour by exact top-down tree edit distance (ariel
+    only; see sim_ariel/tree_edit_distance.py's top_down_tree_distance)."""
+    donors = _nearest_by_structure(pop_state, idx, "TOPDOWN", 1)
+    if donors is None:
+        return darwinian(pop_state, idx, n_params, k_inherit)
+    return _inherit_from(donors)
+
+
+def similar_many_TOPDOWN(
+    pop_state: list[dict],
+    idx: int,
+    n_params: int,
+    k_inherit: int = K_INHERIT,
+) -> tuple[np.ndarray, list[int]]:
+    """Like ``similar_TOPDOWN``, averaged over the K_INHERIT nearest donors."""
+    donors = _nearest_by_structure(pop_state, idx, "TOPDOWN", k_inherit)
+    if donors is None:
+        return darwinian(pop_state, idx, n_params, k_inherit)
+    return _inherit_from(donors)
 
 
 SCHEMES = {
@@ -210,4 +239,6 @@ SCHEMES = {
     "similar_many_DESCR": similar_many_DESCR,
     "similar_STRUCT": similar_STRUCT,
     "similar_many_STRUCT": similar_many_STRUCT,
+    "similar_TOPDOWN": similar_TOPDOWN,
+    "similar_many_TOPDOWN": similar_many_TOPDOWN,
 }

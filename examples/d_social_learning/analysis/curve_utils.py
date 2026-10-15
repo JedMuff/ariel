@@ -9,18 +9,28 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.novelty_history import read_run_history  # noqa: E402
+
 SCHEMES = [
     "darwinian", "lamarckian", "random", "random_many",
     "best", "best_many", "similar_DESCR", "similar_many_DESCR",
     "similar_STRUCT", "similar_many_STRUCT",
+    "similar_TOPDOWN", "similar_many_TOPDOWN",
 ]
 X_VALUES = [0.0, 0.5, 1.0]
+
+# novelty_history metric (core/novelty_history.py) that metric="novelty" and
+# metric="fitness" curves read; runs made before the table existed get it
+# from analysis/backfill_novelty.py.
+NOVELTY_METRIC = "TOPDOWN"
 
 # Distinct color per scheme, shared across all plots for consistency.
 SCHEME_COLORS = {
@@ -28,7 +38,7 @@ SCHEME_COLORS = {
         SCHEMES,
         ["#4c72b0", "#dd8452", "#55a868", "#c44e52",
          "#8172b2", "#937860", "#da8bc3", "#8c8c8c",
-         "#ccb974", "#64b5cd"],
+         "#ccb974", "#64b5cd", "#ccb974", "#64b5cd"],
     )
 }
 
@@ -77,15 +87,29 @@ def rep_db_parts(rep_dir: Path) -> list[Path]:
     return [p for p in parts if p.exists()]
 
 
+def load_history_by_gen(rep_dir: Path, column: str, metric: str = NOVELTY_METRIC) -> dict[int, list[float]] | None:
+    """{generation: [novelty_history `column` of every selection-pool member]}
+    for one rep (stitched across database_part*.db), or None if the rep has
+    no history for `metric`."""
+    hist = read_run_history(rep_dir, metric)
+    if hist.empty:
+        return None
+    hist = hist[np.isfinite(hist[column].astype(float))]
+    return {int(g): grp[column].astype(float).tolist() for g, grp in hist.groupby("generation")}
+
+
 def load_run(rep_dir: Path, metric: str) -> dict[int, list[float]] | None:
     """Return {generation: [values]} for one rep, stitched across
     database.db and any database_part*.db continuation files, or None if
     missing/empty.
 
-    metric="fitness" reads individual.fitness_; metric="novelty" reads
-    tags_['novelty']; metric="displacement" reads pure_displacement(tags_).
-    All are restricted to individuals with fitness_ IS NOT
-    NULL, matching how the outer EA marks an individual as evaluated.
+    metric="fitness"/"novelty" read the novelty_history table for
+    NOVELTY_METRIC: every selection-pool member's value at each generation
+    (individual.fitness_ / tags_['novelty'] only keep each individual's last
+    value, see core/novelty_history.py). metric="displacement" reads
+    pure_displacement(tags_) of the individuals born each generation,
+    restricted to fitness_ IS NOT NULL, matching how the outer EA marks an
+    individual as evaluated.
 
     A resumed run's continuation file re-persists the restored survivor
     population under its original time_of_birth (see rep_db_parts), so
@@ -93,6 +117,9 @@ def load_run(rep_dir: Path, metric: str) -> dict[int, list[float]] | None:
     the highest generation already covered by earlier parts — this drops the
     duplicated restart-generation rows instead of double-counting them.
     """
+    if metric in ("fitness", "novelty"):
+        return load_history_by_gen(rep_dir, metric)
+
     db_parts = rep_db_parts(rep_dir)
     if not db_parts:
         return None
@@ -110,17 +137,10 @@ def load_run(rep_dir: Path, metric: str) -> dict[int, list[float]] | None:
         con.close()
 
         part_max = covered_max
-        for birth, fit, tags in rows:
+        for birth, _fitness, tags in rows:
             if birth <= covered_max:
                 continue
-            if metric == "fitness":
-                value = fit
-            else:
-                tags_d = json.loads(tags) if tags else {}
-                if metric == "displacement":
-                    value = pure_displacement(tags_d)
-                else:
-                    value = tags_d.get("novelty")
+            value = pure_displacement(json.loads(tags) if tags else {})
             if value is not None and np.isfinite(value):
                 by_gen[birth].append(float(value))
             part_max = max(part_max, birth)
