@@ -6,8 +6,8 @@
 #     control, displacement measured from the start position (see
 #     sim_ariel/evaluator.py PRESETS)
 #   - two lifetime-learning budgets, 10 and 20 inner CMA-ES generations
-#   - the part A report's subset: 5 schemes, x in {0.5, 1}
-#   - 10 reps
+#   - all 8 part A schemes, x in {0.5, 1}
+#   - 20 reps
 #
 # Each budget gets its own data tree, __data__/social/ariel_zoo/ig{10,20}, laid
 # out like __data__/social/ariel, so the part A analysis can be pointed at it
@@ -18,17 +18,26 @@
 # Usage:
 #   sbatch examples/d_social_learning/run_social_zoo_budget.sh
 #
-# 10 reps x 2 budgets x 5 schemes x 2 x-values = 200 combos -> array indices
-# 0-199. Ordering: rep outermost, then budget, then scheme, then x.
+# 20 reps x 2 budgets x 8 schemes x 2 x-values = 640 combos -> array indices
+# 0-639. Ordering: rep outermost, then budget, then scheme, then x:
+#     index = 32 * rep + 16 * budget_idx + 2 * scheme_idx + x_idx
+# The first batch ran the first 5 schemes (indices 0-4 below) for reps 0-9,
+# so the default array is everything else (440 combos):
+#   - reps 0-9, the 3 added schemes (scheme_idx 5-7): 32*rep + 16*b + 10..15
+#   - reps 10-19, all 8 schemes: 320-639
+# A task also skips its combo if a complete run of it already exists (set
+# FORCE=1 to run anyway), so resubmitting the full range 0-639 is safe. To
+# rerun a single combo, override the array, e.g. `sbatch --array=337 ...`;
+# the analysis keeps the newest run dir per (scheme, x, rep).
 #
 #SBATCH --job-name=social-zoo
 #SBATCH --output=out_files/social-zoo-%A_%a.out
 #SBATCH --error=out_files/social-zoo-%A_%a.err
-#SBATCH --time=03:00:00
+#SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=40G
 #SBATCH --partition=genoa
-#SBATCH --array=0-199
+#SBATCH --array=10-15,26-31,42-47,58-63,74-79,90-95,106-111,122-127,138-143,154-159,170-175,186-191,202-207,218-223,234-239,250-255,266-271,282-287,298-303,314-319,320-639
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -48,10 +57,12 @@ cd "$REPO_ROOT"
 # Map array index -> (rep, budget, scheme, x)
 # ---------------------------------------------------------------------------
 
-SCHEMES=(darwinian lamarckian similar_TOPDOWN best_many random_many)
+# The first 5 are the first batch's; new schemes go at the end so existing
+# indices keep their meaning.
+SCHEMES=(darwinian lamarckian similar_TOPDOWN best_many random_many random best similar_many_TOPDOWN)
 X_VALUES=(0.5 1)
 BUDGETS=(10 20)   # inner CMA-ES generations
-N_REPS=10
+N_REPS=20
 
 IDX=$SLURM_ARRAY_TASK_ID
 N_X=${#X_VALUES[@]}
@@ -97,6 +108,28 @@ echo "Scheme: $SCHEME  x=$X  rep=$REP  inner-gens=$INNER_GENS  (array idx=$IDX)"
 echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS sim_preset=$SIM_PRESET novelty_metric=$NOVELTY_METRIC k_inherit=$K_INHERIT out_root=$OUT_ROOT"
 
 mkdir -p out_files
+
+# Skip combos that already have a complete run (generation $GENS evaluated),
+# so overlapping or repeated submissions don't duplicate work.
+X_DIR=$(printf "x%02d" "$(awk -v x="$X" 'BEGIN { printf "%d", x * 10 + 0.5 }')")
+if [ "${FORCE:-0}" != "1" ] && "$VENV_PATH/bin/python" - "$OUT_ROOT/$SCHEME/$X_DIR/k$K_INHERIT" "$REP" "$NOVELTY_METRIC" "$GENS" <<'EOF'
+import sqlite3, sys
+from pathlib import Path
+root, rep, nov, gens = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+for db in root.glob(f"rep_{rep}_*nov{nov}_*/database.db"):
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    n = con.execute("SELECT count(*) FROM individual WHERE time_of_birth = ? AND fitness_ IS NOT NULL",
+                    (gens,)).fetchone()[0]
+    con.close()
+    if n:
+        print(f"complete run exists: {db.parent}")
+        sys.exit(0)
+sys.exit(1)
+EOF
+then
+    echo "Skipping (set FORCE=1 to run anyway)"
+    exit 0
+fi
 
 START_TIME=$(date +%s)
 
