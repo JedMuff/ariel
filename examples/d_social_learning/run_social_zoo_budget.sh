@@ -8,10 +8,15 @@
 #   - two lifetime-learning budgets, 10 and 20 inner CMA-ES generations
 #   - all 8 part A schemes, x in {0.5, 1}
 #   - 20 reps
+#   - --final-evals 10: each robot's score is the mean over 10 episodes of its
+#     learned controller with a jittered start state, not CMA-ES's best
+#     single-episode fitness (which is inflated for contact-chaotic gaits).
+#     Selection and the donor schemes use that score.
 #
-# Each budget gets its own data tree, __data__/social/ariel_zoo/ig{10,20}, laid
-# out like __data__/social/ariel, so the part A analysis can be pointed at it
-# with --data-dir. As in part A, experiment.py prints each run's directory as
+# Each budget gets its own data tree, __data__/social/ariel_zoo_fe10/ig{10,20},
+# laid out like __data__/social/ariel, so the part A analysis can be pointed at
+# it with --data-dir. The first pilot batch (best-of-N scoring, 5 schemes x 10
+# reps) is in __data__/social/ariel_zoo and is not mixed with these runs. As in part A, experiment.py prints each run's directory as
 # `RUN_DIR=<path>` in out_files/social-zoo-<jobid>_<taskid>.out, and the seed
 # is a stable hash of (scheme, x, k_inherit, rep), so both budgets share seeds.
 #
@@ -21,23 +26,20 @@
 # 20 reps x 2 budgets x 8 schemes x 2 x-values = 640 combos -> array indices
 # 0-639. Ordering: rep outermost, then budget, then scheme, then x:
 #     index = 32 * rep + 16 * budget_idx + 2 * scheme_idx + x_idx
-# The first batch ran the first 5 schemes (indices 0-4 below) for reps 0-9,
-# so the default array is everything else (440 combos):
-#   - reps 0-9, the 3 added schemes (scheme_idx 5-7): 32*rep + 16*b + 10..15
-#   - reps 10-19, all 8 schemes: 320-639
-# A task also skips its combo if a complete run of it already exists (set
-# FORCE=1 to run anyway), so resubmitting the full range 0-639 is safe. To
-# rerun a single combo, override the array, e.g. `sbatch --array=337 ...`;
-# the analysis keeps the newest run dir per (scheme, x, rep).
+# A task skips its combo if a complete run of it already exists under
+# OUT_ROOT (set FORCE=1 to run anyway), so resubmitting the full range is safe
+# and only fills in what is missing. To rerun a single combo, override the
+# array, e.g. `sbatch --array=337 ...`; the analysis keeps the newest run dir
+# per (scheme, x, rep).
 #
 #SBATCH --job-name=social-zoo
 #SBATCH --output=out_files/social-zoo-%A_%a.out
 #SBATCH --error=out_files/social-zoo-%A_%a.err
-#SBATCH --time=02:00:00
+#SBATCH --time=02:30:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=40G
 #SBATCH --partition=genoa
-#SBATCH --array=10-15,26-31,42-47,58-63,74-79,90-95,106-111,122-127,138-143,154-159,170-175,186-191,202-207,218-223,234-239,250-255,266-271,282-287,298-303,314-319,320-639
+#SBATCH --array=0-639
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -102,10 +104,11 @@ SIM_PRESET=zoo
 # similar_TOPDOWN scheme.
 NOVELTY_METRIC=TOPDOWN
 K_INHERIT=5
-OUT_ROOT=__data__/social/ariel_zoo/ig${INNER_GENS}
+FINAL_EVALS=10
+OUT_ROOT=__data__/social/ariel_zoo_fe${FINAL_EVALS}/ig${INNER_GENS}
 
 echo "Scheme: $SCHEME  x=$X  rep=$REP  inner-gens=$INNER_GENS  (array idx=$IDX)"
-echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS sim_preset=$SIM_PRESET novelty_metric=$NOVELTY_METRIC k_inherit=$K_INHERIT out_root=$OUT_ROOT"
+echo "Params: gens=$GENS pop=$POP lam=$LAM inner-gens=$INNER_GENS inner-pop=$INNER_POP sigma=$SIGMA hidden=$HIDDEN workers=$WORKERS sim_preset=$SIM_PRESET novelty_metric=$NOVELTY_METRIC k_inherit=$K_INHERIT final_evals=$FINAL_EVALS out_root=$OUT_ROOT"
 
 mkdir -p out_files
 
@@ -139,7 +142,8 @@ srun "$VENV_PATH/bin/python" examples/d_social_learning/experiment.py \
     --inner-gens "$INNER_GENS" --inner-pop "$INNER_POP" \
     --sigma "$SIGMA" --hidden "$HIDDEN" \
     --workers "$WORKERS" --novelty-metric "$NOVELTY_METRIC" \
-    --k-inherit "$K_INHERIT" --sim-preset "$SIM_PRESET" --out-root "$OUT_ROOT"
+    --k-inherit "$K_INHERIT" --sim-preset "$SIM_PRESET" --final-evals "$FINAL_EVALS" \
+    --out-root "$OUT_ROOT"
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))

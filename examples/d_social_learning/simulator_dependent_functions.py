@@ -65,11 +65,14 @@ def initialize_world(genome):
     else:
         return None
 
-def run_episode(theta, brain, simulator_specifics):
+def run_episode(theta, brain, simulator_specifics, perturb_rng=None):
+    """One episode. *perturb_rng* (ariel only) jitters the start state."""
     if simulator == SIMULATOR_ARIEL:
         from sim_ariel.evaluator import run_episode as run_episode_ariel
-        return run_episode_ariel(theta, brain, simulator_specifics)
+        return run_episode_ariel(theta, brain, simulator_specifics, perturb_rng)
     elif simulator == SIMULATOR_EVOGYM:
+        if perturb_rng is not None:
+            raise NotImplementedError("perturbed episodes are ariel-only")
         from sim_evogym.evaluator import run_episode as run_episode_evogym
         return run_episode_evogym(theta, brain, simulator_specifics)
     else:

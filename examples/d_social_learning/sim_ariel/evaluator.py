@@ -22,6 +22,13 @@ JERK_PENALTY_WEIGHT = 3.0  # penalty per unit of mean absolute ctrl delta, appli
 JERK_THRESHOLD = 0.15  # hurdle: mean_jerk below this is free; at/above it, the full weight*mean_jerk applies
 ZOO_MODULES = False  # build bodies with kgd's zoo modules (sim_ariel/zoo_modules.py)
 DISPLACEMENT_FROM_START = False  # fitness uses x travelled since the settle phase, not the absolute x
+# Start-state noise for perturbed episodes (run_episode's perturb_rng): Gaussian
+# offsets added to the root's x/y position and to every hinge angle before the
+# settle phase. Small enough to leave the task unchanged, large enough to
+# decorrelate trajectories of contact-chaotic gaits (see evaluate.py
+# --final-evals).
+PERTURB_POS_STD = 0.001   # m
+PERTURB_ANGLE_STD = 0.01  # rad
 
 # Simulation presets (experiment.py --sim-preset). "legacy" is the module
 # defaults above, used by every run before the zoo preset existed. "zoo" uses
@@ -99,7 +106,10 @@ def initialize_world(genome_dict):
         "hinge_geom_ids": hinge_geom_ids
     }
 
-def run_episode(theta: np.ndarray, brain, simulator_specifics: dict) -> dict:
+def run_episode(theta: np.ndarray, brain, simulator_specifics: dict,
+                perturb_rng: np.random.Generator | None = None) -> dict:
+    """Run one episode; return fitness and diagnostics. With *perturb_rng*,
+    the start state is jittered first (PERTURB_POS_STD, PERTURB_ANGLE_STD)."""
     import mujoco
 
     model = simulator_specifics["model"]
@@ -108,9 +118,13 @@ def run_episode(theta: np.ndarray, brain, simulator_specifics: dict) -> dict:
     floor_geom_id = simulator_specifics["floor_geom_id"]
     hinge_geom_ids = simulator_specifics["hinge_geom_ids"]
 
-    """Run one episode; return fitness and diagnostics."""
     brain.set_theta(theta)
     mujoco.mj_resetData(model, data)
+    if perturb_rng is not None:
+        data.qpos[0:2] += perturb_rng.normal(0.0, PERTURB_POS_STD, 2)
+        for j in range(model.njnt):
+            if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE:
+                data.qpos[model.jnt_qposadr[j]] += perturb_rng.normal(0.0, PERTURB_ANGLE_STD)
 
     # Record spawn height before any steps (penalises falling)
     core_height = float(data.qpos[2])
@@ -173,6 +187,7 @@ def run_episode(theta: np.ndarray, brain, simulator_specifics: dict) -> dict:
 
     return {
         "fitness": fitness,
+        "displacement": d,
         "mean_jerk": mean_jerk,
         "c_hinge": c_hinge,
     }

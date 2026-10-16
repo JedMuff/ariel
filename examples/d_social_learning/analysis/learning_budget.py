@@ -11,7 +11,10 @@ inner generations:
     B(b) = max fitness over inner gens 1..b   (b = 1..inner_gens)
 
 B(inner_gens) is the robot's recorded distance (fitness scale: the episode
-fitness incl. the jerk penalty, same scale as the pre-learning plots).
+fitness incl. the jerk penalty, same scale as the pre-learning plots) -- except
+for runs made with experiment.py --final-evals, whose recorded distance is the
+mean over perturbed re-evaluations while B(b) stays CMA-ES's best single
+episode, so B(inner_gens) is then distance_cma, an optimistic score.
 
 This is a *retrospective truncation* of the runs made with the full budget:
 selection and the donor brains on offer were shaped by full-budget learning.

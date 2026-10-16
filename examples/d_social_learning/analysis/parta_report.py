@@ -22,7 +22,9 @@ the run's, it is the fitness selection *would* have seen, not what it used.
 
 The displacement shown (``disp``) is the episode distance with the jerk
 penalty added back, using the jerk constants of the run's sim preset
-(run_config.json's ``sim_preset``; sim_ariel/evaluator.py PRESETS).
+(run_config.json's ``sim_preset``; sim_ariel/evaluator.py PRESETS). Runs made
+with experiment.py --final-evals store it directly (tags['displacement'], the
+mean over the final perturbed episodes), which is used instead.
 
 Usage:
     uv run examples/d_social_learning/analysis/parta_report.py \
@@ -117,13 +119,15 @@ def load_run(job: tuple) -> tuple[pd.DataFrame, pd.DataFrame]:
         """SELECT time_of_birth AS gen, time_of_death AS tod, alive,
                   json_extract(tags_, '$.distance') AS distance,
                   json_extract(tags_, '$.mean_jerk') AS jerk,
-                  json_extract(tags_, '$.init_fitness') AS init_fitness
+                  json_extract(tags_, '$.init_fitness') AS init_fitness,
+                  json_extract(tags_, '$.displacement') AS displacement
            FROM individual WHERE fitness_ IS NOT NULL""",
         con,
     )
     con.close()
     weight, threshold = jerk_constants(Path(db).parent)
-    df["disp"] = df.distance + (weight * df.jerk).where(df.jerk >= threshold, 0.0)
+    df["disp"] = df.displacement.where(
+        df.displacement.notna(), df.distance + (weight * df.jerk).where(df.jerk >= threshold, 0.0))
     hist = read_run_history(Path(db).parent, metric)
     for d in (df, hist):
         d[["scheme", "x", "rep"]] = scheme, x, rep

@@ -6,10 +6,10 @@ Usage:
         [--inner-gens 20] [--inner-pop 16] [--sigma 0.5] [--hidden 32] [--workers N] \
         [--comma-selection] [--selection elitist|tournament] [--tournament-size 4] \
         [--novelty-metric DESCR|STRUCT|TOPDOWN] [--k-inherit 3] [--seed N] \
-        [--sim-preset legacy|zoo] [--out-root DIR]
+        [--sim-preset legacy|zoo] [--final-evals N] [--out-root DIR]
 
 Each invocation without --resume-dir creates a fresh, timestamped output
-directory ({out_root}/{scheme}/x{x}/k{k}/rep_{rep}[_sel]_nov{M}_{timestamp}, where
+directory ({out_root}/{scheme}/x{x}/k{k}/rep_{rep}[_sel][_fe{N}]_nov{M}_{timestamp}, where
 --out-root defaults to __data__/social/{platform})
 so re-running the same scheme/x/k/rep never clobbers a previous run, and prints
 that directory as `RUN_DIR=<path>` (and the seed as `SEED=<n>`) on their own
@@ -228,6 +228,7 @@ def build_ops(
     selection_method: str = "elitist",
     tournament_size: int = 4,
     novelty_metric: str = "DESCR",
+    final_evals: int = 0,
 ) -> list[EAOperation]:
     """Return the ordered list of EAOperation steps for the outer EA."""
     @EAOperation
@@ -314,6 +315,7 @@ def build_ops(
                     sigma,
                     hidden,
                     eval_seed,
+                    final_evals,
                 ))
 
             if num_workers > 1:
@@ -365,6 +367,11 @@ def build_ops(
                 "learning_curve": r["learning_curve"],
                 "donor_ids": r["donor_ids"],
                 "eval_seed": eval_seed,
+                # --final-evals > 0 only: distance is the mean over the final
+                # perturbed episodes; CMA-ES's best single-episode score and
+                # the per-episode values are kept alongside (see evaluate.py).
+                **{k: r[k] for k in ("distance_cma", "final_eval_fitness",
+                                     "final_eval_displacement", "displacement") if k in r},
             } | simulator_dependent_functions.extra_tags(r)
             ind.genotype_ = {"morph": ind.genotype_["morph"], "brain": theta_list}
 
@@ -539,6 +546,14 @@ def main() -> None:
              "(--platform ariel only).",
     )
     parser.add_argument(
+        "--final-evals", type=int, default=0,
+        help="Score each robot as the mean fitness of its learned controller over this many "
+             "episodes with a jittered start state (sim_ariel/evaluator.py PERTURB_*), instead "
+             "of CMA-ES's best single-episode fitness, which is biased upwards for "
+             "contact-chaotic gaits. Selection and the donor schemes use that score. "
+             "0 (default) keeps the original scoring (--platform ariel only).",
+    )
+    parser.add_argument(
         "--out-root", type=str, default=None,
         help="Directory the {scheme}/x{x}/k{k}/rep_* run directories are created under "
              "(default __data__/social/{platform}).",
@@ -564,6 +579,9 @@ def main() -> None:
 
     if args.platform != "ariel" and args.sim_preset != "legacy":
         parser.error("--sim-preset other than legacy is ariel-only")
+
+    if args.final_evals < 0 or (args.final_evals and args.platform != "ariel"):
+        parser.error("--final-evals must be >= 0 and is ariel-only")
 
     simulator_dependent_functions.simulator = args.platform
 
@@ -598,6 +616,12 @@ def main() -> None:
                     f"run was started with --sim-preset {started_preset}, resuming with "
                     f"{args.sim_preset} would change the simulation mid-run"
                 )
+            started_fe = (config.get("args") or {}).get("final_evals", 0)
+            if started_fe != args.final_evals:
+                parser.error(
+                    f"run was started with --final-evals {started_fe}, resuming with "
+                    f"{args.final_evals} would change how robots are scored mid-run"
+                )
         else:
             # Run predates run_config.json: record the seed it would have had.
             config = {"seed": seed, "seed_source": seed_source, "args": None,
@@ -630,6 +654,8 @@ def main() -> None:
             sel_bits.append("comma")
         if args.selection == "tournament":
             sel_bits.append(f"tourn{args.tournament_size}")
+        if args.final_evals:
+            sel_bits.append(f"fe{args.final_evals}")
         sel_suffix = ("_" + "_".join(sel_bits)) if sel_bits else ""
         novelty_suffix = f"_nov{args.novelty_metric}"
         out_root = Path(args.out_root or f"__data__/social/{args.platform}")
@@ -671,6 +697,7 @@ def main() -> None:
         selection_method=args.selection,
         tournament_size=args.tournament_size,
         novelty_metric=args.novelty_metric,
+        final_evals=args.final_evals,
     )
 
     if args.resume_dir:
