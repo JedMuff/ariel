@@ -20,15 +20,26 @@ Fitness is the pool-normalised blend x * distance + (1 - x) * novelty, so it is
 only comparable within one x. For backfilled history whose metric differs from
 the run's, it is the fitness selection *would* have seen, not what it used.
 
+The displacement shown (``disp``) is the episode distance with the jerk
+penalty added back, using the jerk constants of the run's sim preset
+(run_config.json's ``sim_preset``; sim_ariel/evaluator.py PRESETS).
+
 Usage:
     uv run examples/d_social_learning/analysis/parta_report.py \
         --data-dir __data__/social/ariel --run-novelty STRUCT \
         --out-dir __data__/social/figures/parta/report
+
+    # zoo learning-budget pilot: 5 schemes, x in {0.5, 1}
+    uv run examples/d_social_learning/analysis/parta_report.py \
+        --data-dir __data__/social/ariel_zoo/ig10 --run-novelty TOPDOWN \
+        --schemes darwinian lamarckian similar_TOPDOWN best_many random_many \
+        --x-values 0.5 1 --out-dir __data__/social/figures/zoo_budget/report/ig10
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sqlite3
 import sys
@@ -43,6 +54,7 @@ from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.novelty_history import read_run_history  # noqa: E402
+from sim_ariel.evaluator import PRESETS  # noqa: E402
 
 BASE_SCHEMES = ["darwinian", "lamarckian", "random", "random_many", "best", "best_many"]
 
@@ -64,14 +76,19 @@ SCHEME_COLORS = {
 }
 X_LABEL = {0.0: "x=0 (novelty only)", 0.5: "x=0.5 (blend)", 1.0: "x=1 (displacement only)"}
 
-# Must match sim_ariel/evaluator.py when the data was generated (see curve_utils).
-JERK_PENALTY_WEIGHT = 3.0
-JERK_THRESHOLD = 0.15
+
+
+def jerk_constants(run_dir: Path) -> tuple[float, float]:
+    """(penalty weight, threshold) of the run's sim preset. Runs made before
+    presets existed have no sim_preset and used the legacy constants."""
+    cfg = run_dir / "run_config.json"
+    preset = json.loads(cfg.read_text())["args"].get("sim_preset", "legacy") if cfg.exists() else "legacy"
+    return PRESETS[preset]["JERK_PENALTY_WEIGHT"], PRESETS[preset]["JERK_THRESHOLD"]
 
 RUN_RE = re.compile(r"rep_(\d+)_.*nov([A-Z]+)_(\d{8}_\d{6})$")
 
 
-def discover_runs(data_dir: Path, gens: int, run_novelty: str) -> pd.DataFrame:
+def discover_runs(data_dir: Path, gens: int, run_novelty: str, schemes: list[str]) -> pd.DataFrame:
     rows = []
     for db in data_dir.glob("*/x*/k*/rep_*/database.db"):
         m = RUN_RE.search(db.parent.name)
@@ -88,7 +105,7 @@ def discover_runs(data_dir: Path, gens: int, run_novelty: str) -> pd.DataFrame:
         rows.append(dict(scheme=scheme, x=x, rep=int(m[1]), stamp=m[3],
                          db=str(db), complete=n_done > 0))
     runs = pd.DataFrame(rows, columns=["scheme", "x", "rep", "stamp", "db", "complete"])
-    runs = runs[runs.complete & runs.scheme.isin(schemes_for(run_novelty))]
+    runs = runs[runs.complete & runs.scheme.isin(schemes)]
     return runs.sort_values("stamp").drop_duplicates(["scheme", "x", "rep"], keep="last")
 
 
@@ -105,7 +122,8 @@ def load_run(job: tuple) -> tuple[pd.DataFrame, pd.DataFrame]:
         con,
     )
     con.close()
-    df["disp"] = df.distance + (JERK_PENALTY_WEIGHT * df.jerk).where(df.jerk >= JERK_THRESHOLD, 0.0)
+    weight, threshold = jerk_constants(Path(db).parent)
+    df["disp"] = df.distance + (weight * df.jerk).where(df.jerk >= threshold, 0.0)
     hist = read_run_history(Path(db).parent, metric)
     for d in (df, hist):
         d[["scheme", "x", "rep"]] = scheme, x, rep
@@ -151,7 +169,8 @@ def ci95(a: np.ndarray) -> float:
 
 
 def plot_overlay(curves: pd.DataFrame, panels: list[tuple[str, str]], title: str, out: Path,
-                 n_reps: pd.Series, x_values: list[float] = X_VALUES) -> None:
+                 n_reps: pd.Series, x_values: list[float] | None = None) -> None:
+    x_values = x_values or X_VALUES
     fig, axes = plt.subplots(len(x_values), len(panels), figsize=(5.6 * len(panels), 3.3 * len(x_values)),
                              squeeze=False, sharex=True)
     fig.suptitle(title, fontsize=13)
@@ -213,7 +232,7 @@ def final_stats(curves: pd.DataFrame, gens: int, out_dir: Path, metric: str) -> 
             for s, g in zip(SCHEMES, groups):
                 p = stats.mannwhitneyu(g, base).pvalue if s != "darwinian" else np.nan
                 pvals.append(p)
-            # Holm correction across the 7 comparisons vs darwinian.
+            # Holm correction across the comparisons vs darwinian.
             finite = [(p, i) for i, p in enumerate(pvals) if np.isfinite(p)]
             order = sorted(finite)
             adj = [np.nan] * len(pvals)
@@ -271,7 +290,7 @@ def final_stats(curves: pd.DataFrame, gens: int, out_dir: Path, metric: str) -> 
 
 
 def main() -> None:
-    global SCHEMES
+    global SCHEMES, X_VALUES
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="__data__/social/ariel")
     parser.add_argument("--out-dir", default="__data__/social/figures/parta/report")
@@ -281,12 +300,17 @@ def main() -> None:
                         help="Only use runs made with this --novelty-metric (part A: STRUCT).")
     parser.add_argument("--novelty-metric", default="TOPDOWN", choices=["DESCR", "STRUCT", "TOPDOWN"],
                         help="novelty_history metric for the novelty/fitness curves.")
+    parser.add_argument("--schemes", nargs="+", default=None,
+                        help="Schemes to include, darwinian first (default: all part A schemes "
+                             "for --run-novelty).")
+    parser.add_argument("--x-values", nargs="+", type=float, default=X_VALUES)
     args = parser.parse_args()
-    SCHEMES = schemes_for(args.run_novelty)
+    SCHEMES = args.schemes or schemes_for(args.run_novelty)
+    X_VALUES = args.x_values
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    runs = discover_runs(Path(args.data_dir), args.gens, args.run_novelty)
+    runs = discover_runs(Path(args.data_dir), args.gens, args.run_novelty, SCHEMES)
     runs.to_csv(out_dir / "parta_included_runs.csv", index=False)
     n_reps = runs.groupby(["scheme", "x"]).size()
     print(f"{len(runs)} complete nov{args.run_novelty} runs\n{n_reps.unstack()}")

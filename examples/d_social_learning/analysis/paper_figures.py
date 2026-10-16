@@ -21,6 +21,11 @@ Output tree (pdf/ and png/ mirror each other, so a LaTeX project can use
     <out-dir>/{pdf,png}/<stat>/final/{best_so_far,survivor_mean}_x{00,05,10}
     <out-dir>/manifest.csv
 
+With --prefix P every path above gains a P/ level under pdf/ and png/
+(<out-dir>/pdf/P/mean/...), and the manifest is <out-dir>/manifest_P.csv, so
+several data sets can share one output tree. Schemes default to part A's
+eight; x values are the ones present in the report.
+
 Usage:
     uv run examples/d_social_learning/analysis/paper_figures.py \
         --report-dir __data__/social/figures/parta/report \
@@ -43,7 +48,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-from parta_report import SCHEME_COLORS, X_VALUES, ci95, schemes_for  # noqa: E402
+from parta_report import SCHEME_COLORS, ci95, schemes_for  # noqa: E402
 
 # Display names; *_many schemes average the k=5 donors (core/inheritance.py).
 SCHEME_LABELS = {
@@ -131,10 +136,12 @@ def center_band(v: np.ndarray, stat: str, rng: np.random.Generator) -> tuple[flo
 
 
 class Saver:
-    def __init__(self, out_dir: Path, dpi: int) -> None:
-        self.out_dir, self.dpi, self.rows = out_dir, dpi, []
+    def __init__(self, out_dir: Path, dpi: int, prefix: str = "") -> None:
+        self.out_dir, self.dpi, self.prefix, self.rows = out_dir, dpi, prefix, []
 
     def __call__(self, fig: plt.Figure, rel: str, **meta) -> None:
+        if self.prefix:
+            rel = f"{self.prefix}/{rel}"
         for fmt in ("pdf", "png"):
             path = self.out_dir / fmt / f"{rel}.{fmt}"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,11 +152,12 @@ class Saver:
 
     def write_manifest(self) -> None:
         keys = ["file", "kind", "stat", "metric", "x", "ylabel", "n_runs", "caption"]
-        with open(self.out_dir / "manifest.csv", "w", newline="") as fh:
+        path = self.out_dir / (f"manifest_{self.prefix.replace('/', '_')}.csv" if self.prefix else "manifest.csv")
+        with open(path, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=keys)
             w.writeheader()
             w.writerows([{k: r.get(k, "") for k in keys} for r in self.rows])
-        print(f"Saved {self.out_dir / 'manifest.csv'}")
+        print(f"Saved {path}")
 
 
 def n_runs_str(n_reps: pd.Series, schemes: list[str], xv: float) -> str:
@@ -162,7 +170,7 @@ def plot_curves(curves: pd.DataFrame, schemes: list[str], n_reps: pd.Series, sav
     rng = np.random.default_rng(0)
     for group, panels in CURVES.items():
         for col, name, ylabel in panels:
-            for xv in X_VALUES:
+            for xv in sorted(curves.x.unique()):
                 fig, ax = plt.subplots()
                 for scheme in schemes:
                     s = curves[(curves.scheme == scheme) & (curves.x == xv)]
@@ -194,10 +202,10 @@ def plot_final(curves: pd.DataFrame, schemes: list[str], n_reps: pd.Series,
     final = curves[curves.gen == gens]
     rng = np.random.default_rng(0)
     for col, name, ylabel in FINAL:
-        for xv in X_VALUES:
+        for xv in sorted(final.x.unique()):
             fx = final[final.x == xv]
             data = [fx[fx.scheme == s][col].dropna().to_numpy() for s in schemes]
-            fig, ax = plt.subplots(figsize=(7.2, 4.8))
+            fig, ax = plt.subplots(figsize=(max(3.6, 0.9 * len(schemes)), 4.8))
             box_style = dict(widths=0.6, showfliers=False, patch_artist=True,
                              medianprops=dict(color="black", lw=2), whiskerprops=dict(lw=1.4),
                              capprops=dict(lw=1.4), boxprops=dict(lw=1.4))
@@ -240,7 +248,7 @@ def plot_legends(schemes: list[str], save: Saver) -> None:
         for s in schemes
     ]
     labels = [label(s) for s in schemes]
-    for name, ncol in (("horizontal", 4), ("vertical", 1)):
+    for name, ncol in (("horizontal", len(schemes) if len(schemes) <= 5 else 4), ("vertical", 1)):
         fig = plt.figure(figsize=(0.1, 0.1))
         fig.legend(
             [(patch, line) for line, patch in handles], labels, ncol=ncol, frameon=False,
@@ -256,15 +264,18 @@ def main() -> None:
     parser.add_argument("--out-dir", default="__data__/social/figures/parta/paper")
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--run-novelty", default="STRUCT", choices=["DESCR", "STRUCT", "TOPDOWN"])
+    parser.add_argument("--schemes", nargs="+", default=None,
+                        help="Schemes to plot, darwinian first (default: part A's eight).")
+    parser.add_argument("--prefix", default="", help="Extra path level under pdf/ and png/.")
     args = parser.parse_args()
 
     report = Path(args.report_dir)
     curves = pd.read_csv(report / "parta_curves_per_run.csv")
     runs = pd.read_csv(report / "parta_included_runs.csv")
     n_reps = runs.groupby(["scheme", "x"]).size()
-    schemes = schemes_for(args.run_novelty)
+    schemes = args.schemes or schemes_for(args.run_novelty)
 
-    save = Saver(Path(args.out_dir), args.dpi)
+    save = Saver(Path(args.out_dir), args.dpi, args.prefix)
     with plt.rc_context(PAPER_RC):
         plot_legends(schemes, save)
         for stat in STATS:

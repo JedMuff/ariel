@@ -33,10 +33,21 @@ Stage 2: figures and tables
                                     below Similar (Mann-Whitney p >= 0.05 at
                                     every larger budget)
 
+The inner budget is read from the data (learning_curve length), so runs with
+any --inner-gens work; budgets beyond it are dropped from the tables. With
+--prefix P, figures go to <out-dir>/{pdf,png}/P/<window>/... and the cache and
+CSVs to <out-dir>/P/.
+
 Usage:
     uv run examples/d_social_learning/analysis/learning_budget.py \
         --report-dir __data__/social/figures/parta/report \
         --out-dir __data__/social/figures/parta/learning_budget
+
+    uv run examples/d_social_learning/analysis/learning_budget.py \
+        --report-dir __data__/social/figures/zoo_budget/report/ig10 \
+        --out-dir __data__/social/figures/zoo_budget/learning_budget --prefix ig10 \
+        --run-novelty TOPDOWN \
+        --schemes darwinian lamarckian similar_TOPDOWN best_many random_many
 """
 
 from __future__ import annotations
@@ -64,7 +75,7 @@ WINDOWS = {"all": (1, 30), "early": (1, 10), "mid": (11, 20), "late": (21, 30)}
 WINDOW_DESC = {"all": "generations 1-30", "early": "generations 1-10",
                "mid": "generations 11-20", "late": "generations 21-30"}
 BUDGETS = [0, 1, 2, 5, 10, 20, 30, 50]  # inner generations reported in budget_stats.csv
-REFERENCE = "similar_STRUCT"  # scheme the catch-up point is measured against
+REFERENCE = "similar_STRUCT"  # scheme the catch-up point is measured against (--reference)
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +133,7 @@ def per_run_means(meta: pd.DataFrame, B: np.ndarray, window: tuple[int, int]) ->
 
 def plot_window(runs_b: pd.DataFrame, schemes: list[str], wname: str, save: Saver) -> None:
     budgets = np.array(runs_b.columns, dtype=int)
-    for xv in (0.5, 1.0):
+    for xv in sorted(runs_b.index.unique("x")):
         rx = runs_b.xs(xv, level="x")
         darw = rx.xs("darwinian", level="scheme").to_numpy()
         ref = rx.xs(REFERENCE, level="scheme").to_numpy()
@@ -148,12 +159,14 @@ def plot_window(runs_b: pd.DataFrame, schemes: list[str], wname: str, save: Save
                 ax.plot(budgets, m, color=color)
             ax.set_xscale("symlog", linthresh=1, linscale=0.4)
             ax.set_xlim(0, budgets[-1])
-            ax.xaxis.set_major_locator(mticker.FixedLocator([0, 1, 2, 5, 10, 20, 50]))
+            ax.xaxis.set_major_locator(mticker.FixedLocator(
+                [b for b in (0, 1, 2, 5, 10, 20, 50) if b < budgets[-1]] + [budgets[-1]]))
             ax.xaxis.set_major_formatter(mticker.ScalarFormatter())
             ax.set_xlabel("Learning budget (CMA-ES generations)")
             ax.set_ylabel(ylabel)
             style_grid(ax)
-            ax.xaxis.set_minor_locator(mticker.FixedLocator([3, 4, 6, 7, 8, 9, 30, 40]))
+            ax.xaxis.set_minor_locator(mticker.FixedLocator(
+                [b for b in (3, 4, 6, 7, 8, 9, 30, 40) if b < budgets[-1]]))
             caption = (f"{ylabel.replace(chr(10), ' ')} vs. learning budget, x={xv}, offspring born in "
                        f"{WINDOW_DESC[wname]}; mean over runs, shaded 95% CI"
                        + {"advantage": " (of the scheme, not of the difference).",
@@ -164,9 +177,10 @@ def plot_window(runs_b: pd.DataFrame, schemes: list[str], wname: str, save: Save
 
 def budget_stats(runs_b: pd.DataFrame, schemes: list[str], wname: str) -> list[dict]:
     rows = []
-    for xv in (0.5, 1.0):
+    full = int(runs_b.columns[-1])
+    for xv in sorted(runs_b.index.unique("x")):
         rx = runs_b.xs(xv, level="x")
-        for b in BUDGETS:
+        for b in sorted({b for b in BUDGETS if b < full} | {full}):
             groups = {s: rx.xs(s, level="scheme")[b].to_numpy() for s in schemes}
             kw = stats.kruskal(*groups.values()).pvalue
             kw_social = stats.kruskal(*[g for s, g in groups.items() if s != "darwinian"]).pvalue
@@ -192,7 +206,7 @@ def catch_up(runs_b: pd.DataFrame, schemes: list[str], wname: str) -> list[dict]
         return 0 if ok.all() else int(np.where(~ok)[0][-1] + 1)
 
     rows = []
-    for xv in (0.5, 1.0):
+    for xv in sorted(runs_b.index.unique("x")):
         rx = runs_b.xs(xv, level="x")
         mean = rx.groupby(level="scheme").mean()
         ref_runs = rx.xs(REFERENCE, level="scheme").to_numpy()
@@ -207,6 +221,7 @@ def catch_up(runs_b: pd.DataFrame, schemes: list[str], wname: str) -> list[dict]
                              overtakes_from=first_from(mean.loc[s].to_numpy() >= ref),
                              not_sig_below_from=first_from(p_below >= 0.05),
                              gap_b0=mean.loc[s, 0] - ref[0],
+                             gap_b1=mean.loc[s, 1] - ref[1],
                              gap_b5=mean.loc[s, 5] - ref[5],
                              gap_full=mean.loc[s].iloc[-1] - ref[-1]))
     return rows
@@ -219,14 +234,22 @@ def main() -> None:
     parser.add_argument("--run-novelty", default="STRUCT", choices=["DESCR", "STRUCT", "TOPDOWN"])
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--dpi", type=int, default=300)
+    parser.add_argument("--schemes", nargs="+", default=None,
+                        help="Schemes, darwinian first (default: part A's eight).")
+    parser.add_argument("--reference", default=None,
+                        help="Scheme for the catch-up analysis (default: similar_<run-novelty>).")
+    parser.add_argument("--prefix", default="", help="Extra path level for figures and CSVs.")
     args = parser.parse_args()
+    global REFERENCE
+    REFERENCE = args.reference or f"similar_{args.run_novelty}"
 
     out = Path(args.out_dir)
+    data_out = out / args.prefix if args.prefix else out
     runs = pd.read_csv(Path(args.report_dir) / "parta_included_runs.csv")
-    meta, B = extract(runs, out / "budget_curves.npz", args.workers)
-    schemes = schemes_for(args.run_novelty)
+    meta, B = extract(runs, data_out / "budget_curves.npz", args.workers)
+    schemes = args.schemes or schemes_for(args.run_novelty)
 
-    save = Saver(out, args.dpi)
+    save = Saver(out, args.dpi, args.prefix)
     stat_rows, catch_rows = [], []
     with plt.rc_context(PAPER_RC):
         for wname, window in WINDOWS.items():
@@ -235,9 +258,9 @@ def main() -> None:
             stat_rows += budget_stats(runs_b, schemes, wname)
             catch_rows += catch_up(runs_b, schemes, wname)
     save.write_manifest()
-    pd.DataFrame(stat_rows).to_csv(out / "budget_stats.csv", index=False)
-    pd.DataFrame(catch_rows).to_csv(out / "catch_up.csv", index=False)
-    print(f"Saved {out / 'budget_stats.csv'} and {out / 'catch_up.csv'}")
+    pd.DataFrame(stat_rows).to_csv(data_out / "budget_stats.csv", index=False)
+    pd.DataFrame(catch_rows).to_csv(data_out / "catch_up.csv", index=False)
+    print(f"Saved {data_out / 'budget_stats.csv'} and {data_out / 'catch_up.csv'}")
 
 
 if __name__ == "__main__":
