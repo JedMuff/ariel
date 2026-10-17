@@ -14,6 +14,8 @@ Per budget (CSV, one row per budget/x/scheme):
     first_gen_share.csv  share of the full learning gain reached after one
                          CMA-ES generation, (B(1)-B(0)) / (B(full)-B(0))
     kruskal_social.csv   Kruskal-Wallis over the inheritance schemes only, gen 30
+    pairwise_social.csv  every pair of inheritance schemes at gen 30: Mann-Whitney,
+                         A12, Holm-corrected over the pairs of one budget/x/metric
 
 Between budgets (CSV + figures under <paper-dir>/{pdf,png}/compare/):
     budget_final.csv     final survivor / best-found displacement per scheme,
@@ -22,7 +24,8 @@ Between budgets (CSV + figures under <paper-dir>/{pdf,png}/compare/):
                          relative, with a bootstrap 95% CI of the change
     budget_headstart.csv Similar's head start before learning per budget
     budget_groups.csv    head-start schemes (Lamarckian, Similar) minus
-                         averaged-donor schemes (all k=5), per budget
+                         averaged-donor schemes, per budget, for each set in
+                         LEARNER_SETS (all k=5, or the pilot's Best/Random k=5)
     truncation.csv       long-budget runs truncated to the short budget's
                          inner generations, B(short), vs the real short runs
 
@@ -58,7 +61,10 @@ SIMILAR = "similar_TOPDOWN"
 # Part A's two routes: close single donors (head start) vs averaged donors
 # (learning gain). Single-donor random/best fit neither and are left out.
 HEADSTART = ["lamarckian", "similar_TOPDOWN"]
-LEARNERS = ["random_many", "best_many", "similar_many_TOPDOWN"]
+# Similar (k=5) mostly averages the parent with its near neighbours, so the
+# group difference is also given without it ("pilot": the first batch's set).
+LEARNER_SETS = {"k5": ["random_many", "best_many", "similar_many_TOPDOWN"],
+                "pilot": ["random_many", "best_many"]}
 FINAL = [("surv_disp", "survivor_mean", "Survivor mean\ndisplacement (m)"),
          ("best_so_far_disp", "best_so_far", "Best displacement\nfound (m)")]
 LATE = (21, 30)
@@ -136,6 +142,25 @@ def kruskal_social(curves: pd.DataFrame, budget: str) -> list[dict]:
     return rows
 
 
+def pairwise_social(curves: pd.DataFrame, budget: str) -> list[dict]:
+    final = curves[curves.gen == curves.gen.max()]
+    rows = []
+    for xv in sorted(final.x.unique()):
+        fx = final[final.x == xv]
+        for col, _, _ in FINAL:
+            block = []
+            for i, a in enumerate(SCHEMES[1:], 1):
+                for b in SCHEMES[i + 1:]:
+                    va, vb = fx[fx.scheme == a][col].to_numpy(), fx[fx.scheme == b][col].to_numpy()
+                    block.append(dict(budget=budget, x=xv, metric=col, scheme_a=a, scheme_b=b,
+                                      diff=va.mean() - vb.mean(), a12=a12(va, vb),
+                                      p=stats.mannwhitneyu(va, vb).pvalue))
+            for row, pa in zip(block, holm([r["p"] for r in block])):
+                row["p_holm"] = pa
+            rows += block
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Between budgets
 # ---------------------------------------------------------------------------
@@ -192,13 +217,14 @@ def budget_groups(fin: dict[str, pd.DataFrame], short: str, long: str) -> pd.Dat
     """Mean of the head-start schemes minus mean of the learning schemes."""
     rng = np.random.default_rng(1)
     rows = []
-    for xv in sorted(fin[short].index.unique("x")):
+    for (lname, learners), xv in ((ls, xv) for ls in LEARNER_SETS.items()
+                                  for xv in sorted(fin[short].index.unique("x"))):
         for col, _, _ in FINAL:
-            row, boots = dict(x=xv, metric=col), {}
+            row, boots = dict(learners=lname, x=xv, metric=col), {}
             for bud, tag in ((short, "short"), (long, "long")):
                 f = fin[bud].xs(xv, level="x")[col]
                 grp = lambda ss: [f.xs(s, level="scheme").to_numpy() for s in ss]  # noqa: E731
-                hs, ln = grp(HEADSTART), grp(LEARNERS)
+                hs, ln = grp(HEADSTART), grp(learners)
                 row[f"diff_{tag}"] = np.mean([v.mean() for v in hs]) - np.mean([v.mean() for v in ln])
                 boots[tag] = (np.mean([boot_mean(v, rng) for v in hs], axis=0)
                               - np.mean([boot_mean(v, rng) for v in ln], axis=0))
@@ -407,12 +433,13 @@ def main() -> None:
         z = np.load(Path(args.budget_root) / bud / "budget_curves.npz", allow_pickle=False)
         npz[bud] = (pd.DataFrame({k: z[k] for k in ("scheme", "x", "rep", "gen")}), z["B"])
 
-    mech, donors, share, kw = [], [], [], []
+    mech, donors, share, kw, pairs = [], [], [], [], []
     for bud in (short, long):
         mech += mechanism(curves[bud], bud)
         donors += donor_is_parent(runs[bud], bud)
         share += first_gen_share(*npz[bud], bud)
         kw += kruskal_social(curves[bud], bud)
+        pairs += pairwise_social(curves[bud], bud)
     pd.DataFrame(mech).to_csv(out / "mechanism.csv", index=False)
     d = pd.DataFrame(donors)
     d.to_csv(out / "donor_is_parent_per_run.csv", index=False)
@@ -420,6 +447,7 @@ def main() -> None:
      .reset_index().to_csv(out / "donor_is_parent.csv", index=False))
     pd.DataFrame(share).to_csv(out / "first_gen_share.csv", index=False)
     pd.DataFrame(kw).to_csv(out / "kruskal_social.csv", index=False)
+    pd.DataFrame(pairs).to_csv(out / "pairwise_social.csv", index=False)
 
     fin = {bud: final_values(curves[bud]) for bud in (short, long)}
     budget_final(fin, short, long).to_csv(out / "budget_final.csv", index=False)
