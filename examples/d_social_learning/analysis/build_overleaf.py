@@ -26,6 +26,8 @@ GRAPHICS_ROOTS = {
     "figures/parta/budget/": FIGURES / "parta/learning_budget/pdf",
     "figures/zoo_budget/paper/": FIGURES / "zoo_budget/paper/pdf",
     "figures/zoo_budget/budget/": FIGURES / "zoo_budget/learning_budget/pdf",
+    "figures/zoo_budget_fe10/paper/": FIGURES / "zoo_budget_fe10/paper/pdf",
+    "figures/zoo_budget_fe10/budget/": FIGURES / "zoo_budget_fe10/learning_budget/pdf",
 }
 
 
