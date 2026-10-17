@@ -6,13 +6,15 @@
 #   $OUT/paper/{pdf,png}/B/               publication figures (paper_figures.py)
 #   $OUT/learning_budget/B/               retrospective truncation cache + CSVs,
 #   $OUT/learning_budget/{pdf,png}/B/     and its figures (learning_budget.py)
+#   $OUT/robustness/B/                    best-of-N vs mean-of-N scores, donor
+#                                         quality, weight norms (final_eval_robustness.py)
 # and across budgets:
 #   $OUT/compare/                         CSVs (zoo_budget_compare.py)
 #   $OUT/paper/{pdf,png}/compare/         its figures
 #
 # and finally copies the figures the reports use into the Overleaf folder
 # __data__/social/figures/overleaf (build_overleaf.py), which also holds the
-# report, zoo_budget_report.tex.
+# reports, zoo_budget_report.tex (pilot) and zoo_budget_fe10_report.tex.
 #
 # learning_budget.py caches the per-offspring curves in budget_curves.npz;
 # delete it to re-extract after the data changes.
@@ -37,6 +39,7 @@ for B in ig10 ig20; do
         --prefix "$B" --run-novelty TOPDOWN --schemes "${SCHEMES[@]}"
     uv run "$ANALYSIS/learning_budget.py" --report-dir "$OUT/report/$B" --out-dir "$OUT/learning_budget" \
         --prefix "$B" --run-novelty TOPDOWN --schemes "${SCHEMES[@]}"
+    uv run "$ANALYSIS/final_eval_robustness.py" --report-dir "$OUT/report/$B" --out-dir "$OUT/robustness/$B"
 done
 uv run "$ANALYSIS/zoo_budget_compare.py" --budgets ig10 ig20 --report-root "$OUT/report" \
     --budget-root "$OUT/learning_budget" --paper-dir "$OUT/paper" --out-dir "$OUT/compare"
