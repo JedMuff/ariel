@@ -460,6 +460,13 @@ def _next_db_path(out_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 RUN_CONFIG = "run_config.json"
+# Arguments a --resume-dir continuation must repeat exactly (--gens, --workers,
+# --eval-timeout and --out-root may differ).
+RESUME_FIXED_ARGS = (
+    "scheme", "x", "rep", "k_inherit", "pop", "lam", "comma_selection", "selection",
+    "tournament_size", "inner_gens", "inner_pop", "sigma", "hidden", "platform",
+    "sim_preset", "final_evals", "novelty_metric",
+)
 
 
 def _default_seed(scheme: str, x: float, k_inherit: int, rep: int) -> int:
@@ -601,27 +608,21 @@ def main() -> None:
         if config_path.exists():
             config = json.loads(config_path.read_text())
             seed, seed_source = config["seed"], config["seed_source"]
-            started_metric = (config.get("args") or {}).get("novelty_metric")
-            if (started_metric and started_metric != args.novelty_metric
-                    and not args.allow_novelty_change):
-                parser.error(
-                    f"run was started with --novelty-metric {started_metric}, resuming with "
-                    f"{args.novelty_metric} would change selection mid-run "
-                    "(pass --allow-novelty-change to do it anyway)"
-                )
-            # Runs from before --sim-preset existed are legacy.
-            started_preset = (config.get("args") or {}).get("sim_preset", "legacy")
-            if started_preset != args.sim_preset:
-                parser.error(
-                    f"run was started with --sim-preset {started_preset}, resuming with "
-                    f"{args.sim_preset} would change the simulation mid-run"
-                )
-            started_fe = (config.get("args") or {}).get("final_evals", 0)
-            if started_fe != args.final_evals:
-                parser.error(
-                    f"run was started with --final-evals {started_fe}, resuming with "
-                    f"{args.final_evals} would change how robots are scored mid-run"
-                )
+            started = config.get("args") or {}
+            # Everything that defines the experiment must match the run being
+            # continued, or the generations after the resume would silently be
+            # a different experiment. Arguments added after a run was started
+            # count as their default (e.g. --sim-preset legacy).
+            if started:
+                for name in RESUME_FIXED_ARGS:
+                    was, now_val = started.get(name, parser.get_default(name)), getattr(args, name)
+                    if was == now_val or (name == "novelty_metric" and args.allow_novelty_change):
+                        continue
+                    hint = " (pass --allow-novelty-change to do it anyway)" if name == "novelty_metric" else ""
+                    parser.error(
+                        f"run was started with --{name.replace('_', '-')} {was}, resuming with "
+                        f"{now_val} would change the experiment mid-run{hint}"
+                    )
         else:
             # Run predates run_config.json: record the seed it would have had.
             config = {"seed": seed, "seed_source": seed_source, "args": None,
