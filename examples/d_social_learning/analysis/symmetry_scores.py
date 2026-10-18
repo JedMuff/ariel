@@ -9,9 +9,11 @@ sym, strict, paired, plane; tree_symmetry about both axes) and writes, under
                      init_fitness, module counts and the symmetry scores
     survivors.csv    (budget, scheme, x, k, rep, generation, individual_id)
                      of every generation's survivors, from novelty_history
-    random.csv       the same scores for --random genomes from
-                     sim_ariel.morphology_ops.random_individual, the
-                     generator of each run's initial population
+    random.csv       the same scores for random genomes, --random per added
+                     module count 1..--random-max-modules, grown like each
+                     run's initial population (random_tree, which
+                     random_individual calls with 12 added modules only, so
+                     every initial body has 13): a baseline per body size
 
 Bodies are built with the zoo modules (sim preset "zoo"), as in the runs.
 
@@ -82,30 +84,36 @@ def _score_run(rep_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return pd.DataFrame(rows), surv
 
 
-def _score_random(seed: int) -> dict:
-    from sim_ariel.morphology_ops import random_individual
+def _score_random(job: tuple[int, int]) -> dict:
+    from ariel.ec.genotypes.tree.operators import random_tree
+    added, seed = job
     random.seed(seed)
-    return {"seed": seed, **body_scores(random_individual())}
+    return {"added": added, "seed": seed, **body_scores(random_tree(added).to_dict())}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", default="__data__/social/ariel_zoo_fe10")
     parser.add_argument("--out-dir", default="__data__/social/symmetry")
-    parser.add_argument("--random", type=int, default=20000, help="random genomes for the baseline")
+    parser.add_argument("--random", type=int, default=1000, help="random genomes per size for the baseline")
+    parser.add_argument("--random-max-modules", type=int, default=20)
+    parser.add_argument("--random-only", action="store_true", help="only (re)write random.csv")
     parser.add_argument("--workers", type=int, default=60)
     parser.add_argument("--limit", type=int, default=None, help="score only the first N runs (testing)")
     args = parser.parse_args()
 
-    runs = sorted(p.parent for p in Path(args.root).glob("ig*/*/x*/k*/rep_*/database.db"))[: args.limit]
+    runs = [] if args.random_only else sorted(
+        p.parent for p in Path(args.root).glob("ig*/*/x*/k*/rep_*/database.db"))[: args.limit]
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     with Pool(args.workers, initializer=_init_worker) as pool:
-        results = pool.map(_score_run, runs, chunksize=1)
-        pd.concat([r[0] for r in results]).to_csv(out / "individuals.csv", index=False)
-        pd.concat([r[1] for r in results]).to_csv(out / "survivors.csv", index=False)
+        if runs:
+            results = pool.map(_score_run, runs, chunksize=1)
+            pd.concat([r[0] for r in results]).to_csv(out / "individuals.csv", index=False)
+            pd.concat([r[1] for r in results]).to_csv(out / "survivors.csv", index=False)
         if args.random:
-            pd.DataFrame(pool.map(_score_random, range(args.random), chunksize=64)).to_csv(out / "random.csv", index=False)
+            jobs = [(m, m * args.random + i) for m in range(1, args.random_max_modules + 1) for i in range(args.random)]
+            pd.DataFrame(pool.map(_score_random, jobs, chunksize=64)).to_csv(out / "random.csv", index=False)
     print(f"{len(runs)} runs -> {out}")
 
 
