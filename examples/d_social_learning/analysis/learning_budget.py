@@ -71,7 +71,7 @@ from scipy import stats  # noqa: E402
 
 from paper_figures import PAPER_RC, Saver, label, style_grid, x_tag  # noqa: E402
 from curve_utils import read_individuals  # noqa: E402
-from parta_report import SCHEME_COLORS, a12, ci95, schemes_for  # noqa: E402
+from parta_report import SCHEME_COLORS, SCHEME_LS, a12, ci95, schemes_for  # noqa: E402
 
 
 
@@ -162,7 +162,7 @@ def plot_window(runs_b: pd.DataFrame, schemes: list[str], wname: str, save: Save
                     m = m - base[1].mean(axis=0)
                 color = SCHEME_COLORS[scheme]
                 ax.fill_between(budgets, m - c, m + c, color=color, alpha=0.12, lw=0)
-                ax.plot(budgets, m, color=color)
+                ax.plot(budgets, m, color=color, ls=SCHEME_LS[scheme])
             ax.set_xscale("symlog", linthresh=1, linscale=0.4)
             ax.set_xlim(0, budgets[-1])
             ax.xaxis.set_major_locator(mticker.FixedLocator(

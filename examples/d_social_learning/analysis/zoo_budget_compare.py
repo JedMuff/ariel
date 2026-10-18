@@ -56,7 +56,7 @@ from scipy import stats  # noqa: E402
 from curve_utils import read_individuals  # noqa: E402
 from learning_budget import per_run_means, windows  # noqa: E402
 from paper_figures import PAPER_RC, Saver, label, style_grid, x_tag  # noqa: E402
-from parta_report import SCHEME_COLORS, a12, ci95  # noqa: E402
+from parta_report import SCHEME_COLORS, SCHEME_LS, a12, ci95, point_style  # noqa: E402
 
 # All 8 part A schemes in part A's order; darwinian must come first.
 SCHEMES = ["darwinian", "lamarckian", "random", "random_many", "best", "best_many",
@@ -73,6 +73,9 @@ FINAL = [("surv_disp", "survivor_mean", "Survivor mean\ndisplacement (m)"),
          ("best_so_far_disp", "best_so_far", "Best displacement\nfound (m)")]
 WINDOWS = windows(30)  # set from the data in main(): the whole run and its thirds
 N_BOOT = 10000
+# Opacity of the short budget's lines where both budgets share a plot (line
+# style is taken by the scheme: dotted = k-donor).
+BUDGET_FAINT = 0.4
 
 
 def holm(p: list[float]) -> list[float]:
@@ -340,7 +343,7 @@ def plot_final_pairs(fin: dict[str, pd.DataFrame], short: str, long: str, save: 
                     pos = i + 1 + (j - 0.5) * 0.38
                     m, c = v.mean(), ci95(v)
                     ax.scatter(pos + rng.uniform(-0.07, 0.07, len(v)), v, s=18,
-                               color=SCHEME_COLORS[s], alpha=alpha, lw=0, zorder=3)
+                               alpha=alpha, zorder=3, **point_style(s))
                     ax.errorbar(pos, m, yerr=c, fmt="_", color="black", ms=18,
                                 mew=2.5, capsize=5, lw=1.6, zorder=4)
             ax.set_xticks(range(1, len(SCHEMES) + 1))
@@ -365,8 +368,9 @@ def plot_advantage(adv: pd.DataFrame, short: str, long: str, save: Saver) -> Non
                     for j, (tag, mk) in enumerate((("short", "o"), ("long", "s"))):
                         m = a.loc[s, f"{kind}_{tag}"]
                         err = [[m - a.loc[s, f"{kind}_{tag}_lo"]], [a.loc[s, f"{kind}_{tag}_hi"] - m]]
-                        ax.errorbar(i + (j - 0.5) * 0.3, m, yerr=err, fmt=mk, color=SCHEME_COLORS[s],
-                                    mfc="white" if j == 0 else SCHEME_COLORS[s], ms=10, mew=2, capsize=4, lw=2)
+                        eb = ax.errorbar(i + (j - 0.5) * 0.3, m, yerr=err, fmt=mk, color=SCHEME_COLORS[s],
+                                         mfc="white" if j == 0 else SCHEME_COLORS[s], ms=10, mew=2, capsize=4, lw=2)
+                        eb[2][0].set_linestyle(SCHEME_LS[s])
                 ax.axhline(0, color=SCHEME_COLORS["darwinian"], lw=2.5)
                 ax.set_xticks(range(len(SCHEMES) - 1))
                 ax.set_xticklabels([label(s) for s in SCHEMES[1:]], rotation=45, ha="right",
@@ -389,7 +393,7 @@ def plot_truncation(means: dict, short: str, long: str, save: Saver) -> None:
             for kind, ylabel in (("learning_curve", "Mean offspring\nfitness (m)"),
                                  ("advantage", "Advantage over\nDarwinian (m)")):
                 fig, ax = plt.subplots()
-                for bud, ls in ((long, "-"), (short, "--")):
+                for bud, alpha in ((long, 1.0), (short, BUDGET_FAINT)):
                     rx = rb[bud].xs(xv, level="x")
                     budgets = np.array(rx.columns, dtype=int)
                     darw = rx.xs("darwinian", level="scheme").to_numpy().mean(axis=0)
@@ -398,10 +402,10 @@ def plot_truncation(means: dict, short: str, long: str, save: Saver) -> None:
                         m = v.mean(axis=0) - (darw if kind == "advantage" else 0)
                         if kind == "advantage" and s == "darwinian":
                             continue
-                        if ls == "-":
+                        if bud == long:
                             c = np.array([ci95(v[:, j]) for j in range(v.shape[1])])
                             ax.fill_between(budgets, m - c, m + c, color=SCHEME_COLORS[s], alpha=0.10, lw=0)
-                        ax.plot(budgets, m, color=SCHEME_COLORS[s], ls=ls)
+                        ax.plot(budgets, m, color=SCHEME_COLORS[s], ls=SCHEME_LS[s], alpha=alpha)
                 if kind == "advantage":
                     ax.axhline(0, color=SCHEME_COLORS["darwinian"], lw=2.5)
                 b_short = int(rb[short].columns[-1])
@@ -416,8 +420,8 @@ def plot_truncation(means: dict, short: str, long: str, save: Saver) -> None:
                 ax.xaxis.set_minor_locator(mticker.FixedLocator([3, 4, 6, 7, 8, 9]))
                 save(fig, f"truncation_{kind}_{wname}_{x_tag(xv)}", kind=kind, x=xv,
                      caption=f"{ylabel.replace(chr(10), ' ')} vs. learning budget, x={xv}, offspring of "
-                             f"window {wname}; solid = {budget_name(long)} runs (shaded 95% CI), "
-                             f"dashed = {budget_name(short)} runs.")
+                             f"window {wname}; strong = {budget_name(long)} runs (shaded 95% CI), "
+                             f"faint = {budget_name(short)} runs.")
 
 
 def plot_pre_learning(curves: dict[str, pd.DataFrame], short: str, long: str, save: Saver) -> None:
@@ -425,11 +429,11 @@ def plot_pre_learning(curves: dict[str, pd.DataFrame], short: str, long: str, sa
                               ("born_learn_gain", "learning_gain", "Lifetime-learning\ngain (m)")):
         for xv in sorted(curves[short].x.unique()):
             fig, ax = plt.subplots()
-            for bud, ls in ((long, "-"), (short, "--")):
+            for bud, alpha in ((long, 1.0), (short, BUDGET_FAINT)):
                 c = curves[bud]
                 for s in SCHEMES:
                     m = c[(c.scheme == s) & (c.x == xv) & (c.gen > 0)].groupby("gen")[col].mean()
-                    ax.plot(m.index, m, color=SCHEME_COLORS[s], ls=ls)
+                    ax.plot(m.index, m, color=SCHEME_COLORS[s], ls=SCHEME_LS[s], alpha=alpha)
             ax.set_xlim(1, WINDOWS["all"][1])
             ax.xaxis.set_major_locator(mticker.MultipleLocator(5 if WINDOWS["all"][1] <= 30 else 10))
             ax.xaxis.set_minor_locator(mticker.MultipleLocator(1))
@@ -437,13 +441,13 @@ def plot_pre_learning(curves: dict[str, pd.DataFrame], short: str, long: str, sa
             ax.set_ylabel(ylabel)
             style_grid(ax)
             save(fig, f"{name}_{x_tag(xv)}", kind="curve", metric=col, x=xv,
-                 caption=f"{ylabel.replace(chr(10), ' ')} per generation, x={xv}; mean over runs; solid = "
-                         f"{budget_name(long)}, dashed = {budget_name(short)}.")
+                 caption=f"{ylabel.replace(chr(10), ' ')} per generation, x={xv}; mean over runs; strong = "
+                         f"{budget_name(long)}, faint = {budget_name(short)}.")
 
 
 def plot_budget_legend(short: str, long: str, save: Saver) -> None:
     fig = plt.figure(figsize=(0.1, 0.1))
-    fig.legend([Line2D([], [], color="0.2", lw=3, ls="--"), Line2D([], [], color="0.2", lw=3)],
+    fig.legend([Line2D([], [], color="0.2", lw=3, alpha=BUDGET_FAINT), Line2D([], [], color="0.2", lw=3)],
                [budget_name(short), budget_name(long)], ncol=2, frameon=False, handlelength=2.6,
                columnspacing=1.5, loc="center")
     save(fig, "legend_budgets", kind="legend")

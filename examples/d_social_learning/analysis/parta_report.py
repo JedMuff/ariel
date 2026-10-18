@@ -71,13 +71,29 @@ def schemes_for(run_novelty: str) -> list[str]:
 
 SCHEMES = schemes_for("TOPDOWN")  # set from --run-novelty in main()
 X_VALUES = [0.0, 0.5, 1.0]
-# Fixed categorical order (validated palette), one hue per scheme slot.
-_SLOT_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
-SCHEME_COLORS = {
-    scheme: _SLOT_COLORS[i]
-    for metric in ("DESCR", "STRUCT", "TOPDOWN")
-    for i, scheme in enumerate(schemes_for(metric))
-}
+# One hue per scheme family; the k-donor (averaged) variant of a family keeps
+# its hue and is drawn dotted (lines) or hollow/hatched (points, boxes).
+_FAMILY_COLORS = {"darwinian": "#2a78d6", "lamarckian": "#e34948", "random": "#eda100",
+                  "best": "#1baf7a", "similar": "#e87ba4"}
+_ALL_SCHEMES = [s for metric in ("DESCR", "STRUCT", "TOPDOWN") for s in schemes_for(metric)]
+SCHEME_COLORS = {s: _FAMILY_COLORS[s.split("_")[0]] for s in _ALL_SCHEMES}
+SCHEME_LS = {s: ":" if "_many" in s else "-" for s in _ALL_SCHEMES}
+
+
+def point_style(scheme: str) -> dict:
+    """scatter() kwargs: filled points, hollow for the k-donor schemes."""
+    color = SCHEME_COLORS[scheme]
+    if SCHEME_LS[scheme] == "-":
+        return dict(facecolors=color, edgecolors="none")
+    return dict(facecolors="none", edgecolors=color, linewidths=1.2)
+
+
+def style_box(patch, scheme: str, alpha: float) -> None:
+    """Box fill in the scheme's hue, dotted hatch for the k-donor schemes."""
+    patch.set_facecolor(SCHEME_COLORS[scheme])
+    patch.set_alpha(alpha)
+    if SCHEME_LS[scheme] != "-":
+        patch.set_hatch("...")
 X_LABEL = {0.0: "x=0 (novelty only)", 0.5: "x=0.5 (blend)", 1.0: "x=1 (displacement only)"}
 
 
@@ -183,7 +199,7 @@ def plot_overlay(curves: pd.DataFrame, panels: list[tuple[str, str]], title: str
                 m, c = g.mean(), g.agg(lambda v: ci95(v.to_numpy()))
                 color = SCHEME_COLORS[scheme]
                 ax.fill_between(m.index, m - c, m + c, color=color, alpha=0.12, lw=0)
-                ax.plot(m.index, m, color=color, lw=2,
+                ax.plot(m.index, m, color=color, lw=2, ls=SCHEME_LS[scheme],
                         label=f"{scheme} (n={n_reps.get((scheme, xv), 0)})")
             ax.grid(alpha=0.25, lw=0.6)
             ax.spines[["top", "right"]].set_visible(False)
@@ -260,11 +276,9 @@ def final_stats(curves: pd.DataFrame, gens: int, out_dir: Path, metric: str) -> 
             bp = ax.boxplot(data, widths=0.55, showfliers=False, patch_artist=True,
                             medianprops=dict(color="black", lw=1.5))
             for patch, s in zip(bp["boxes"], SCHEMES):
-                patch.set_facecolor(SCHEME_COLORS[s])
-                patch.set_alpha(0.35)
+                style_box(patch, s, 0.35)
             for i, (d, s) in enumerate(zip(data, SCHEMES)):
-                ax.scatter(i + 1 + rng.uniform(-0.15, 0.15, len(d)), d, s=9,
-                           color=SCHEME_COLORS[s], zorder=3, lw=0)
+                ax.scatter(i + 1 + rng.uniform(-0.15, 0.15, len(d)), d, s=9, zorder=3, **point_style(s))
                 sig = table[(table.x == xv) & (table.metric == metric) & (table.scheme == s)].p_holm_vs_darwinian
                 if len(sig) and np.isfinite(sig.iloc[0]) and sig.iloc[0] < 0.05:
                     ax.text(i + 1, 1.0, "*", transform=ax.get_xaxis_transform(),

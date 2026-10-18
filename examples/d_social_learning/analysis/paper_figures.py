@@ -48,7 +48,7 @@ import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-from parta_report import SCHEME_COLORS, ci95, schemes_for  # noqa: E402
+from parta_report import SCHEME_COLORS, SCHEME_LS, ci95, point_style, schemes_for, style_box  # noqa: E402
 
 # Display names; *_many schemes average the k=5 donors (core/inheritance.py).
 SCHEME_LABELS = {
@@ -182,7 +182,7 @@ def plot_curves(curves: pd.DataFrame, schemes: list[str], n_reps: pd.Series, sav
                     ).dropna()
                     color = SCHEME_COLORS[scheme]
                     ax.fill_between(band.index, band.lo, band.hi, color=color, alpha=0.12, lw=0)
-                    ax.plot(band.index, band.c, color=color)
+                    ax.plot(band.index, band.c, color=color, ls=SCHEME_LS[scheme])
                 ax.set_xlim(0 if col.startswith(("surv", "best")) else 1, gens)
                 ax.xaxis.set_major_locator(mticker.MultipleLocator(5))
                 ax.xaxis.set_minor_locator(mticker.MultipleLocator(1))
@@ -220,11 +220,9 @@ def plot_final(curves: pd.DataFrame, schemes: list[str], n_reps: pd.Series,
                     boxes.append(dict(med=m, q1=lo, q3=hi, whislo=m - sd, whishi=m + sd, fliers=[]))
                 bp = ax.bxp(boxes, **box_style)
             for patch, s in zip(bp["boxes"], schemes):
-                patch.set_facecolor(SCHEME_COLORS[s])
-                patch.set_alpha(0.4)
+                style_box(patch, s, 0.4)
             for i, (d, s) in enumerate(zip(data, schemes)):
-                ax.scatter(i + 1 + rng.uniform(-0.17, 0.17, len(d)), d, s=22,
-                           color=SCHEME_COLORS[s], zorder=3, lw=0)
+                ax.scatter(i + 1 + rng.uniform(-0.17, 0.17, len(d)), d, s=22, zorder=3, **point_style(s))
             ax.set_xticks(range(1, len(schemes) + 1))
             ax.set_xticklabels([label(s) for s in schemes], rotation=45, ha="right",
                                rotation_mode="anchor")
@@ -243,7 +241,7 @@ def plot_final(curves: pd.DataFrame, schemes: list[str], n_reps: pd.Series,
 
 def plot_legends(schemes: list[str], save: Saver) -> None:
     handles = [
-        (Line2D([], [], color=SCHEME_COLORS[s], lw=3),
+        (Line2D([], [], color=SCHEME_COLORS[s], lw=3, ls=SCHEME_LS[s]),
          Patch(facecolor=SCHEME_COLORS[s], alpha=0.12, lw=0))
         for s in schemes
     ]
