@@ -107,9 +107,12 @@ def initialize_world(genome_dict):
     }
 
 def run_episode(theta: np.ndarray, brain, simulator_specifics: dict,
-                perturb_rng: np.random.Generator | None = None) -> dict:
+                perturb_rng: np.random.Generator | None = None, recorder=None) -> dict:
     """Run one episode; return fitness and diagnostics. With *perturb_rng*,
-    the start state is jittered first (PERTURB_POS_STD, PERTURB_ANGLE_STD)."""
+    the start state is jittered first (PERTURB_POS_STD, PERTURB_ANGLE_STD).
+    *recorder*, if given, is called as recorder(sim_step, data) after every
+    rollout physics step (not the settle phase), for replays that record
+    behaviour (analysis/behavior_replay.py); it must not change *data*."""
     import mujoco
 
     model = simulator_specifics["model"]
@@ -161,6 +164,8 @@ def run_episode(theta: np.ndarray, brain, simulator_specifics: dict,
             ctrl_step += 1
 
         mujoco.mj_step(model, data)
+        if recorder is not None:
+            recorder(sim_step, data)
 
         # Rising-edge hinge-floor contact events
         current: set[frozenset[int]] = set()
