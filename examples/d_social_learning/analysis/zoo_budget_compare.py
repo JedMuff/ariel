@@ -8,13 +8,13 @@ and the run databases (for donor ids).
 
 Per budget (CSV, one row per budget/x/scheme):
     mechanism.csv        offspring fitness before learning and learning gain,
-                         generations 21-30 per run, mean/SD over runs, and
+                         last third of the run (e.g. 21-30) per run, mean/SD over runs, and
                          Mann-Whitney vs Similar
     donor_is_parent.csv  share of births whose donor(s) include the parent
     first_gen_share.csv  share of the full learning gain reached after one
                          CMA-ES generation, (B(1)-B(0)) / (B(full)-B(0))
-    kruskal_social.csv   Kruskal-Wallis over the inheritance schemes only, gen 30
-    pairwise_social.csv  every pair of inheritance schemes at gen 30: Mann-Whitney,
+    kruskal_social.csv   Kruskal-Wallis over the inheritance schemes only, last gen
+    pairwise_social.csv  every pair of inheritance schemes at the last gen: Mann-Whitney,
                          A12, Holm-corrected over the pairs of one budget/x/metric
 
 Between budgets (CSV + figures under <paper-dir>/{pdf,png}/compare/):
@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 from pathlib import Path
 
 import matplotlib
@@ -50,7 +49,8 @@ import pandas as pd  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402
 from scipy import stats  # noqa: E402
 
-from learning_budget import per_run_means  # noqa: E402
+from curve_utils import read_individuals  # noqa: E402
+from learning_budget import per_run_means, windows  # noqa: E402
 from paper_figures import PAPER_RC, Saver, label, style_grid, x_tag  # noqa: E402
 from parta_report import SCHEME_COLORS, a12, ci95  # noqa: E402
 
@@ -67,7 +67,7 @@ LEARNER_SETS = {"k5": ["random_many", "best_many", "similar_many_TOPDOWN"],
                 "pilot": ["random_many", "best_many"]}
 FINAL = [("surv_disp", "survivor_mean", "Survivor mean\ndisplacement (m)"),
          ("best_so_far_disp", "best_so_far", "Best displacement\nfound (m)")]
-LATE = (21, 30)
+WINDOWS = windows(30)  # set from the data in main(): the whole run and its thirds
 N_BOOT = 10000
 
 
@@ -89,7 +89,8 @@ def boot_mean(v: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def mechanism(curves: pd.DataFrame, budget: str) -> list[dict]:
-    late = curves[(curves.gen >= LATE[0]) & (curves.gen <= LATE[1])]
+    lo, hi = WINDOWS["late"]
+    late = curves[(curves.gen >= lo) & (curves.gen <= hi)]
     per_run = late.groupby(["scheme", "x", "rep"])[["born_init_disp", "born_learn_gain"]].mean()
     rows = []
     for xv in sorted(curves.x.unique()):
@@ -113,18 +114,16 @@ def donor_is_parent(runs: pd.DataFrame, budget: str) -> list[dict]:
     for r in runs.itertuples():
         if r.scheme == "darwinian":
             continue
-        con = sqlite3.connect(f"file:{r.db}?mode=ro", uri=True)
-        tags = con.execute("SELECT json_extract(tags_, '$.parent_id'), json_extract(tags_, '$.donor_ids') "
-                           "FROM individual WHERE time_of_birth > 0").fetchall()
-        con.close()
-        hits = [p in json.loads(d) for p, d in tags if d and p is not None]
+        tags = read_individuals(r.db, "json_extract(tags_, '$.parent_id') AS parent, "
+                                      "json_extract(tags_, '$.donor_ids') AS donors", "time_of_birth > 0")
+        hits = [int(p) in json.loads(d) for p, d in zip(tags.parent, tags.donors) if d and pd.notna(p)]
         rows.append(dict(budget=budget, scheme=r.scheme, x=r.x, rep=r.rep, births=len(hits),
                          parent_share=np.mean(hits)))
     return rows
 
 
 def first_gen_share(meta: pd.DataFrame, B: np.ndarray, budget: str) -> list[dict]:
-    runs_b = per_run_means(meta, B, (1, 30))
+    runs_b = per_run_means(meta, B, WINDOWS["all"])
     share = (runs_b[1] - runs_b[0]) / (runs_b[runs_b.columns[-1]] - runs_b[0])
     out = share.groupby(level=["scheme", "x"]).agg(["mean", "std", "count"]).reset_index()
     out.insert(0, "budget", budget)
@@ -242,7 +241,8 @@ def budget_headstart(curves: dict[str, pd.DataFrame], short: str, long: str) -> 
     rows = []
     for bud in (short, long):
         c = curves[bud]
-        for wname, (lo, hi) in (("all", (1, 30)), ("late", LATE)):
+        for wname in ("all", "late"):
+            lo, hi = WINDOWS[wname]
             w = c[(c.gen >= lo) & (c.gen <= hi)].groupby(["scheme", "x", "rep"]).born_init_disp.mean()
             for xv in sorted(c.x.unique()):
                 wx = w.xs(xv, level="x")
@@ -261,7 +261,8 @@ def truncation(npz: dict[str, tuple], short: str, long: str) -> tuple[pd.DataFra
     """B(b_short) of long-budget runs vs the real short-budget runs."""
     b_short = npz[short][1].shape[1] - 1
     rows, means = [], {}
-    for wname, window in (("all", (1, 30)), ("early", (1, 10)), ("late", LATE)):
+    for wname in ("all", "early", "late"):
+        window = WINDOWS[wname]
         rb = {bud: per_run_means(*npz[bud], window) for bud in (short, long)}
         means[wname] = rb
         for xv in sorted(rb[short].index.unique("x")):
@@ -312,7 +313,7 @@ def plot_final_pairs(fin: dict[str, pd.DataFrame], short: str, long: str, save: 
             ax.tick_params(axis="x", which="minor", bottom=False)
             ax.grid(axis="x", which="both", visible=False)
             save(fig, f"final_{name}_{x_tag(xv)}", kind="boxplot", metric=col, x=xv,
-                 caption=f"{ylabel.replace(chr(10), ' ')} at generation 30, x={xv}; per scheme, left = "
+                 caption=f"{ylabel.replace(chr(10), ' ')} at generation {WINDOWS['all'][1]}, x={xv}; per scheme, left = "
                          f"{budget_name(short)} (faint), right = {budget_name(long)}; one point per run, "
                          "bar = mean with 95% CI.")
 
@@ -392,8 +393,8 @@ def plot_pre_learning(curves: dict[str, pd.DataFrame], short: str, long: str, sa
                 for s in SCHEMES:
                     m = c[(c.scheme == s) & (c.x == xv) & (c.gen > 0)].groupby("gen")[col].mean()
                     ax.plot(m.index, m, color=SCHEME_COLORS[s], ls=ls)
-            ax.set_xlim(1, 30)
-            ax.xaxis.set_major_locator(mticker.MultipleLocator(5))
+            ax.set_xlim(1, WINDOWS["all"][1])
+            ax.xaxis.set_major_locator(mticker.MultipleLocator(5 if WINDOWS["all"][1] <= 30 else 10))
             ax.xaxis.set_minor_locator(mticker.MultipleLocator(1))
             ax.set_xlabel("Generation")
             ax.set_ylabel(ylabel)
@@ -422,6 +423,7 @@ def main() -> None:
     parser.add_argument("--dpi", type=int, default=300)
     args = parser.parse_args()
     short, long = args.budgets
+    global WINDOWS
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -432,6 +434,7 @@ def main() -> None:
         runs[bud] = pd.read_csv(rep / "parta_included_runs.csv")
         z = np.load(Path(args.budget_root) / bud / "budget_curves.npz", allow_pickle=False)
         npz[bud] = (pd.DataFrame({k: z[k] for k in ("scheme", "x", "rep", "gen")}), z["B"])
+    WINDOWS = windows(int(curves[short].gen.max()))
 
     mech, donors, share, kw, pairs = [], [], [], [], []
     for bud in (short, long):

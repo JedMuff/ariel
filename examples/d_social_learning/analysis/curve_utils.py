@@ -87,6 +87,21 @@ def rep_db_parts(rep_dir: Path) -> list[Path]:
     return [p for p in parts if p.exists()]
 
 
+def read_individuals(db: Path | str, columns: str, where: str = "fitness_ IS NOT NULL") -> "pd.DataFrame":
+    """``SELECT id, <columns> FROM individual WHERE <where>`` over a run's
+    database.db and every database_part*.db continuation (`db` is the run's
+    database.db). A continuation re-stores the restored survivors under their
+    original ids; each individual's row from the newest file wins, as only
+    there are its time_of_death and alive current."""
+    import pandas as pd
+    frames = []
+    for part in rep_db_parts(Path(db).parent):
+        con = sqlite3.connect(f"file:{part}?mode=ro", uri=True)
+        frames.append(pd.read_sql(f"SELECT id, {columns} FROM individual WHERE {where}", con))
+        con.close()
+    return pd.concat(frames, ignore_index=True).drop_duplicates("id", keep="last").reset_index(drop=True)
+
+
 def load_history_by_gen(rep_dir: Path, column: str, metric: str = NOVELTY_METRIC) -> dict[int, list[float]] | None:
     """{generation: [novelty_history `column` of every selection-pool member]}
     for one rep (stitched across database_part*.db), or None if the rep has

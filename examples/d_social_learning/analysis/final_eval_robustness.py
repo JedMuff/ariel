@@ -10,20 +10,22 @@ distance_cma is taken to be distance, so the script also summarises older
 data sets (e.g. the zoo pilot) on the same scale.
 
 Reads <report-dir>/parta_included_runs.csv (parta_report.py) and the run
-databases. Writes to <out-dir>:
+databases (incl. database_part*.db continuations). "Late" is the last third
+of the --gens generations (21-30 for 30), and the weight norms are taken at
+0, 1/3, 2/3 and all of --gens. Writes to <out-dir>:
     robots.csv.gz      one row per evaluated robot: scores, parent, donors,
                        ||theta*|| and ||theta_0||
     inflation.csv      per scheme/x: mean distance, distance_cma and their
-                       ratio, for the generation-30 survivors and for the
-                       offspring of generations 21-30 (per run, then mean/SD)
+                       ratio, for the last generation's survivors and for the
+                       late offspring (per run, then mean/SD)
     fragility.csv      per scheme/x: fragility (1 - distance/distance_cma)
                        and learning share ((distance_cma - init) /
-                       distance_cma) of the generation 21-30 offspring, plus
+                       distance_cma) of the late offspring, plus
                        the Spearman correlation of the two over runs
     donor_quality.csv  per scheme/x: mean donor distance / parent distance
                        over all births (per run, then mean/SD)
     weight_norm.csv    per scheme/x: mean ||theta*|| of the survivors at
-                       generations 0, 10, 20, 30
+                       four generations (e.g. 0, 10, 20, 30)
 
 Usage:
     uv run examples/d_social_learning/analysis/final_eval_robustness.py \
@@ -35,7 +37,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -43,30 +44,26 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-LATE = (21, 30)
-NORM_GENS = (0, 10, 20, 30)
+from curve_utils import read_individuals
 
 
 def load_robots(job: tuple) -> pd.DataFrame:
     scheme, x, rep, db = job
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    rows = con.execute(
-        "SELECT id, time_of_birth, time_of_death, alive, "
+    rows = read_individuals(
+        db, "time_of_birth, time_of_death, alive, "
         "json_extract(tags_, '$.distance'), json_extract(tags_, '$.distance_cma'), "
         "json_extract(tags_, '$.init_fitness'), json_extract(tags_, '$.parent_id'), "
         "json_extract(tags_, '$.donor_ids'), json_extract(tags_, '$.theta'), "
-        "json_extract(tags_, '$.init_theta') "
-        "FROM individual WHERE fitness_ IS NOT NULL"
-    ).fetchall()
-    con.close()
+        "json_extract(tags_, '$.init_theta')",
+    )
     out = []
-    for rid, gen, tod, alive, dist, dist_cma, init, parent, donors, theta, theta0 in rows:
+    for rid, gen, tod, alive, dist, dist_cma, init, parent, donors, theta, theta0 in rows.itertuples(index=False):
         out.append(dict(
             scheme=scheme, x=x, rep=rep, id=rid, gen=gen, tod=tod, alive=alive,
-            distance=dist, distance_cma=dist if dist_cma is None else dist_cma,
-            init_fitness=init, parent_id=parent, donor_ids=donors or "[]",
-            theta_norm=np.linalg.norm(json.loads(theta)) if theta else np.nan,
-            init_theta_norm=np.linalg.norm(json.loads(theta0)) if theta0 else np.nan,
+            distance=dist, distance_cma=dist if pd.isna(dist_cma) else dist_cma,
+            init_fitness=init, parent_id=parent, donor_ids=donors if isinstance(donors, str) else "[]",
+            theta_norm=np.linalg.norm(json.loads(theta)) if isinstance(theta, str) else np.nan,
+            init_theta_norm=np.linalg.norm(json.loads(theta0)) if isinstance(theta0, str) else np.nan,
         ))
     return pd.DataFrame(out)
 
@@ -92,11 +89,13 @@ def summarise(per_run: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 
 
 def per_run_tables(robots: pd.DataFrame, gens: int) -> dict[str, pd.DataFrame]:
+    late_lo = 2 * (gens // 3) + 1
+    norm_gens = (0, gens // 3, 2 * (gens // 3), gens)
     infl, frag, donor, norm = [], [], [], []
     for (scheme, x, rep), r in robots.groupby(["scheme", "x", "rep"]):
         key = dict(scheme=scheme, x=x, rep=rep)
         surv = survivors(r, gens, gens)
-        late = r[(r.gen >= LATE[0]) & (r.gen <= LATE[1])]
+        late = r[(r.gen >= late_lo) & (r.gen <= gens)]
         infl.append(key | dict(
             surv_distance=surv.distance.mean(), surv_distance_cma=surv.distance_cma.mean(),
             surv_ratio=surv.distance.mean() / surv.distance_cma.mean(),
@@ -118,7 +117,7 @@ def per_run_tables(robots: pd.DataFrame, gens: int) -> dict[str, pd.DataFrame]:
             d, p = np.array(ratios).T
             donor.append(key | dict(donor_distance=d.mean(), parent_distance=p.mean(),
                                     donor_parent_ratio=d.mean() / p.mean()))
-        norm.append(key | {f"norm_g{g}": survivors(r, g, gens).theta_norm.mean() for g in NORM_GENS}
+        norm.append(key | {f"norm_g{g}": survivors(r, g, gens).theta_norm.mean() for g in norm_gens}
                     | dict(late_init_norm=late.init_theta_norm.mean()))
     return dict(inflation=pd.DataFrame(infl), fragility=pd.DataFrame(frag),
                 donor_quality=pd.DataFrame(donor), weight_norm=pd.DataFrame(norm))

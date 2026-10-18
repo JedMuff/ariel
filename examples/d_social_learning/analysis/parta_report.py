@@ -5,6 +5,8 @@ Only complete runs (every generation up to --gens evaluated) of one run
 novelty metric (--run-novelty, read from the run dir's ``_nov{M}_`` label)
 are used. When a (scheme, x, rep) was run more than once, the newest
 timestamped run dir wins, so stale reruns never double-count.
+A run continued with experiment.py --resume-dir is read across its
+database.db and database_part*.db files.
 
 Curves are per generation, mean across reps with a 95% CI band:
   - survivors: the mu individuals alive after selection at generation g
@@ -43,7 +45,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sqlite3
 import sys
 from multiprocessing import Pool
 from pathlib import Path
@@ -56,6 +57,7 @@ from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.novelty_history import read_run_history  # noqa: E402
+from curve_utils import read_individuals  # noqa: E402
 from sim_ariel.evaluator import PRESETS  # noqa: E402
 
 BASE_SCHEMES = ["darwinian", "lamarckian", "random", "random_many", "best", "best_many"]
@@ -98,12 +100,7 @@ def discover_runs(data_dir: Path, gens: int, run_novelty: str, schemes: list[str
             continue
         scheme = db.parents[3].name
         x = int(db.parents[2].name[1:]) / 10
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        n_done = con.execute(
-            "SELECT count(*) FROM individual WHERE time_of_birth = ? AND fitness_ IS NOT NULL",
-            (gens,),
-        ).fetchone()[0]
-        con.close()
+        n_done = len(read_individuals(db, "time_of_birth", f"time_of_birth = {int(gens)} AND fitness_ IS NOT NULL"))
         rows.append(dict(scheme=scheme, x=x, rep=int(m[1]), stamp=m[3],
                          db=str(db), complete=n_done > 0))
     runs = pd.DataFrame(rows, columns=["scheme", "x", "rep", "stamp", "db", "complete"])
@@ -114,17 +111,14 @@ def discover_runs(data_dir: Path, gens: int, run_novelty: str, schemes: list[str
 def load_run(job: tuple) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(individuals, novelty_history rows for metric) of one run."""
     scheme, x, rep, db, metric = job
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    df = pd.read_sql(
-        """SELECT time_of_birth AS gen, time_of_death AS tod, alive,
-                  json_extract(tags_, '$.distance') AS distance,
-                  json_extract(tags_, '$.mean_jerk') AS jerk,
-                  json_extract(tags_, '$.init_fitness') AS init_fitness,
-                  json_extract(tags_, '$.displacement') AS displacement
-           FROM individual WHERE fitness_ IS NOT NULL""",
-        con,
-    )
-    con.close()
+    df = read_individuals(
+        db,
+        """time_of_birth AS gen, time_of_death AS tod, alive,
+           json_extract(tags_, '$.distance') AS distance,
+           json_extract(tags_, '$.mean_jerk') AS jerk,
+           json_extract(tags_, '$.init_fitness') AS init_fitness,
+           json_extract(tags_, '$.displacement') AS displacement""",
+    ).drop(columns="id")
     weight, threshold = jerk_constants(Path(db).parent)
     df["disp"] = df.displacement.where(
         df.displacement.notna(), df.distance + (weight * df.jerk).where(df.jerk >= threshold, 0.0))

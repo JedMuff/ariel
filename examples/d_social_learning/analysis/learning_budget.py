@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -71,12 +70,19 @@ import pandas as pd  # noqa: E402
 from scipy import stats  # noqa: E402
 
 from paper_figures import PAPER_RC, Saver, label, style_grid, x_tag  # noqa: E402
+from curve_utils import read_individuals  # noqa: E402
 from parta_report import SCHEME_COLORS, a12, ci95, schemes_for  # noqa: E402
 
-# Generation windows (by offspring birth generation) the curves are averaged over.
-WINDOWS = {"all": (1, 30), "early": (1, 10), "mid": (11, 20), "late": (21, 30)}
-WINDOW_DESC = {"all": "generations 1-30", "early": "generations 1-10",
-               "mid": "generations 11-20", "late": "generations 21-30"}
+
+
+def windows(gens: int) -> dict[str, tuple[int, int]]:
+    """Generation windows (by offspring birth generation) the curves are
+    averaged over: the whole run and its thirds."""
+    t = gens // 3
+    return {"all": (1, gens), "early": (1, t), "mid": (t + 1, 2 * t), "late": (2 * t + 1, gens)}
+
+
+WINDOWS = windows(30)  # set from the data in main()
 BUDGETS = [0, 1, 2, 5, 10, 20, 30, 50]  # inner generations reported in budget_stats.csv
 REFERENCE = "similar_STRUCT"  # scheme the catch-up point is measured against (--reference)
 
@@ -87,17 +93,14 @@ REFERENCE = "similar_STRUCT"  # scheme the catch-up point is measured against (-
 
 def _extract_run(job: tuple) -> tuple[list[tuple], np.ndarray]:
     scheme, x, rep, db = job
-    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    rows = con.execute(
-        "SELECT time_of_birth, json_extract(tags_, '$.init_fitness'), "
-        "json_extract(tags_, '$.learning_curve') "
-        "FROM individual WHERE fitness_ IS NOT NULL AND time_of_birth > 0"
-    ).fetchall()
-    con.close()
+    rows = read_individuals(
+        db, "time_of_birth, json_extract(tags_, '$.init_fitness'), json_extract(tags_, '$.learning_curve')",
+        "fitness_ IS NOT NULL AND time_of_birth > 0",
+    )
     meta, curves = [], []
-    for gen, init, lc in rows:
-        lc = np.array(json.loads(lc), dtype=np.float64) if lc else np.empty((0, 0))
-        if init is None or lc.size == 0 or not np.isfinite(init):
+    for _, gen, init, lc in rows.itertuples(index=False):
+        lc = np.array(json.loads(lc), dtype=np.float64) if isinstance(lc, str) else np.empty((0, 0))
+        if pd.isna(init) or lc.size == 0 or not np.isfinite(init):
             continue  # failed / timed-out evaluation
         best = np.maximum.accumulate(np.nanmax(lc, axis=1))
         meta.append((scheme, x, rep, gen))
@@ -171,7 +174,7 @@ def plot_window(runs_b: pd.DataFrame, schemes: list[str], wname: str, save: Save
             ax.xaxis.set_minor_locator(mticker.FixedLocator(
                 [b for b in (3, 4, 6, 7, 8, 9, 30, 40) if b < budgets[-1]]))
             caption = (f"{ylabel.replace(chr(10), ' ')} vs. learning budget, x={xv}, offspring born in "
-                       f"{WINDOW_DESC[wname]}; mean over runs, shaded 95% CI"
+                       f"generations {WINDOWS[wname][0]}-{WINDOWS[wname][1]}; mean over runs, shaded 95% CI"
                        + {"advantage": " (of the scheme, not of the difference).",
                           "gap_to_similar": " of the difference."}.get(kind, "."))
             save(fig, f"{wname}/{kind}_{x_tag(xv)}", kind=kind, metric="B(b)", x=xv,
@@ -243,7 +246,7 @@ def main() -> None:
                         help="Scheme for the catch-up analysis (default: similar_<run-novelty>).")
     parser.add_argument("--prefix", default="", help="Extra path level for figures and CSVs.")
     args = parser.parse_args()
-    global REFERENCE
+    global REFERENCE, WINDOWS
     REFERENCE = args.reference or f"similar_{args.run_novelty}"
 
     out = Path(args.out_dir)
@@ -251,6 +254,7 @@ def main() -> None:
     runs = pd.read_csv(Path(args.report_dir) / "parta_included_runs.csv")
     meta, B = extract(runs, data_out / "budget_curves.npz", args.workers)
     schemes = args.schemes or schemes_for(args.run_novelty)
+    WINDOWS = windows(int(meta.gen.max()))
 
     save = Saver(out, args.dpi, args.prefix)
     stat_rows, catch_rows = [], []
