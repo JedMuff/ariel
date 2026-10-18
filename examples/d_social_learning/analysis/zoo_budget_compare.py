@@ -16,6 +16,10 @@ Per budget (CSV, one row per budget/x/scheme):
     kruskal_social.csv   Kruskal-Wallis over the inheritance schemes only, last gen
     pairwise_social.csv  every pair of inheritance schemes at the last gen: Mann-Whitney,
                          A12, Holm-corrected over the pairs of one budget/x/metric
+    halfway.csv          the same runs half-way (gen gens // 2) vs at the end:
+                         per scheme the change (paired Wilcoxon), and the
+                         change in its advantage over Darwinian, absolute and
+                         relative, with a bootstrap 95% CI
 
 Between budgets (CSV + figures under <paper-dir>/{pdf,png}/compare/):
     budget_final.csv     final survivor / best-found displacement per scheme,
@@ -163,6 +167,39 @@ def pairwise_social(curves: pd.DataFrame, budget: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Between budgets
 # ---------------------------------------------------------------------------
+
+def halfway(curves: pd.DataFrame, budget: str) -> list[dict]:
+    """The same runs half-way (generation gens // 2) and at the end: each
+    scheme's change (paired Wilcoxon), and the change in its advantage over
+    Darwinian with a bootstrap 95% CI (runs resampled with both values)."""
+    rng = np.random.default_rng(0)
+    end = int(curves.gen.max())
+    mid = end // 2
+    rows = []
+    for col, _, _ in FINAL:
+        w = curves.pivot_table(index=["scheme", "x", "rep"], columns="gen", values=col)[[mid, end]]
+        for xv in sorted(curves.x.unique()):
+            d = w.xs(("darwinian", xv), level=("scheme", "x")).to_numpy()
+            bd = d[rng.integers(0, len(d), (N_BOOT, len(d)))].mean(axis=1)
+            for s in SCHEMES:
+                v = w.xs((s, xv), level=("scheme", "x")).to_numpy()
+                step = v[:, 1] - v[:, 0]
+                row = dict(budget=budget, x=xv, metric=col, scheme=s, n=len(v), gen_mid=mid, gen_end=end,
+                           mean_mid=v[:, 0].mean(), mean_end=v[:, 1].mean(), change=step.mean(),
+                           runs_up=(step > 0).mean(),
+                           p_end_vs_mid=stats.wilcoxon(step).pvalue if np.any(step) else 1.0)
+                if s != "darwinian":
+                    bv = v[rng.integers(0, len(v), (N_BOOT, len(v)))].mean(axis=1)
+                    for kind, point, boot in (
+                            ("abs", v.mean(0) - d.mean(0), bv - bd),
+                            ("rel", v.mean(0) / d.mean(0) - 1, bv / bd - 1)):
+                        row[f"{kind}_mid"], row[f"{kind}_end"] = point
+                        row[f"{kind}_change"] = point[1] - point[0]
+                        row[f"{kind}_change_lo"], row[f"{kind}_change_hi"] = np.percentile(
+                            boot[:, 1] - boot[:, 0], [2.5, 97.5])
+                rows.append(row)
+    return rows
+
 
 def final_values(curves: pd.DataFrame) -> pd.DataFrame:
     return curves[curves.gen == curves.gen.max()].set_index(["scheme", "x", "rep"])
@@ -436,13 +473,14 @@ def main() -> None:
         npz[bud] = (pd.DataFrame({k: z[k] for k in ("scheme", "x", "rep", "gen")}), z["B"])
     WINDOWS = windows(int(curves[short].gen.max()))
 
-    mech, donors, share, kw, pairs = [], [], [], [], []
+    mech, donors, share, kw, pairs, half = [], [], [], [], [], []
     for bud in (short, long):
         mech += mechanism(curves[bud], bud)
         donors += donor_is_parent(runs[bud], bud)
         share += first_gen_share(*npz[bud], bud)
         kw += kruskal_social(curves[bud], bud)
         pairs += pairwise_social(curves[bud], bud)
+        half += halfway(curves[bud], bud)
     pd.DataFrame(mech).to_csv(out / "mechanism.csv", index=False)
     d = pd.DataFrame(donors)
     d.to_csv(out / "donor_is_parent_per_run.csv", index=False)
@@ -451,6 +489,7 @@ def main() -> None:
     pd.DataFrame(share).to_csv(out / "first_gen_share.csv", index=False)
     pd.DataFrame(kw).to_csv(out / "kruskal_social.csv", index=False)
     pd.DataFrame(pairs).to_csv(out / "pairwise_social.csv", index=False)
+    pd.DataFrame(half).to_csv(out / "halfway.csv", index=False)
 
     fin = {bud: final_values(curves[bud]) for bud in (short, long)}
     budget_final(fin, short, long).to_csv(out / "budget_final.csv", index=False)
