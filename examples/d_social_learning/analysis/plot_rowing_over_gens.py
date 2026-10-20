@@ -217,7 +217,8 @@ def plot_composition(sh: pd.DataFrame, title: str, out: Path, dpi: int) -> None:
                frameon=False, fontsize=8.5, labelcolor=INK_2, bbox_to_anchor=(0.5, 0.0))
     fig.suptitle(f"Gait classes over evolution: {title} (reps pooled; numbers: share in the last generation)",
                  fontsize=11, color=INK)
-    fig.tight_layout(rect=(0, 0.5 / fig.get_figheight(), 1, 1))  # room for the legend
+    h = fig.get_figheight()
+    fig.tight_layout(rect=(0, 0.5 / h, 1, 1 - 0.35 / h))  # room for the legend and the title
     fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out}")
