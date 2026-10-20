@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rowing Review</title>
+<!-- Template for rowing_review_page.py, which fills in the data below. Ported from
+     ariel_symmetry's examples/symmetry_pressure/rowing_review_page.html. -->
+<style>
+:root {
+  --surface-0: #f5f5f3; --surface-1: #fcfcfb; --surface-2: #f0efeb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --border: #e1e0d9; --accent: #2a78d6; --accent-soft: rgba(42,120,214,.12);
+  --left: #2a78d6; --right: #eb6834; --mid: #898781; --bar: #9ec5f4; --bar-track: #ecebe6;
+  --l-rowing: #1baf7a; --l-alternating: #eb6834; --l-mixed: #c99a06; --l-other: #898781; --l-unsure: #b5b3ac;
+  --bad: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface-0: #111110; --surface-1: #1a1a19; --surface-2: #232321; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --border: #2c2c2a; --accent: #5598e7; --accent-soft: rgba(85,152,231,.16);
+    --left: #5598e7; --right: #f07a48; --mid: #8a8983; --bar: #2a78d6; --bar-track: #2c2c2a;
+    --l-rowing: #22c48a; --l-alternating: #f07a48; --l-mixed: #e0b21c; --l-other: #8a8983; --l-unsure: #5c5b57;
+    --bad: #ec5a5a;
+  }
+}
+:root[data-theme="dark"] {
+  --surface-0: #111110; --surface-1: #1a1a19; --surface-2: #232321; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --border: #2c2c2a; --accent: #5598e7; --accent-soft: rgba(85,152,231,.16);
+  --left: #5598e7; --right: #f07a48; --mid: #8a8983; --bar: #2a78d6; --bar-track: #2c2c2a;
+  --l-rowing: #22c48a; --l-alternating: #f07a48; --l-mixed: #e0b21c; --l-other: #8a8983; --l-unsure: #5c5b57;
+  --bad: #ec5a5a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface-0); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1480px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.sub { color: var(--ink-2); margin: 0 0 12px; max-width: 110ch; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 14px; }
+.progress { font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.progress b { color: var(--ink); }
+button, select { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover, select:hover { border-color: var(--muted); }
+label.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--ink-2); font-size: 13px; cursor: pointer; }
+.keys { color: var(--muted); font-size: 12px; }
+kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; background: var(--surface-1); color: var(--ink-2); }
+.layout { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.list { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; padding: 6px; }
+@media (max-width: 900px) { .list { position: static; max-height: 260px; } }
+.item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+.item:hover { background: var(--surface-2); }
+.item.on { background: var(--accent-soft); }
+.item .who { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.item .who b { color: var(--ink); font-weight: 500; }
+.group-head { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 10px 8px 3px; }
+.badge { display: inline-block; font-size: 11px; border-radius: 999px; padding: 0 8px; line-height: 18px; color: #fff; white-space: nowrap; }
+.badge.none { background: none; color: var(--muted); border: 1px dashed var(--border); }
+.badge.dis { outline: 2px solid var(--bad); outline-offset: 1px; }
+.stack { display: grid; gap: 14px; }
+.head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.head h2 { font-size: 18px; }
+.meta { color: var(--ink-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+.labelbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+.labelbar button { display: inline-flex; gap: 6px; align-items: center; padding: 6px 12px; }
+.labelbar button i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.labelbar button.on { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); font-weight: 600; }
+.labelbar textarea { flex: 1 1 260px; min-height: 34px; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface-0); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; resize: vertical; }
+.views { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+@media (max-width: 1100px) { .views { grid-template-columns: 1fr; } }
+video { width: 100%; border-radius: 8px; background: #000; display: block; aspect-ratio: 4 / 3; }
+.novideo { aspect-ratio: 4 / 3; display: grid; place-items: center; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; }
+.skel { display: grid; grid-template-rows: auto auto; gap: 8px; }
+.skel canvas { width: 100%; display: block; background: var(--surface-0); border-radius: 8px; }
+.cap { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink-2); font-size: 12px; }
+.legend span { display: inline-flex; gap: 5px; align-items: center; }
+.legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.legend i.line { width: 16px; height: 0; border-radius: 0; border-top: 2px dashed var(--muted); }
+.blind-note { color: var(--ink-2); padding: 18px 4px; text-align: center; }
+.verdict { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.verdict .big { font-size: 18px; font-weight: 600; }
+.kv { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 4px 18px; margin-top: 10px; font-size: 13px; }
+.kv div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--grid); padding: 3px 0; }
+.kv span:first-child { color: var(--ink-2); }
+.kv span:last-child { font-variant-numeric: tabular-nums; }
+.meter { display: grid; grid-template-columns: 110px 1fr 44px; gap: 8px; align-items: center; font-size: 12.5px; margin-top: 4px; }
+.meter .track { height: 8px; background: var(--bar-track); border-radius: 4px; overflow: hidden; }
+.meter .fill { height: 100%; background: var(--bar); }
+.meter span:last-child { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.pairs { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; margin-top: 10px; }
+.pair { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.pair.hl { border-color: var(--accent); }
+.pair .ph { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+.pair .names { color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.pair .nums { color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+svg.trace { width: 100%; height: auto; display: block; margin-top: 4px; }
+svg.trace text { fill: var(--muted); font-size: 10px; font-family: inherit; paint-order: stroke; stroke: var(--surface-1); stroke-width: 3px; }
+.empty { color: var(--ink-2); padding: 40px 8px; text-align: center; }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--surface-0); padding: 6px 14px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Rowing review</h1>
+  <p class="sub">
+    Label each robot from the video: <b>rowing</b> (limbs on both sides swept together),
+    <b>alternating</b> (left and right half a cycle apart), <b>mixed</b> (some limbs row, some don't),
+    <b>other</b> (no rowing at all), or <b>unsure</b>. The skeleton shows the detector's view: the mean
+    gait cycle seen from above (heading up) and from the side, with left modules blue, right orange,
+    midline grey, and paired modules joined. Check the split and the pairing there. In blind mode the
+    detector's verdict stays hidden until you label. Labels save in this browser; <b>Export</b> them for
+    <code>rowing_validate.py</code>.
+  </p>
+  <div class="toolbar">
+    <span class="progress" id="progress"></span>
+    <select id="filter" aria-label="Filter">
+      <option value="all">All</option>
+      <option value="todo">Unlabelled</option>
+      <option value="done">Labelled</option>
+      <option value="dis">Disagreements</option>
+    </select>
+    <label class="toggle"><input type="checkbox" id="blind" checked> Blind mode</label>
+    <label class="toggle"><input type="checkbox" id="advance"> Next after labelling</label>
+    <button id="export">Export labels</button>
+    <button id="import">Import labels</button>
+    <input type="file" id="importFile" accept=".json,application/json" hidden>
+    <span class="keys"><kbd>R</kbd> rowing <kbd>A</kbd> alternating <kbd>M</kbd> mixed <kbd>N</kbd> other
+      <kbd>U</kbd> unsure · <kbd>J</kbd>/<kbd>K</kbd> next/prev · <kbd>Space</kbd> play · <kbd>B</kbd> blind</span>
+  </div>
+  <div class="layout">
+    <nav class="card list" id="list" aria-label="Individuals"></nav>
+    <div class="stack" id="detail"></div>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const DATA = /*__DATA__*/null;
+// One store per sample seed, so a held-out sample's export holds only its own
+// labels (and none from ariel_symmetry's page, which uses rowing_review_labels_v1).
+const STORE = "zoo_rowing_review_labels_v1" + (DATA && DATA.seed ? `_seed${DATA.seed}` : "");
+const USER_LABELS = [
+  ["rowing", "R", "Rowing"], ["alternating", "A", "Alternating"], ["mixed", "M", "Mixed"],
+  ["other", "N", "Other"], ["unsure", "U", "Unsure"],
+];
+const DET_COLOR = { rowing: "rowing", alternating: "alternating", mixed: "mixed", aperiodic: "other", unpaired: "other", midline: "other", static: "other" };
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "–" : (typeof v === "number" ? v.toFixed(d) : String(v));
+const pct = (v) => (v === null || v === undefined) ? "–" : `${Math.round(v * 100)}%`;
+
+let labels = {};
+try { labels = JSON.parse(localStorage.getItem(STORE) || "{}") || {}; } catch (e) { labels = {}; }
+function save() { try { localStorage.setItem(STORE, JSON.stringify(labels)); } catch (e) { /* private mode: export still works */ } }
+
+const inds = DATA ? DATA.individuals : [];
+let cur = 0, anim = null, hlPair = -1;
+if (DATA) document.title = $("title").textContent = DATA.title;
+
+function disagrees(ind) {
+  const u = labels[ind.key]?.label, d = ind.detector.rowing_label;
+  if (!u || u === "unsure") return false;
+  return (u === "rowing") !== (d === "rowing") || (u === "alternating") !== (d === "alternating");
+}
+function visible() {
+  const f = $("filter").value;
+  return inds.map((x, i) => i).filter((i) => {
+    const l = labels[inds[i].key];
+    return f === "all" || (f === "todo" && !l) || (f === "done" && l) || (f === "dis" && disagrees(inds[i]));
+  });
+}
+function chip(text, colorKey, extra = "") {
+  return `<span class="badge ${extra}" style="background:${css("--l-" + colorKey)}">${text}</span>`;
+}
+function badge(label, extra = "") {
+  return label ? chip(label, label, extra) : `<span class="badge none">–</span>`;
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("on"); setTimeout(() => t.classList.remove("on"), 1600); }
+
+function renderList() {
+  const vis = visible();
+  const done = inds.filter((x) => labels[x.key]).length;
+  const nDis = inds.filter(disagrees).length;
+  $("progress").innerHTML = `<b>${done}</b> / ${inds.length} labelled` + (done ? ` · ${nDis} disagreement${nDis === 1 ? "" : "s"}` : "");
+  let html = "", group = "";
+  for (const i of vis) {
+    const x = inds[i], g = x.group;
+    if (g !== group) { html += `<div class="group-head">${g}</div>`; group = g; }
+    html += `<div class="item ${i === cur ? "on" : ""}" data-i="${i}"><span class="who"><b>rep${x.rep}</b> g${x.gen} #${x.id}</span>${badge(labels[x.key]?.label, disagrees(x) ? "dis" : "")}</div>`;
+  }
+  $("list").innerHTML = html || `<div class="empty">Nothing here.</div>`;
+  $("list").querySelectorAll(".item").forEach((el) => el.onclick = () => show(+el.dataset.i));
+  const on = $("list").querySelector(".item.on"), list = $("list");
+  if (on) {  // scroll the list only, never the page
+    const top = on.offsetTop - list.offsetTop, bottom = top + on.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top - 30;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight + 8;
+  }
+}
+
+function show(i) {
+  if (!inds.length) { $("detail").innerHTML = `<div class="card empty">No individuals in this page.</div>`; return; }
+  cur = Math.max(0, Math.min(inds.length - 1, i));
+  hlPair = -1;
+  renderDetail();
+  renderList();
+}
+
+function renderDetail() {
+  const x = inds[cur], lab = labels[x.key] || {};
+  const reveal = !$("blind").checked || !!lab.label;
+  const d = x.detector;
+  const buttons = USER_LABELS.map(([v, k, name]) =>
+    `<button data-l="${v}" class="${lab.label === v ? "on" : ""}"><i style="background:${css("--l-" + v)}"></i>${name} <kbd>${k}</kbd></button>`).join("");
+  const video = x.video
+    ? `<video id="vid" src="${x.video}" controls loop muted autoplay playsinline></video>`
+    : `<div class="novideo">No video</div>`;
+  const per = x.detail.period_s;
+  let det = `<div class="card"><h2>Detector</h2><div class="blind-note">Hidden in blind mode. Label this individual to see the detector's verdict, metrics and pair traces.</div></div>`;
+  if (reveal) {
+    const meters = [["rowing", d.rowing_frac], ["alternating", d.alternating_frac], ["aperiodic", d.aperiodic_frac], ["paired", d.paired_frac]]
+      .map(([n, v]) => `<div class="meter"><span>${n}</span><div class="track"><div class="fill" style="width:${Math.max(0, Math.min(1, v || 0)) * 100}%"></div></div><span>${pct(v)}</span></div>`).join("");
+    const kv = [
+      ["rowing score", fmt(d.rowing_score)], ["pairs (rowing / alternating)", `${d.n_pairs} (${d.n_rowing_pairs} / ${d.n_alternating_pairs})`],
+      ["moving modules", d.n_moving], ["gait period", `${fmt(per)} s${x.detail.aperiodic ? " (aperiodic)" : ""}`],
+      ["heading (core frame)", `${fmt(d.heading_deg, 1)}°`], ["split plane vs heading", `${fmt(d.split_offset_deg, 0)}°`],
+      ["heading consistency", fmt(d.heading_consistency)], ["speed", `${fmt(d.speed, 3)} m/s`],
+      ["body mirror plane vs heading", `${fmt(d.morph_plane_offset_deg, 0)}°`], ["midline stroke share", pct(d.midline_amp_frac)],
+      ["body size", `${fmt(d.body_size_m, 3)} m`], ["cluster replay's label", x.cluster_label],
+    ].map(([k, v]) => `<div><span>${k}</span><span>${v}</span></div>`).join("");
+    const pairs = x.pairs.map((p, j) => pairCard(x, p, j)).join("") || `<div class="blind-note">No left/right pairs.</div>`;
+    det = `<div class="card"><div class="verdict"><h2>Detector</h2><span class="big">${chip(d.rowing_label, DET_COLOR[d.rowing_label] || "other")}</span>
+      ${lab.label && disagrees(x) ? `<span style="color:var(--bad)">disagrees with your label</span>` : ""}</div>
+      ${meters}<div class="kv">${kv}</div></div>
+      <div class="card"><h2>Pairs</h2><p class="cap" style="margin:4px 0 0">Left module (blue, solid) vs mirrored right module (orange, dashed), first 6 s after the transient. In sync = the lines overlap. Hover a pair to highlight it in the skeleton.</p><div class="pairs">${pairs}</div></div>`;
+  }
+  $("detail").innerHTML = `
+    <div class="card">
+      <div class="head"><h2>${x.group} · rep${x.rep} · gen ${x.gen} · robot ${x.id}</h2>
+        <span class="meta">fitness ${fmt(x.fitness)} · ${x.n_hinges} hinges</span></div>
+      <div class="labelbar">${buttons}<textarea id="note" placeholder="Notes (optional)">${lab.note || ""}</textarea></div>
+      <div class="views">
+        <div>${video}<div class="cap" style="margin-top:6px"><span>${x.run}</span>
+          <span>speed <select id="rate"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select></span></div></div>
+        <div class="skel">
+          <canvas id="top" height="300"></canvas>
+          <canvas id="side" height="170"></canvas>
+          <div class="legend"><span><i style="background:var(--left)"></i>left</span><span><i style="background:var(--right)"></i>right</span>
+            <span><i style="background:var(--mid)"></i>midline / core</span><span><i class="line"></i>split plane</span>
+            <span style="color:var(--accent)">→ heading</span></div>
+          <div class="cap"><span>Mean gait cycle, period ${fmt(per)} s${x.detail.aperiodic ? " (no clear cycle: whole window)" : ""}. Top: from above, split plane up. Bottom: from the left.</span></div>
+        </div>
+      </div>
+    </div>${det}`;
+  $("detail").querySelectorAll(".labelbar button").forEach((b) => b.onclick = () => setLabel(b.dataset.l));
+  $("note").oninput = (e) => { if (labels[x.key]) { labels[x.key].note = e.target.value; save(); } };
+  $("note").onchange = (e) => { if (!labels[x.key] && e.target.value) toast("Pick a label first; the note is saved with it"); };
+  const vid = $("vid");
+  if (vid) $("rate").onchange = (e) => vid.playbackRate = +e.target.value;
+  $("detail").querySelectorAll(".pair").forEach((el) => {
+    el.onmouseenter = () => { hlPair = +el.dataset.j; el.classList.add("hl"); };
+    el.onmouseleave = () => { hlPair = -1; el.classList.remove("hl"); };
+  });
+  startSkeleton(x);
+}
+
+function setLabel(v) {
+  const x = inds[cur];
+  const note = $("note") ? $("note").value : "";
+  if (labels[x.key]?.label === v) delete labels[x.key];
+  else labels[x.key] = { label: v, note, detector: x.detector.rowing_label, t: new Date().toISOString() };
+  save();
+  if (labels[x.key] && $("advance").checked) return step(1);
+  renderDetail(); renderList();
+}
+
+function step(dir) {
+  const vis = visible();
+  if (!vis.length) return;
+  let pos = vis.indexOf(cur);
+  pos = pos < 0 ? 0 : Math.max(0, Math.min(vis.length - 1, pos + dir));
+  show(vis[pos]);
+}
+
+// ── Pair traces ─────────────────────────────────────────────────────────────
+function pairCard(x, p, j) {
+  const t = x.detail.traces[j], dt = x.detail.trace_dt;
+  const name = (i) => x.names[i] || `body ${i}`;
+  // One scale for both rows, so a barely moving coordinate stays flat instead of magnifying noise.
+  const scale = Math.max(1e-6, ...[t.fore_l, t.fore_r, t.up_l, t.up_r].flat().map(Math.abs));
+  return `<div class="pair" data-j="${j}">
+    <div class="ph"><b>Pair ${j + 1}</b>${chip(p.pair_kind.replace("_", " "), ["rowing", "alternating"].includes(p.pair_kind) ? p.pair_kind : "other")}</div>
+    <div class="names">L ${name(p.left)} ↔ R ${name(p.right)}</div>
+    <div class="nums">sync ${fmt(p.mirror_sync)} · lag ${fmt(p.phase_lag)} cyc · f ${fmt(p.freq_l)}/${fmt(p.freq_r)} Hz · periodicity ${fmt(p.periodicity_l)}/${fmt(p.periodicity_r)} · stroke ${fmt(p.amp_l * 1000, 0)}/${fmt(p.amp_r * 1000, 0)} mm</div>
+    ${traceSvg(t.fore_l, t.fore_r, dt, "fore-aft", scale)}${traceSvg(t.up_l, t.up_r, dt, "up-down", scale)}
+  </div>`;
+}
+function traceSvg(a, b, dt, name, m) {
+  const W = 320, H = 58, pad = 4, n = a.length;
+  const pts = (s) => s.map((v, i) => `${(pad + (W - 2 * pad) * i / Math.max(1, n - 1)).toFixed(1)},${(H / 2 - (H / 2 - pad) * v / m).toFixed(1)}`).join(" ");
+  return `<svg class="trace" viewBox="0 0 ${W} ${H}" role="img" aria-label="${name} trace">
+    <line x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}" stroke="${css("--grid")}"/>
+    <polyline fill="none" stroke="${css("--left")}" stroke-width="1.6" points="${pts(a)}"/>
+    <polyline fill="none" stroke="${css("--right")}" stroke-width="1.6" stroke-dasharray="4 3" points="${pts(b)}"/>
+    <text x="4" y="10">${name} · ±${(m * 1000).toFixed(0)} mm · ${(n * dt).toFixed(0)} s</text></svg>`;
+}
+
+// ── Skeleton ────────────────────────────────────────────────────────────────
+function startSkeleton(x) {
+  if (anim) cancelAnimationFrame(anim);
+  const D = x.detail, C = D.cycle, B = C.length, P = C[0].length;
+  const top = $("top"), side = $("side");
+  const dpr = window.devicePixelRatio || 1;
+  for (const c of [top, side]) { const w = c.clientWidth; c.width = w * dpr; c.height = +c.getAttribute("height") * dpr; c.style.height = c.getAttribute("height") + "px"; }
+  // Shared scale: fit every module position over the cycle in both views.
+  let maxLat = 0.02, maxFore = 0.02, maxUp = 0.02;
+  for (const m of C) for (const [f, l, u] of m) { maxLat = Math.max(maxLat, Math.abs(l)); maxFore = Math.max(maxFore, Math.abs(f)); maxUp = Math.max(maxUp, Math.abs(u)); }
+  const tw = top.width, th = top.height, sw = side.width, sh = side.height, pad = 22 * dpr;
+  const scale = Math.min((tw - 2 * pad) / (2 * maxLat), (th - 2 * pad) / (2 * maxFore), (sw - 2 * pad) / (2 * maxFore), (sh - 2 * pad) / (2 * maxUp));
+  const TOP = (f, l) => [tw / 2 - l * scale, th / 2 - f * scale];   // heading up, left on the left
+  const SIDE = (f, u) => [sw / 2 + f * scale, sh / 2 - u * scale];  // seen from the left: fore to the right
+  const col = (b) => D.side[b] === 1 ? css("--left") : D.side[b] === -1 ? css("--right") : css("--mid");
+  const grid = css("--grid"), muted = css("--muted"), accent = css("--accent");
+  const period = Math.min(4, Math.max(0.4, D.period_s || 1));
+  const t0 = performance.now();
+  const at = (b, ph) => { const k = ph * P, i = Math.floor(k) % P, j = (i + 1) % P, w = k - Math.floor(k); return C[b][i].map((v, c) => v + w * (C[b][j][c] - v)); };
+
+  function frame(now) {
+    const ph = ((((now - t0) / 1000 / period) % 1) + 1) % 1;  // rAF time can precede t0
+    for (const [cv, view] of [[top, "top"], [side, "side"]]) {
+      const g = cv.getContext("2d"), W = cv.width, H = cv.height;
+      g.clearRect(0, 0, W, H);
+      const map = view === "top" ? (p) => TOP(p[0], p[1]) : (p) => SIDE(p[0], p[2]);
+      g.lineWidth = 1 * dpr;
+      if (view === "top") {  // split plane + heading arrow
+        g.setLineDash([5 * dpr, 4 * dpr]); g.strokeStyle = muted;
+        g.beginPath(); g.moveTo(tw / 2, 6 * dpr); g.lineTo(tw / 2, th - 6 * dpr); g.stroke(); g.setLineDash([]);
+        const a = (x.heading_rel_deg || 0) * Math.PI / 180, L = Math.min(tw, th) * 0.32;
+        const [hx, hy] = [tw / 2 - Math.sin(a) * L, th / 2 - Math.cos(a) * L];
+        g.strokeStyle = accent; g.fillStyle = accent; g.lineWidth = 2 * dpr;
+        g.beginPath(); g.moveTo(tw / 2, th / 2); g.lineTo(hx, hy); g.stroke();
+        const ang = Math.atan2(hy - th / 2, hx - tw / 2), s = 8 * dpr;
+        g.beginPath(); g.moveTo(hx, hy); g.lineTo(hx - s * Math.cos(ang - 0.4), hy - s * Math.sin(ang - 0.4)); g.lineTo(hx - s * Math.cos(ang + 0.4), hy - s * Math.sin(ang + 0.4)); g.fill();
+        g.font = `${11 * dpr}px system-ui`; g.fillStyle = muted;
+        g.fillText("split", tw / 2 + 4 * dpr, 14 * dpr);
+        g.fillText("L", 8 * dpr, th / 2); g.fillText("R", tw - 14 * dpr, th / 2);
+      } else {
+        g.strokeStyle = grid; g.beginPath(); g.moveTo(6 * dpr, sh / 2); g.lineTo(sw - 6 * dpr, sh / 2); g.stroke();
+        g.font = `${11 * dpr}px system-ui`; g.fillStyle = muted; g.fillText("fore →", sw - 50 * dpr, sh - 6 * dpr);
+      }
+      g.lineWidth = 1 * dpr;
+      for (let b = 1; b < B; b++) {  // cycle trails
+        if (!D.moving[b]) continue;
+        g.strokeStyle = col(b); g.globalAlpha = 0.35; g.beginPath();
+        for (let k = 0; k <= P; k++) { const [u, v] = map(C[b][k % P]); k ? g.lineTo(u, v) : g.moveTo(u, v); }
+        g.stroke();
+      }
+      g.globalAlpha = 1;
+      D.pairs.forEach(([l, r], j) => {  // pair links
+        const [a1, b1] = map(at(l, ph)), [a2, b2] = map(at(r, ph));
+        g.strokeStyle = j === hlPair ? accent : muted; g.globalAlpha = j === hlPair ? 1 : 0.35; g.lineWidth = (j === hlPair ? 2.5 : 1) * dpr;
+        g.beginPath(); g.moveTo(a1, b1); g.lineTo(a2, b2); g.stroke();
+      });
+      g.globalAlpha = 1;
+      for (let b = 1; b < B; b++) {
+        const [u, v] = map(at(b, ph)), r = (D.moving[b] ? 4.5 : 3) * dpr;
+        g.beginPath(); g.arc(u, v, r, 0, 2 * Math.PI);
+        if (D.moving[b]) { g.fillStyle = col(b); g.fill(); } else { g.strokeStyle = col(b); g.lineWidth = 1.2 * dpr; g.stroke(); }
+      }
+      const [cx, cy] = map([0, 0, 0]), s = 6 * dpr;
+      g.fillStyle = css("--ink"); g.fillRect(cx - s, cy - s, 2 * s, 2 * s);
+    }
+    anim = requestAnimationFrame(frame);
+  }
+  anim = requestAnimationFrame(frame);
+}
+
+// ── Wiring ──────────────────────────────────────────────────────────────────
+$("filter").onchange = () => { renderList(); const v = visible(); if (v.length && !v.includes(cur)) show(v[0]); };
+$("blind").onchange = renderDetail;
+$("export").onclick = () => {
+  const blob = new Blob([JSON.stringify({ version: 1, exported: new Date().toISOString(), seed: DATA?.seed, labels }, null, 1)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "rowing_labels.json"; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+$("import").onclick = () => $("importFile").click();
+$("importFile").onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const got = JSON.parse(await f.text()); const add = got.labels || got;
+    Object.assign(labels, add); save(); renderDetail(); renderList(); toast(`Imported ${Object.keys(add).length} labels`);
+  } catch (err) { toast("Could not read that file"); }
+  e.target.value = "";
+};
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT" || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  const hit = USER_LABELS.find(([, key]) => key.toLowerCase() === k) || (k === "o" ? USER_LABELS[3] : null);
+  if (hit) { setLabel(hit[0]); e.preventDefault(); }
+  else if (k === "j") step(1);
+  else if (k === "k") step(-1);
+  else if (k === "b") { $("blind").checked = !$("blind").checked; renderDetail(); }
+  else if (k === " ") { const v = $("vid"); if (v) { v.paused ? v.play() : v.pause(); e.preventDefault(); } }
+});
+window.addEventListener("resize", () => inds.length && startSkeleton(inds[cur]));
+show(0);
+</script>
+</body>
+</html>
