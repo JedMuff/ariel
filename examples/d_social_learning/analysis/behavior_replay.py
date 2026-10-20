@@ -2,17 +2,18 @@
 
 For every run under --root, takes either the --top best survivors (by
 distance) of each generation in --gens (--select top), or every robot ever
-born (--select all), and replays each with its learned theta and its starting
-init_theta, --episodes perturbed episodes each, through the evaluator's own
-run_episode (sim_ariel/evaluator.py, with the run's sim_preset). The
-perturbations come from the individual's eval_seed exactly as evaluate.py's
-final evaluations, so learned-theta episode i is stored final evaluation i (it
-reproduces to float noise across machines: contact-rich gaits drift, within
-their own episode-to-episode spread).
+born (--select all), and replays each with its learned theta (--episodes
+perturbed episodes) and its starting init_theta (--init-episodes), through
+the evaluator's own run_episode (sim_ariel/evaluator.py, with the run's
+sim_preset). The perturbations come from the individual's eval_seed exactly as
+evaluate.py's final evaluations, so learned-theta episode i is stored final
+evaluation i (it reproduces to float noise across machines: contact-rich gaits
+drift, within their own episode-to-episode spread).
 
 Each episode is recorded at 50 Hz after the settle phase and reduced in the
-worker to gait_metrics.behavior_descriptors and gait_metrics.rowing. With
---traces the recorded arrays are kept too (see below).
+worker to gait_metrics.behavior_descriptors and gait_metrics.rowing, from the
+full-precision state. With --traces all the recorded states are kept too (see
+below).
 
 --select top (default) writes <out-dir>/episodes.csv: run keys, generation,
 id, parent_id, birth_gen, weights ("learned"/"init"), episode, replayed fitness
@@ -26,12 +27,16 @@ the runs that are missing:
         episodes.csv  as above (generation = birth_gen; 0 = initial population)
         history.csv   generation, id, survivor: every selection pool, plus the
                       initial population as generation 0
-        traces.npz    with --traces ep0 (episode 0 of both weight sets) or all:
-                      "<id>/<weights>/<ep>/{P,Q,A,C,U}" (body positions and
-                      quaternions, core first; hinge angles; floor contact per
-                      body; controls), "<id>/anchors" (hinge anchors in the
-                      core frame at rest), "<id>/body_names", and "dt".
-                      load_trace() reads one episode back.
+        traces.zip    with --traces all: one "<id>.npz" per robot holding, per
+                      "<weights>/<ep>/", qpos and ctrl as 16-bit fixed point
+                      (int16 times qpos_scale / ctrl_scale; ~1e-4 rad steps,
+                      ten times finer than float16, which flips 0.2% of rowing
+                      labels), root (the free joint's position, float32) and
+                      contact (floor contact per body, packbits), plus the robot's morph,
+                      sim_preset, body_names, anchors and dt. Body poses are
+                      rebuilt from qpos by forward kinematics: load_trace()
+                      returns an episode's P, Q, A, C, U as the metrics take
+                      them.
 --merge concatenates the per-run episodes.csv into <out-dir>/episodes.csv.
 
 Usage:
@@ -39,17 +44,19 @@ Usage:
         --root __data__/social/ariel_zoo_fe10 --gens 60 --top 5 --episodes 3 \\
         --out-dir __data__/social/behavior_zoo
     uv run examples/d_social_learning/analysis/behavior_replay.py --select all \\
-        --traces ep0 --shard 0/64 --out-dir /scratch-shared/$USER/behavior_zoo_all
+        --traces all --shard 0/64 --out-dir /scratch-shared/$USER/behavior_zoo_all
 """
 
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import sys
 import time
+import zipfile
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -64,7 +71,17 @@ from core.novelty_history import read_run_history  # noqa: E402
 
 RUN_RE = re.compile(r"(?P<budget>ig\d+)/(?P<scheme>[^/]+)/x(?P<x>\d+)/k(?P<k>\d+)/rep_(?P<rep>\d+)_")
 RECORD_EVERY = 10  # sim steps: 50 Hz at the 500 Hz physics
-TRACE_KEYS = ("P", "Q", "A", "C", "U")
+INT16_MAX = 32767
+
+
+def _to_int16(x: np.ndarray) -> tuple[np.ndarray, float]:
+    """16-bit fixed point: (int16 array, scale) with x ~ array * scale / INT16_MAX."""
+    scale = float(max(np.abs(x).max(initial=0.0), np.pi))
+    return np.round(x * (INT16_MAX / scale)).astype(np.int16), scale
+
+
+def _from_int16(a: np.ndarray, scale: float) -> np.ndarray:
+    return a.astype(np.float64) * (float(scale) / INT16_MAX)
 
 
 def run_keys(rep_dir: Path) -> dict:
@@ -111,8 +128,35 @@ def select_robots(rep_dir: Path, gens: list[int], top: int, select: str = "top")
     return jobs, history
 
 
-def replay_robot(job: dict, n_episodes: int, keep_traces: str = "none") -> tuple[list[dict], dict]:
-    """Rows of metrics per episode, and the traces kept (`keep_traces`: none / ep0 / all)."""
+def _world(morph, sim_preset: str) -> dict:
+    """evaluator.initialize_world(morph) under `sim_preset`."""
+    import simulator_dependent_functions as sdf
+    from sim_ariel import evaluator
+
+    if sdf.sim_preset != sim_preset:
+        sdf.simulator = sdf.SIMULATOR_ARIEL
+        sdf.set_sim_preset(sim_preset)
+    return evaluator.initialize_world(morph)
+
+
+def _layout(model) -> tuple[list[int], list[int], np.ndarray, slice]:
+    """The robot's bodies (core first), hinge joints, their qpos addresses, and
+    the qpos slice of the free joint's position."""
+    import mujoco
+
+    bodies = sorted({int(b) for b in model.geom_bodyid if model.body(int(b)).name.startswith("robot1_")})
+    core = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
+    bodies = [core] + [b for b in bodies if b != core]
+    hinges = [j for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
+    qadr = np.array([model.jnt_qposadr[j] for j in hinges], dtype=int)
+    free = next(j for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE)
+    root = slice(int(model.jnt_qposadr[free]), int(model.jnt_qposadr[free]) + 3)
+    return bodies, hinges, qadr, root
+
+
+def replay_robot(job: dict, n_episodes: int, n_init_episodes: int = 1,
+                 keep_traces: bool = False) -> tuple[list[dict], bytes | None]:
+    """Rows of metrics per episode, and (keep_traces) the robot's traces as npz bytes."""
     import mujoco
 
     import simulator_dependent_functions as sdf
@@ -120,52 +164,51 @@ def replay_robot(job: dict, n_episodes: int, keep_traces: str = "none") -> tuple
     from gait_metrics import behavior_descriptors, rowing
     from sim_ariel import evaluator
 
-    if sdf.sim_preset != job["sim_preset"]:
-        sdf.simulator = sdf.SIMULATOR_ARIEL
-        sdf.set_sim_preset(job["sim_preset"])
-    spec = evaluator.initialize_world(job["morph"])
+    spec = _world(job["morph"], job["sim_preset"])
     model, data = spec["model"], spec["data"]
     brain = DistributedMLP(n_neighbors=sdf.n_neighbours(), hidden=job["hidden"])
-
-    bodies = sorted({int(b) for b in model.geom_bodyid if model.body(int(b)).name.startswith("robot1_")})
-    core = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
-    bodies = [core] + [b for b in bodies if b != core]
-    body_arr = np.array(bodies)
-    hinges = [j for j in range(model.njnt) if model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE]
-    qadr = np.array([model.jnt_qposadr[j] for j in hinges], dtype=int)
+    bodies, hinges, qadr, root = _layout(model)
+    core = bodies[0]
+    # geom -> index of its body in `bodies`, or -1 (floor, other robots' geoms)
+    body_index = np.full(model.nbody, -1)
+    body_index[bodies] = np.arange(len(bodies))
+    geom_index = body_index[model.geom_bodyid]
     floor = spec["floor_geom_id"]
 
     mujoco.mj_resetData(model, data)
     mujoco.mj_kinematics(model, data)
     anchors = (data.xanchor[hinges] - data.xpos[core]) @ data.xmat[core].reshape(3, 3)
+    dt = RECORD_EVERY * model.opt.timestep
 
     tags, rows = job["tags"], []
     traces = {}
-    if keep_traces != "none":
-        traces[f"{job['id']}/anchors"] = anchors.astype(np.float32)
-        traces[f"{job['id']}/body_names"] = np.array([model.body(b).name for b in bodies])
-        traces["dt"] = np.float64(RECORD_EVERY * model.opt.timestep)
     meta = {k: job[k] for k in ("budget", "scheme", "x", "k", "rep", "generation", "id", "parent_id", "birth_gen")}
-    for weights, key in (("learned", "theta"), ("init", "init_theta")):
+    for weights, key, n_eps in (("learned", "theta", n_episodes), ("init", "init_theta", n_init_episodes)):
         theta = np.asarray(tags[key], dtype=np.float64)
         rng = np.random.default_rng(np.random.SeedSequence([tags["eval_seed"], 1]))
-        for ep in range(n_episodes):
-            P, Q, A, C, U = [], [], [], [], []
+        for ep in range(n_eps):
+            P, Q, A, X, C, U = [], [], [], [], [], []
 
             def record(sim_step: int, d) -> None:
                 if sim_step % RECORD_EVERY:
                     return
-                P.append(d.xpos[bodies].copy())
-                Q.append(d.xquat[bodies].copy())
-                A.append(d.qpos[qadr].copy())
+                P.append(d.xpos[bodies])
+                Q.append(d.xquat[bodies])
+                A.append(d.qpos[qadr])
+                # xpos/xquat are the kinematics of the state before this step,
+                # qpos is already a step on: step it back so a trace rebuilds P, Q exactly.
+                q = d.qpos.copy()
+                mujoco.mj_integratePos(model, q, d.qvel, -model.opt.timestep)
+                X.append(q)
                 U.append(d.ctrl.copy())
                 g1, g2 = d.contact.geom1[: d.ncon], d.contact.geom2[: d.ncon]
-                other = np.concatenate([g2[g1 == floor], g1[g2 == floor]])
-                C.append(np.isin(body_arr, model.geom_bodyid[other]))
+                touching = geom_index[np.concatenate([g2[g1 == floor], g1[g2 == floor]])]
+                c = np.zeros(len(bodies), dtype=bool)
+                c[touching[touching >= 0]] = True
+                C.append(c)
 
             res = evaluator.run_episode(theta, brain, spec, perturb_rng=rng, recorder=record)
-            P, Q, A, C, U = map(np.asarray, (P, Q, A, C, U))
-            dt = RECORD_EVERY * model.opt.timestep
+            P, Q, A, X, C, U = map(np.asarray, (P, Q, A, X, C, U))
             stored = tags.get("final_eval_fitness", [])
             rows.append({
                 **meta, "weights": weights, "episode": ep, "n_bodies": len(bodies), "n_hinges": len(hinges),
@@ -174,54 +217,111 @@ def replay_robot(job: dict, n_episodes: int, keep_traces: str = "none") -> tuple
                 **behavior_descriptors(P, Q, A, C, U, anchors, dt),
                 **rowing(P, Q, dt),
             })
-            if keep_traces == "all" or (keep_traces == "ep0" and ep == 0):
-                for name, arr in zip(TRACE_KEYS, (P, Q, A, C, U)):
-                    traces[f"{job['id']}/{weights}/{ep}/{name}"] = arr if name == "C" else arr.astype(np.float32)
-    return rows, traces
+            if keep_traces:
+                pre = f"{weights}/{ep}/"
+                rest = X.copy()
+                rest[:, root] = 0.0  # stored apart: metres would stretch the angles' scale
+                traces[pre + "qpos"], traces[pre + "qpos_scale"] = _to_int16(rest)
+                traces[pre + "root"] = X[:, root].astype(np.float32)
+                traces[pre + "ctrl"], traces[pre + "ctrl_scale"] = _to_int16(U)
+                traces[pre + "contact"] = np.packbits(C, axis=1)
+    if not keep_traces:
+        return rows, None
+    buf = io.BytesIO()
+    np.savez_compressed(buf, **traces, morph=json.dumps(job["morph"]), sim_preset=job["sim_preset"],
+                        body_names=np.array([model.body(b).name for b in bodies]),
+                        anchors=anchors.astype(np.float32), dt=dt)
+    return rows, buf.getvalue()
 
 
-def load_trace(npz_path: Path | str, robot_id: int, weights: str = "learned", episode: int = 0) -> dict:
-    """One episode from a run's traces.npz: P, Q, A, C, U, anchors, body_names and dt,
-    so gait_metrics.behavior_descriptors(P, Q, A, C, U, anchors, dt) and rowing(P, Q, dt) can be rerun."""
-    with np.load(npz_path) as z:
-        out = {k: z[f"{robot_id}/{weights}/{episode}/{k}"] for k in TRACE_KEYS}
-        out.update(anchors=z[f"{robot_id}/anchors"], body_names=z[f"{robot_id}/body_names"], dt=float(z["dt"]))
-    return out
+def load_trace(zip_path: Path | str, robot_id: int, weights: str = "learned", episode: int = 0) -> dict:
+    """One episode from a run's traces.zip as the metrics take it: P, Q (body
+    poses, core first, rebuilt from qpos), A (hinge angles), C, U, anchors,
+    body_names and dt, so gait_metrics.behavior_descriptors(P, Q, A, C, U,
+    anchors, dt) and rowing(P, Q, dt) can be rerun without simulating."""
+    import mujoco
+
+    with zipfile.ZipFile(zip_path) as zf, np.load(io.BytesIO(zf.read(f"{robot_id}.npz"))) as z:
+        pre = f"{weights}/{episode}/"
+        X, root = _from_int16(z[pre + "qpos"], z[pre + "qpos_scale"]), z[pre + "root"]
+        U = _from_int16(z[pre + "ctrl"], z[pre + "ctrl_scale"])
+        contact = z[pre + "contact"]
+        morph, preset = json.loads(str(z["morph"])), str(z["sim_preset"])
+        out = {"anchors": z["anchors"].astype(np.float64), "body_names": z["body_names"], "dt": float(z["dt"])}
+    model = _world(morph, preset)["model"]
+    bodies, _, qadr, root_slice = _layout(model)
+    assert [model.body(b).name for b in bodies] == list(out["body_names"])
+    X[:, root_slice] = root
+    data = mujoco.MjData(model)
+    P, Q = np.empty((len(X), len(bodies), 3)), np.empty((len(X), len(bodies), 4))
+    for t, q in enumerate(X):
+        data.qpos[:] = q
+        mujoco.mj_kinematics(model, data)
+        P[t], Q[t] = data.xpos[bodies], data.xquat[bodies]
+    C = np.unpackbits(contact, axis=1, count=len(bodies)).astype(bool)
+    return {**out, "P": P, "Q": Q, "A": X[:, qadr], "C": C, "U": U}
 
 
-def _work(args: tuple) -> tuple[list[dict], dict]:
-    job, n_episodes, keep_traces = args
+def _work(args: tuple) -> tuple[str | None, int, list[dict], bytes | None]:
+    job, n_episodes, n_init_episodes, keep_traces, dest = args
     try:
-        return replay_robot(job, n_episodes, keep_traces)
+        return dest, job["id"], *replay_robot(job, n_episodes, n_init_episodes, keep_traces)
     except Exception as exc:  # noqa: BLE001
         print(f"[behavior_replay] {job['scheme']} rep {job['rep']} id {job['id']}: {exc}", flush=True)
-        return [], {}
+        return dest, job["id"], [], None
 
 
-def replay_run(pool: Pool, rep_dir: Path, out_dir: Path, args: argparse.Namespace) -> None:
-    """--select all: replay every robot of one run into its own directory (skipped if already done)."""
-    out = run_out_dir(out_dir, rep_dir)
-    if (out / "episodes.csv").exists() and not args.force:
-        print(f"skip {out} (done)", flush=True)
-        return
-    t0 = time.perf_counter()
-    jobs, history = select_robots(rep_dir, args.gens, args.top, "all")
-    rows, traces = [], {}
-    work = [(j, args.episodes, args.traces) for j in jobs]
-    for r, tr in pool.imap_unordered(_work, work, chunksize=2):
-        rows.extend(r)
-        traces.update(tr)
+def _write_run(out: Path, history: pd.DataFrame, rows: list[dict], traces: dict[int, bytes]) -> None:
+    """A run's files, each written to .tmp and renamed, episodes.csv last, so a
+    killed job leaves no half-done run behind."""
     out.mkdir(parents=True, exist_ok=True)
-    # Written to .tmp and renamed, episodes.csv last, so a killed job leaves no half-done run behind.
     history.to_csv(out / "history.csv.tmp", index=False)
     os.replace(out / "history.csv.tmp", out / "history.csv")
     if traces:
-        with open(out / "traces.npz.tmp", "wb") as f:
-            np.savez_compressed(f, **traces)
-        os.replace(out / "traces.npz.tmp", out / "traces.npz")
+        # Each member is already a compressed npz: store, don't recompress.
+        with zipfile.ZipFile(out / "traces.zip.tmp", "w", zipfile.ZIP_STORED) as zf:
+            for i in sorted(traces):
+                zf.writestr(f"{i}.npz", traces[i])
+        os.replace(out / "traces.zip.tmp", out / "traces.zip")
+    rows = sorted(rows, key=lambda r: (r["id"], r["weights"] != "learned", r["episode"]))
     pd.DataFrame(rows).to_csv(out / "episodes.csv.tmp", index=False)
     os.replace(out / "episodes.csv.tmp", out / "episodes.csv")
-    print(f"{len(jobs)} robots, {len(rows)} episodes in {time.perf_counter() - t0:.0f}s -> {out}", flush=True)
+
+
+def replay_all(pool: Pool, runs: list[Path], out_dir: Path, args: argparse.Namespace) -> None:
+    """--select all: every robot of every run, in one stream of tasks so no
+    worker waits for a run to finish; each run is written as soon as its last
+    robot is back (and skipped if it is already done)."""
+    pending: dict[str, dict] = {}
+
+    def tasks():
+        # Runs are selected lazily by the pool's feeder thread, so a run's
+        # bookkeeping exists before any of its robots can come back.
+        for rep_dir in runs:
+            dest = run_out_dir(out_dir, rep_dir)
+            if (dest / "episodes.csv").exists() and not args.force:
+                print(f"skip {dest} (done)", flush=True)
+                continue
+            jobs, history = select_robots(rep_dir, args.gens, args.top, "all")
+            if not jobs:
+                _write_run(dest, history, [], {})
+                continue
+            pending[str(dest)] = {"left": len(jobs), "history": history, "rows": [], "traces": {},
+                                  "t0": time.perf_counter()}
+            for job in jobs:
+                yield job, args.episodes, args.init_episodes, args.traces == "all", str(dest)
+
+    for dest, robot_id, rows, blob in pool.imap_unordered(_work, tasks(), chunksize=2):
+        run = pending[dest]
+        run["rows"].extend(rows)
+        if blob is not None:
+            run["traces"][robot_id] = blob
+        run["left"] -= 1
+        if run["left"] == 0:
+            _write_run(Path(dest), run["history"], run["rows"], run["traces"])
+            del pending[dest]
+            print(f"{len(run['history'].id.unique())} robots, {len(run['rows'])} episodes in "
+                  f"{time.perf_counter() - run['t0']:.0f}s -> {dest}", flush=True)
 
 
 def merge(out_dir: Path) -> None:
@@ -238,9 +338,10 @@ def main() -> None:
                         help="top: the --top best survivors of each of --gens; all: every robot ever born, per run")
     parser.add_argument("--gens", type=int, nargs="+", default=[60])
     parser.add_argument("--top", type=int, default=5, help="best survivors per run and generation")
-    parser.add_argument("--episodes", type=int, default=3, help="perturbed episodes per weight set")
-    parser.add_argument("--traces", choices=["none", "ep0", "all"], default="none",
-                        help="--select all: save the 50 Hz traces of episode 0 or of every episode")
+    parser.add_argument("--episodes", type=int, default=3, help="perturbed episodes with the learned weights")
+    parser.add_argument("--init-episodes", type=int, default=1, help="perturbed episodes with the starting weights")
+    parser.add_argument("--traces", choices=["none", "all"], default="none",
+                        help="--select all: save every episode's 50 Hz state (traces.zip)")
     parser.add_argument("--shard", default="0/1", help="I/N: only every N-th run, starting at I")
     parser.add_argument("--force", action="store_true", help="--select all: redo runs already done")
     parser.add_argument("--merge", action="store_true", help="only merge the per-run episodes.csv")
@@ -259,14 +360,13 @@ def main() -> None:
     with Pool(args.workers) as pool:
         if args.select == "all":
             print(f"{len(runs)} runs (shard {args.shard})", flush=True)
-            for rep_dir in runs:
-                replay_run(pool, rep_dir, out, args)
+            replay_all(pool, runs, out, args)
             print(f"done in {time.perf_counter() - t0:.0f}s")
             return
         jobs = [j for js, _ in pool.starmap(select_robots, [(r, args.gens, args.top) for r in runs]) for j in js]
         print(f"{len(jobs)} robots from {len(runs)} runs", flush=True)
-        rows = [r for rs, _ in pool.imap_unordered(_work, [(j, args.episodes, "none") for j in jobs], chunksize=2)
-                for r in rs]
+        work = [(j, args.episodes, args.init_episodes, False, None) for j in jobs]
+        rows = [r for _, _, rs, _ in pool.imap_unordered(_work, work, chunksize=2) for r in rs]
     out.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(out / "episodes.csv", index=False)
     print(f"{len(rows)} episodes in {time.perf_counter() - t0:.0f}s -> {out / 'episodes.csv'}")
