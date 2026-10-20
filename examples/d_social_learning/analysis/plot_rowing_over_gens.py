@@ -79,14 +79,20 @@ def cond_title(budget: str, x: float) -> str:
     return f"{budget.removeprefix('ig')} CMA-ES gens, x={x:g}"
 
 
+def conditions_in(df: pd.DataFrame) -> list[tuple[str, float]]:
+    return [c for c in CONDITIONS if ((df.budget == c[0]) & (df.x == c[1])).any()]
+
+
 def schemes_in(df: pd.DataFrame) -> list[str]:
     return [s for s in SCHEME_ORDER if s in set(df.scheme)]
 
 
-def load(behavior_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load(behavior_dir: Path, schemes: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Robot labels (one row per run x id x weights) and the runs' histories."""
     eps, hists = [], []
     for p in sorted((behavior_dir / "runs").glob("ig*/*/x*/k*/rep_*/episodes.csv")):
+        if schemes and p.parts[-5] not in schemes:
+            continue
         ep = pd.read_csv(p, usecols=RUN + ["id", "birth_gen", "weights", "episode", "rowing_label"])
         eps.append(ep)
         hists.append(pd.read_csv(p.parent / "history.csv").assign(**ep.iloc[0][RUN].to_dict()))
@@ -140,11 +146,11 @@ def plot_shares(sh: pd.DataFrame, title: str, out: Path, dpi: int) -> None:
     rows = [("rowing_share", "rowing\n(share of all robots)"),
             ("rowing_share_judgeable", "rowing\n(share of judgeable robots)"),
             ("alternating_share", "alternating\n(share of all robots)")]
-    schemes = schemes_in(sh)
-    fig, axes = plt.subplots(len(rows), len(CONDITIONS), figsize=(4.2 * len(CONDITIONS), 2.9 * len(rows)),
+    schemes, conditions = schemes_in(sh), conditions_in(sh)
+    fig, axes = plt.subplots(len(rows), len(conditions), figsize=(4.2 * len(conditions), 2.9 * len(rows)),
                              sharex=True, sharey=True, squeeze=False)
     for r, (col, ylabel) in enumerate(rows):
-        for c, (budget, x) in enumerate(CONDITIONS):
+        for c, (budget, x) in enumerate(conditions):
             ax = axes[r, c]
             style(ax)
             for scheme in schemes:
@@ -173,12 +179,12 @@ def plot_shares(sh: pd.DataFrame, title: str, out: Path, dpi: int) -> None:
 
 
 def plot_composition(sh: pd.DataFrame, title: str, out: Path, dpi: int) -> None:
-    schemes = schemes_in(sh)
+    schemes, conditions = schemes_in(sh), conditions_in(sh)
     cols = [f"class_{c}" for c in CLASSES]
-    fig, axes = plt.subplots(len(schemes), len(CONDITIONS), figsize=(4.2 * len(CONDITIONS), 2.0 * len(schemes)),
+    fig, axes = plt.subplots(len(schemes), len(conditions), figsize=(4.2 * len(conditions), 2.0 * len(schemes) + 0.6),
                              sharex=True, sharey=True, squeeze=False)
     for r, scheme in enumerate(schemes):
-        for c, (budget, x) in enumerate(CONDITIONS):
+        for c, (budget, x) in enumerate(conditions):
             ax = axes[r, c]
             style(ax)
             ax.grid(False)
@@ -208,41 +214,50 @@ def plot_composition(sh: pd.DataFrame, title: str, out: Path, dpi: int) -> None:
                 ax.set_xlabel("generation", fontsize=9, color=INK_2)
     handles = [plt.Rectangle((0, 0), 1, 1, color=CLASS_COLOR[k]) for k in CLASSES]
     fig.legend(handles, [CLASS_LEGEND.get(k, k) for k in CLASSES], loc="lower center", ncol=len(CLASSES),
-               frameon=False, fontsize=8.5, labelcolor=INK_2, bbox_to_anchor=(0.5, -0.005))
+               frameon=False, fontsize=8.5, labelcolor=INK_2, bbox_to_anchor=(0.5, 0.0))
     fig.suptitle(f"Gait classes over evolution: {title} (reps pooled; numbers: share in the last generation)",
                  fontsize=11, color=INK)
-    fig.tight_layout(rect=(0, 0.02, 1, 1))
+    fig.tight_layout(rect=(0, 0.5 / fig.get_figheight(), 1, 1))  # room for the legend
     fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out}")
 
 
 def plot_learned_vs_init(learned: pd.DataFrame, init: pd.DataFrame, title: str, out: Path, dpi: int) -> None:
-    """Rowing share per scheme, learned vs starting weights; each rep is one run (budgets and x pooled)."""
+    """Rowing share per scheme, learned vs starting weights; each rep is one run (budgets and x pooled).
+    With a single scheme, one panel per budget x selection weight instead."""
     schemes = schemes_in(learned)
-    ncols = 4
-    nrows = -(-len(schemes) // ncols)
+    if len(schemes) == 1:
+        panels = [(schemes[0], c) for c in conditions_in(learned)]
+        pooled = f"{label(schemes[0])}, mean ± 1 SEM over reps"
+    else:
+        panels = [(s, None) for s in schemes]
+        pooled = "mean ± 1 SEM over runs, budgets and x pooled"
+    ncols = min(4, len(panels))
+    nrows = -(-len(panels) // ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(3.6 * ncols, 2.8 * nrows), sharex=True, sharey=True,
                              squeeze=False)
-    for ax in axes.flat[len(schemes):]:
+    for ax in axes.flat[len(panels):]:
         ax.set_visible(False)
-    for ax, scheme in zip(axes.flat, schemes):
+    for ax, (scheme, cond) in zip(axes.flat, panels):
         style(ax)
         color = SCHEME_COLORS[scheme]
         for sh, alpha, name in ((init, 0.45, "starting weights"), (learned, 1.0, "learned weights")):
-            df = sh[sh.scheme == scheme].assign(rep=lambda d: d[RUN].astype(str).agg("/".join, axis=1))
+            df = sh[sh.scheme == scheme]
+            if cond is not None:
+                df = df[(df.budget == cond[0]) & (df.x == cond[1])]
+            df = df.assign(rep=lambda d: d[RUN].astype(str).agg("/".join, axis=1))
             gens, m, sem = gen_curve(df, "rowing_share")
             ax.fill_between(gens, m - sem, m + sem, color=color, alpha=CI_ALPHA * alpha, linewidth=0)
             ax.plot(gens, m, color=color, alpha=alpha, linewidth=1.8, ls="-" if alpha == 1.0 else "--", label=name)
-        ax.set_title(label(scheme), fontsize=10, color=INK)
-        ax.set_ylim(0, None)
+        ax.set_title(cond_title(*cond) if cond is not None else label(scheme), fontsize=10, color=INK)
+    axes[0, 0].set_ylim(bottom=0)  # after plotting, so the shared top fits every panel
     for ax in axes[:, 0]:
         ax.set_ylabel("rowing (share of all robots)", fontsize=9, color=INK_2)
     for ax in axes[-1]:
         ax.set_xlabel("generation", fontsize=9, color=INK_2)
     axes[0, 0].legend(fontsize=8, frameon=False, labelcolor=INK_2, loc="upper left")
-    fig.suptitle(f"Rowing with learned vs starting weights: {title} (mean ± 1 SEM over runs, budgets and x pooled)",
-                 fontsize=11, color=INK)
+    fig.suptitle(f"Rowing with learned vs starting weights: {title} ({pooled})", fontsize=11, color=INK)
     fig.tight_layout()
     fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
@@ -270,11 +285,14 @@ def main() -> None:
     parser.add_argument("--behavior-dir", type=Path, default=Path("__data__/social/behavior_zoo_all"))
     parser.add_argument("--population", choices=["survivors", "offspring"], default="survivors")
     parser.add_argument("--weights", choices=["learned", "init"], default="learned")
+    parser.add_argument("--schemes", nargs="+", default=None,
+                        help="only these schemes (run-directory names, e.g. darwinian similar_TOPDOWN)")
     parser.add_argument("--dpi", type=int, default=150)
     args = parser.parse_args()
 
-    rob, hist = load(args.behavior_dir)
-    out = args.behavior_dir / "rowing" / f"{args.population}_{args.weights}"
+    rob, hist = load(args.behavior_dir, args.schemes)
+    tag = f"{args.population}_{args.weights}" + ("_" + "+".join(args.schemes) if args.schemes else "")
+    out = args.behavior_dir / "rowing" / tag
     out.mkdir(parents=True, exist_ok=True)
     pop = population(rob, hist, args.population)
     by_weights = {w: shares_by_gen(pop[pop.weights == w]) for w in ("learned", "init")}
