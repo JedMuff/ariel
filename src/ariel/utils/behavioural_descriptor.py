@@ -285,9 +285,14 @@ def _label(ind: dict, total_stroke: float) -> str:
     return "mixed"
 
 
-def rowing(P: np.ndarray, Q: np.ndarray, dt: float) -> dict:
+def rowing(P: np.ndarray, Q: np.ndarray, dt: float, detail: bool = False):
     """Rowing metrics and label of one episode's post-settle poses (T, B, 3/4),
-    core first. See rowing_detect.py's docstring in ariel_symmetry."""
+    core first. See rowing_detect.py's docstring in ariel_symmetry.
+
+    With detail=True returns (metrics, per-pair metrics, detail): the pairs'
+    amplitudes, periodicities, frequencies, sync, phase lag, stroke shares and
+    weight, and the split-plane frame (heading_rel, sag, rest, side, moving,
+    amp, pairs, dt) that the rowing review page draws."""
     i0 = round(TRANSIENT_S / dt)
     P, Q = P[i0:], Q[i0:]
     R = quat_to_mat(Q[:, 0])
@@ -340,6 +345,10 @@ def rowing(P: np.ndarray, Q: np.ndarray, dt: float) -> dict:
         lag = _phase_lag(xl, xr, fmean, dt)
         pair_rows.append({
             "left": l, "right": r, "freq_match": freq_match, "cyclic": cyclic, "mirror_sync": sync,
+            "amp_l": float(amp[l]), "amp_r": float(amp[r]), "amp_ratio": ratio,
+            "periodicity_l": float(acl), "periodicity_r": float(acr), "freq_l": float(fl), "freq_r": float(fr),
+            "phase_lag": lag, "stroke_fore": float(share[0]), "stroke_lat": float(share[1]),
+            "stroke_up": float(share[2]), "rest_dist": float(np.linalg.norm(rest[l] - _mirror(rest[r]))),
             "pair_kind": ("lateral" if ok and share[1] >= LAT_MAX else
                           "no_sweep" if ok and lag < LAG_ROW and share[0] < FORE_MIN else
                           "rowing" if ok and lag < LAG_ROW else
@@ -375,4 +384,8 @@ def rowing(P: np.ndarray, Q: np.ndarray, dt: float) -> dict:
     a, mismatch = _morph_plane(rest[1:, :2], np.rad2deg(theta - split))
     ind["morph_plane_offset_deg"] = _axial_diff_deg(a, theta - split) if np.isfinite(a) else float("nan")
     ind["morph_plane_mismatch_m"] = mismatch
-    return ind
+    if not detail:
+        return ind
+    return ind, pair_rows, {"heading_rel": float(theta - split), "sag": sag, "rest": rest, "side": side,
+                            "moving": moving, "amp": amp, "pairs": [(p["left"], p["right"]) for p in pair_rows],
+                            "dt": dt}
