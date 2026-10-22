@@ -36,15 +36,16 @@ import numpy as np
 import genome_adapter
 from shared import (
     CONTROL_STEP_FREQ,
+    EVAL_PROFILES,
+    SWEEP_PROFILE,
+    EvalProfile,
     CTRL_ALPHA,
     FORWARD_AXIS,
     HEIGHT_PENALTY_THRESHOLD,
     JERK_PENALTY_WEIGHT,
     JERK_THRESHOLD,
-    LOCO_DURATION,
     ROWING_RECORD_EVERY_N,
     SETTLE_DURATION,
-    TURN_DURATION,
     _rotate_2d,
     build_loco_world_for_body,
     floor_id,
@@ -61,25 +62,26 @@ from shared import (
 N_DIRECTIONS = 5  # must match gecko_skill_tasks.py
 
 
-def skills_for_task(task: str) -> list[tuple[str, dict]]:
+def skills_for_task(task: str, profile: EvalProfile = SWEEP_PROFILE) -> list[tuple[str, dict]]:
     """Duplicated from gecko_skill_tasks.py:_skills_for_task (importing that
     module would trigger its own module-level argparse.parse_args() and
     fail). Each entry is (skill_name, reward_spec) where reward_spec is a
-    dict describing the SkillReward used at training time.
+    dict describing the SkillReward used at training time; durations come
+    from the run's eval profile (resolve_eval_profile).
     """
     if task == "forward":
-        return [("fwd", {"kind": "translate", "angle_deg": 0.0, "duration": LOCO_DURATION})]
+        return [("fwd", {"kind": "translate", "angle_deg": 0.0, "duration": profile.loco_duration})]
     if task == "multidirection":
         step = 360.0 / N_DIRECTIONS
         return [
-            (f"dir{i}", {"kind": "translate", "angle_deg": i * step, "duration": LOCO_DURATION})
+            (f"dir{i}", {"kind": "translate", "angle_deg": i * step, "duration": profile.loco_duration})
             for i in range(N_DIRECTIONS)
         ]
     if task == "turn_avg":
         return [
-            ("fwd", {"kind": "translate", "angle_deg": 0.0, "duration": LOCO_DURATION}),
-            ("left", {"kind": "rotate", "turn_sign": +1, "duration": TURN_DURATION}),
-            ("right", {"kind": "rotate", "turn_sign": -1, "duration": TURN_DURATION}),
+            ("fwd", {"kind": "translate", "angle_deg": 0.0, "duration": profile.loco_duration}),
+            ("left", {"kind": "rotate", "turn_sign": +1, "duration": profile.turn_duration}),
+            ("right", {"kind": "rotate", "turn_sign": -1, "duration": profile.turn_duration}),
         ]
     raise ValueError(f"Unknown task: {task!r}")
 
@@ -109,6 +111,14 @@ def resolve_replay_config(ckpt_dir: Path, max_modules: Optional[int] = None) -> 
     control_step_freq = run_config.get("control_step_freq", CONTROL_STEP_FREQ)
     brain_kind = run_config.get("brain", "ann")
     return to_spec_fn, control_step_freq, brain_kind
+
+
+def resolve_eval_profile(ckpt_dir: Path) -> EvalProfile:
+    """The shared.EvalProfile the checkpoint's run trained with
+    (gecko_skill_tasks.py --eval-profile; runs predating it used "sweep")."""
+    run_config_path = ckpt_dir.parent.parent / "run_config.json"
+    run_config = json.loads(run_config_path.read_text()) if run_config_path.exists() else {}
+    return EVAL_PROFILES[run_config.get("eval_profile", "sweep")]
 
 
 def run_rowing_penalty(ckpt_dir: Path) -> bool:

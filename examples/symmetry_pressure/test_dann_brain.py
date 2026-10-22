@@ -200,3 +200,19 @@ def test_sweep_profile_is_the_original_constants():
     assert (SWEEP_PROFILE.cma_sigma, SWEEP_PROFILE.cma_popsize, SWEEP_PROFILE.cma_init_scale) == (
         shared.CMA_SIGMA, shared.CMA_POPSIZE, shared.CMA_INIT_SCALE)
     assert not SWEEP_PROFILE.normalised
+
+
+def test_replay_with_recorder_matches_training_eval():
+    genotype, to_spec = _first_body()
+    reward = SkillReward(kind="rotate", turn_sign=-1, duration=DSOCIAL_ZOO.turn_duration)
+    shared._skill_worker_init(0, reward, genotype, to_spec, 25, "dann", profile=DSOCIAL_ZOO)  # noqa: SLF001
+    params = np.random.default_rng(3).normal(0, 1, shared._skill_worker_ctx["brain"].num_params)  # noqa: SLF001
+    trained = shared._skill_worker_eval(params.tolist())  # noqa: SLF001
+
+    model, data = build_loco_world_for_body(genotype, to_spec)
+    brain = make_brain_for_model("dann", model, data, params.astype(np.float32))
+    seen = []
+    replayed = shared.run_skill_episode(model, data, brain, reward, 25, DSOCIAL_ZOO,
+                                        recorder=lambda _d, raw: seen.append(raw))
+    assert replayed == trained
+    assert seen and seen[-1] == replayed[1]["raw_score"]

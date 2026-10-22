@@ -7,18 +7,18 @@
 # budget 30, --repeat-evals), but each skill trains the DANN (--brain dann,
 # dann_pos_hinge_h16: one 705-param MLP shared by every hinge) under
 # --eval-profile dsocial_zoo (shared.DSOCIAL_ZOO): d_social_learning's zoo
-# preset (zoo modules, 15 s episodes at 20 Hz control) and inner CMA-ES
-# (20 gens, popsize 16, sigma 0.5 from x0 = 0), with every skill normalised to
+# preset (zoo modules, 15 s episodes at 20 Hz control; 5 s for turns) and inner CMA-ES
+# (10 gens, popsize 20, sigma 0.5 from x0 = 0), with every skill normalised to
 # [0, 1] (translation over 0.5 m/s x duration, turns as net yaw up to 360 deg,
 # ending the episode at a full turn).
 #
 # Tasks:   forward | multidirection | turn_avg  (examples/symmetry_pressure/gecko_skill_tasks.py)
 # Genomes: tree | tree_symmetric | cppn          (examples/symmetry_pressure/genome_adapter.py)
 #
-# Timing (local, 16 workers): ~5-9 s per translate skill, ~8-12 s per turn
-# skill, so the slowest task (multidirection, 5 skills) needs ~11 h for its
-# 10 + 30 x 30 body trainings. --time-limit stops after the generation in
-# progress at 20 h.
+# Timing (local, tree_symmetric, 20 workers per run with three runs side by
+# side): 30 generations took 30 min (forward); turn_avg took 57 min for 20,
+# so ~1.4 h for 30; multidirection ran ~5.4 min per generation, so ~2.7 h.
+# --time-limit stops after the generation in progress at 7 h.
 #
 # Usage:
 #   sbatch slurm/run_symmetry_pressure_sweep_dann.sh
@@ -30,8 +30,8 @@
 #SBATCH --job-name=ariel-sympress-dann
 #SBATCH --output=out_files/ariel-sympress-dann-%A_%a.out
 #SBATCH --error=out_files/ariel-sympress-dann-%A_%a.err
-#SBATCH --time=24:00:00
-#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+#SBATCH --cpus-per-task=20
 #SBATCH --mem=16G
 #SBATCH --array=0-44
 #SBATCH --nodelist=node02,node03
@@ -128,7 +128,7 @@ srun bash -c "
         --seed $SEED \
         --brain dann \
         --eval-profile dsocial_zoo \
-        --time-limit 72000
+        --time-limit 25200
 "
 
 echo "Finished: $(date)"

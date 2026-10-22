@@ -39,6 +39,15 @@ Data saved per individual during evolution (run_data.jsonl):
   yz_symmetry, genome_hash, eval_time_s
 """
 
+import os
+
+# One BLAS/OpenMP thread per process, set before numpy loads: otherwise the
+# parent's CMA-ES linear algebra on the DANN's 705-dim covariance spins up an
+# OpenBLAS thread per machine core (64 here, also inside a 20-CPU Slurm job),
+# which starves the --brain-workers simulation processes (~3.5x slower).
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 import argparse
 import gc
 import json
@@ -94,7 +103,7 @@ parser.add_argument("--lam",           type=int,   default=20,  help="lambda")
 parser.add_argument("--skill-budget",  type=int,   default=None,
                     help="CMA-ES generations per trained skill (default: the eval profile's, "
                          "100 for sweep = gecko_food_skills.py's LOCO_BUDGET/TURN_BUDGET, "
-                         "20 for dsocial_zoo)")
+                         "10 for dsocial_zoo)")
 parser.add_argument("--brain-workers", type=int,   default=16,
                     help="Parallel workers for each skill's CMA-ES population "
                          "(matches CMA-ES popsize=16 by default)")
@@ -118,7 +127,7 @@ parser.add_argument("--brain",         choices=BRAIN_KINDS, default="ann",
 parser.add_argument("--eval-profile",  choices=list(EVAL_PROFILES), default="sweep",
                     help="Skill episodes, penalties and inner CMA-ES (see shared.EvalProfile): "
                          "'sweep' = the original sweep's; 'dsocial_zoo' = d_social_learning's zoo "
-                         "preset (zoo modules, 15 s at 20 Hz, 20 CMA-ES gens from x0 = 0) with "
+                         "preset (zoo modules, 15 s at 20 Hz, 5 s turns, 10 CMA-ES gens x 20 from x0 = 0) with "
                          "every skill normalised to [0, 1] and turns scored as net yaw up to 360 deg")
 parser.add_argument("--rowing-penalty", action="store_true",
                     help="Scale a skill's forward displacement by 1 - rowing_frac, the "

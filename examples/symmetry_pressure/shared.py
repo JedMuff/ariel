@@ -1118,10 +1118,10 @@ class EvalProfile:
     SWEEP_PROFILE is this module's constants (the original symmetry-pressure
     sweep). DSOCIAL_ZOO matches /home/jed/workspaces/ariel's
     examples/d_social_learning: sim_ariel/evaluator.py's "zoo" preset (zoo
-    modules, 15 s episodes at 20 Hz control, alpha and jerk constants rescaled
+    modules, 15 s translate episodes at 20 Hz control (turns: 5 s), alpha and jerk constants rescaled
     from the 9-step to the 25-step control period, spawn-height penalty above
-    0.5 m) and experiment.py's inner CMA-ES (20 generations, popsize 16,
-    sigma 0.5 from x0 = 0). It also normalises every skill to [0, 1]
+    0.5 m) and its inner CMA-ES from x0 = 0 with sigma 0.5 (experiment.py),
+    10 generations of popsize 20 (run_social_zoo_budget.sh's ig10 budget). It also normalises every skill to [0, 1]
     (translate_score, turn_score) before the penalties are subtracted.
     """
 
@@ -1144,12 +1144,12 @@ class EvalProfile:
 _DSOCIAL_STEP_RATIO = 25 / 9  # zoo control period / legacy control period
 SWEEP_PROFILE = EvalProfile()
 DSOCIAL_ZOO = EvalProfile(
-    loco_duration=15.0, turn_duration=15.0, control_step_freq=25, skill_budget=20, zoo_modules=True,
+    loco_duration=15.0, turn_duration=5.0, control_step_freq=25, skill_budget=10, zoo_modules=True,
     ctrl_alpha=1.0 - (1.0 - CTRL_ALPHA) ** _DSOCIAL_STEP_RATIO,
     jerk_weight=JERK_PENALTY_WEIGHT / _DSOCIAL_STEP_RATIO,
     jerk_threshold=JERK_THRESHOLD * _DSOCIAL_STEP_RATIO,
     height_threshold=0.5, height_at_spawn=True,
-    cma_sigma=0.5, cma_popsize=16, cma_init_scale=0.0,
+    cma_sigma=0.5, cma_popsize=20, cma_init_scale=0.0,
     normalised=True,
 )
 EVAL_PROFILES = {"sweep": SWEEP_PROFILE, "dsocial_zoo": DSOCIAL_ZOO}
@@ -1280,24 +1280,31 @@ def _skill_worker_init(
 
 
 def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]]:
-    """(fitness, info) of one candidate. info holds raw_score (displacement or
-    accumulated yaw), score (the normalised skill score, with a normalised
-    profile) and, with the rowing penalty on, rowing_frac and rowing_label.
+    """run_skill_episode for one candidate in a skill-training worker."""
+    assert _skill_worker_ctx is not None
+    ctx = _skill_worker_ctx
+    ctx["brain"].set_params(np.array(weights_list, dtype=np.float32))
+    return run_skill_episode(ctx["model"], ctx["data"], ctx["brain"], ctx["reward"],
+                             ctx["control_step_freq"], ctx["profile"], ctx["rowing_bodies"])
+
+
+def run_skill_episode(
+    model: mujoco.MjModel, data: mujoco.MjData, brain: Any, reward: SkillReward,
+    control_step_freq: int, profile: EvalProfile = SWEEP_PROFILE,
+    rowing_bodies: Optional[list[int]] = None,
+    recorder: Optional[Callable[[mujoco.MjData, float], None]] = None,
+) -> tuple[float, dict[str, Any]]:
+    """(fitness, info) of one skill episode of a brain whose params are set.
+    info holds raw_score (displacement or accumulated yaw), score (the
+    normalised skill score, with a normalised profile) and, with
+    rowing_bodies given (the rowing penalty), rowing_frac and rowing_label.
 
     With a normalised profile a turn accumulates net signed yaw (turning back
     cancels) and the episode ends once it reaches TURN_TARGET; otherwise only
     yaw in the target direction counts and the episode always runs its full
-    duration."""
-    assert _skill_worker_ctx is not None
-    ctx       = _skill_worker_ctx
-    model     = ctx["model"]
-    data      = ctx["data"]
-    brain     = ctx["brain"]
-    reward: SkillReward = ctx["reward"]
-    control_step_freq: int = ctx["control_step_freq"]
-    rowing_bodies: Optional[list[int]] = ctx["rowing_bodies"]
-    profile: EvalProfile = ctx["profile"]
-    brain.set_params(np.array(weights_list, dtype=np.float32))
+    duration. recorder, if given, is called as recorder(data, raw_so_far)
+    after every post-settle physics step (videos); it must not change data.
+    """
     if hasattr(brain, "reset"):
         brain.reset()
     mujoco.mj_resetData(model, data)
@@ -1324,6 +1331,11 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
     else:
         r_prev      = np.array(data.xmat[core_id]).reshape(3, 3).copy()
         accumulated = 0.0
+
+    def raw_score() -> float:
+        if reward.kind == "translate":
+            return float(np.dot(np.array([data.qpos[0], data.qpos[1]]) - xy0, reward_axis))
+        return accumulated
 
     episode_end = SETTLE_DURATION + reward.duration
     while data.time < episode_end:
@@ -1352,6 +1364,8 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
         if rowing_bodies is not None and sim_step % ROWING_RECORD_EVERY_N == 0:
             poses.append(data.xpos[rowing_bodies].copy())
             quats.append(data.xquat[rowing_bodies].copy())
+        if recorder is not None:
+            recorder(data, raw_score())
 
         step += 1
         sim_step += 1
@@ -1362,12 +1376,8 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
     jerk_penalty = profile.jerk_weight * mean_jerk if mean_jerk >= profile.jerk_threshold else 0.0
 
     height_penalty = initial_height if initial_height > profile.height_threshold else 0.0
-    if reward.kind == "translate":
-        xy_now = np.array([data.qpos[0], data.qpos[1]])
-        raw    = float(np.dot(xy_now - xy0, reward_axis))
-    else:
-        raw = accumulated
-    info: dict[str, Any] = {"raw_score": raw}
+    raw = raw_score()
+    info: dict[str, Any] = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty}
     score = raw
     if rowing_bodies is not None:
         info.update(rowing_info(poses, quats, ROWING_RECORD_EVERY_N * float(model.opt.timestep)))

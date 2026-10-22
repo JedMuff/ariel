@@ -22,28 +22,20 @@ import mujoco
 import numpy as np
 from rich.console import Console
 
-from behavior_common import resolve_replay_config, skills_for_task
+from behavior_common import resolve_eval_profile, resolve_replay_config, skills_for_task
 from shared import (
     CONTROL_STEP_FREQ,
-    CTRL_ALPHA,
-    HEIGHT_PENALTY_THRESHOLD,
-    JERK_PENALTY_WEIGHT,
-    JERK_THRESHOLD,
     SETTLE_DURATION,
-    FORWARD_AXIS,
+    SWEEP_PROFILE,
+    EvalProfile,
+    SkillReward,
     build_loco_world_for_body,
     genome_to_spec,
     make_brain_for_model,
-    signed_vertical_yaw_delta,
+    run_skill_episode,
 )
 
 console = Console()
-
-def _rotate_2d(v: np.ndarray, angle_deg: float) -> np.ndarray:
-    theta = math.radians(angle_deg)
-    c, s = math.cos(theta), math.sin(theta)
-    return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1]])
-
 
 def _make_tracking_camera(core_pos: np.ndarray) -> mujoco.MjvCamera:
     cam = mujoco.MjvCamera()
@@ -76,115 +68,59 @@ def render_skill_episode(
     to_spec_fn=genome_to_spec,
     control_step_freq: int = CONTROL_STEP_FREQ,
     brain_kind: str = "ann",
+    profile: EvalProfile = SWEEP_PROFILE,
 ) -> dict:
+    """Replay one skill with shared.run_skill_episode -- the training episode
+    itself, so the run's eval profile (durations, smoothing, penalties, score
+    normalisation, a turn's early end) applies -- grabbing frames from its
+    recorder hook."""
     model, data = build_loco_world_for_body(genome, to_spec_fn=to_spec_fn)
-    from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
-
     brain = make_brain_for_model(brain_kind, model, data, weights.astype(np.float32))
+    reward = SkillReward(**reward_spec)
 
     renderer = mujoco.Renderer(model, height=render_height, width=render_width)
     core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
     frame_every = max(1, round(1.0 / (model.opt.timestep * render_fps)))
-
-    mujoco.mj_resetData(model, data)
-    while data.time < SETTLE_DURATION:
-        mujoco.mj_step(model, data)
-
-    initial_height = float(data.xpos[core_id, 2])
-
-    kind = reward_spec["kind"]
-    duration = reward_spec["duration"]
-    if kind == "translate":
-        xy0 = np.array([data.qpos[0], data.qpos[1]])
-        reward_axis = _rotate_2d(FORWARD_AXIS, reward_spec["angle_deg"])
-    else:
-        r_prev = np.array(data.xmat[core_id]).reshape(3, 3).copy()
-        turn_sign = reward_spec["turn_sign"]
-        accumulated = 0.0
-
-    step = 0
-    action = np.zeros(model.nu)
     # (frame, metric_line, active_time) -- the fitness line is drawn in a
     # second pass below, once the full episode has run and the true
-    # per-skill fitness is known.
+    # per-skill fitness is known. meta['fitness'] is the checkpoint's
+    # task-wide mean across every trained skill, not this episode's fitness.
     pending_frames: list[tuple[np.ndarray, str, float]] = []
-    episode_end = SETTLE_DURATION + duration
+    n_steps = 0
 
-    # Tracked purely to recompute this skill's own true (penalized) fitness
-    # for the overlay -- see shared._skill_worker_eval, whose formula this
-    # mirrors exactly. meta['fitness'] is the checkpoint's task-wide mean
-    # across every trained skill (e.g. 5 directions for multidirection, 3 for
-    # turn_avg), not this one episode's fitness, so it must not be displayed
-    # as if it were.
-    prev_ctrl: np.ndarray | None = None
-    jerk_sum = 0.0
-    ctrl_step = 0
+    def record(d: mujoco.MjData, raw: float) -> None:
+        nonlocal n_steps
+        n_steps += 1
+        if n_steps % frame_every:
+            return
+        renderer.update_scene(d, camera=_make_tracking_camera(d.xpos[core_id].copy()))
+        frame_bgr = cv2.cvtColor(renderer.render().copy(), cv2.COLOR_RGB2BGR)
+        if reward.kind == "translate":
+            metric_line = f"Displacement (angle={reward.angle_deg:.0f} deg): {raw:+.3f} m"
+        else:
+            direction_label = "CCW (left)" if reward.turn_sign == +1 else "CW (right)"
+            metric_line = f"Yaw accumulated ({direction_label}): {math.degrees(raw):.1f} deg"
+        pending_frames.append((frame_bgr, metric_line, max(0.0, d.time - SETTLE_DURATION)))
 
-    while data.time < episode_end:
-        if step % control_step_freq == 0:
-            state = get_robot_state(data).astype(np.float32)
-            raw_action = brain.act(data, state)
-            action = np.clip(
-                action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
-                -math.pi / 2, math.pi / 2,
-            )
-            if prev_ctrl is not None:
-                jerk_sum += float(np.mean(np.abs(action - prev_ctrl)))
-            prev_ctrl = action.copy()
-            ctrl_step += 1
-
-        data.ctrl[:] = action
-        mujoco.mj_step(model, data)
-
-        if kind == "rotate":
-            r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
-            delta = signed_vertical_yaw_delta(r_prev, r_curr)
-            accumulated += max(0.0, delta * turn_sign)
-            r_prev = r_curr.copy()
-
-        step += 1
-
-        if step % frame_every == 0:
-            core_pos = data.xpos[core_id].copy()
-            cam = _make_tracking_camera(core_pos)
-            renderer.update_scene(data, camera=cam)
-            frame_bgr = cv2.cvtColor(renderer.render().copy(), cv2.COLOR_RGB2BGR)
-
-            active_time = max(0.0, data.time - SETTLE_DURATION)
-            if kind == "translate":
-                xy_now = np.array([data.qpos[0], data.qpos[1]])
-                metric_line = f"Displacement (angle={reward_spec['angle_deg']:.0f} deg): " \
-                              f"{float(np.dot(xy_now - xy0, reward_axis)):+.3f} m"
-            else:
-                direction_label = "CCW (left)" if turn_sign == +1 else "CW (right)"
-                metric_line = f"Yaw accumulated ({direction_label}): {math.degrees(accumulated):.1f} deg"
-
-            pending_frames.append((frame_bgr, metric_line, active_time))
-
+    skill_fitness, info = run_skill_episode(model, data, brain, reward, control_step_freq, profile,
+                                            recorder=record)
     renderer.close()
 
     if not pending_frames:
         console.log(f"  [red]No frames captured for skill={skill_name}[/red]")
         return {}
 
-    mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
-    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
-    height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-    if kind == "translate":
-        xy_now = np.array([data.qpos[0], data.qpos[1]])
-        raw = float(np.dot(xy_now - xy0, reward_axis))
-    else:
-        raw = accumulated
-    skill_fitness = -(raw - height_penalty - jerk_penalty)
-
+    score_line = (f"score={info['score']:.3f}  height_pen={info['height_penalty']:.2f}  "
+                  f"jerk_pen={info['jerk_penalty']:.2f}" if "score" in info else None)
     frames: list[np.ndarray] = []
     for frame_bgr, metric_line, active_time in pending_frames:
-        _overlay(frame_bgr, [
+        _overlay(frame_bgr, [line for line in [
             f"skill={skill_name}  fitness={skill_fitness:.3f}",
-            f"t={active_time:.1f} / {duration:.0f}s",
+            score_line,
+            f"t={active_time:.1f} / {reward.duration:.0f}s",
             metric_line,
             f"task-mean fitness (all skills)={meta.get('fitness', float('nan')):.3f}",
-        ])
+        ] if line is not None])
         frames.append(frame_bgr)
 
     h, w = frames[0].shape[:2]
@@ -194,8 +130,8 @@ def render_skill_episode(
         writer.write(fr)
     writer.release()
 
-    console.log(f"  Saved -> {out_path}  skill_fitness={skill_fitness:.3f}")
-    return {"skill": skill_name, "video": str(out_path), "skill_fitness": skill_fitness}
+    console.log(f"  Saved -> {out_path}  skill_fitness={skill_fitness:.3f}  {info}")
+    return {"skill": skill_name, "video": str(out_path), "skill_fitness": skill_fitness, **info}
 
 
 def render_checkpoint(
@@ -215,9 +151,10 @@ def render_checkpoint(
         raise ValueError(f"{ckpt_dir}/meta.json has no 'task' field")
 
     to_spec_fn, control_step_freq, brain_kind = resolve_replay_config(ckpt_dir, max_modules=max_modules)
+    profile = resolve_eval_profile(ckpt_dir)
 
     results = []
-    for skill_name, reward_spec in skills_for_task(task):
+    for skill_name, reward_spec in skills_for_task(task, profile):
         weights_path = ckpt_dir / f"{skill_name}_weights.npy"
         if not weights_path.exists():
             console.log(f"  [yellow]{skill_name}: weights not found at {weights_path} — skipping[/yellow]")
@@ -228,7 +165,7 @@ def render_checkpoint(
             genome, weights, reward_spec, skill_name, meta, out_path,
             render_fps=render_fps, render_height=render_height, render_width=render_width,
             to_spec_fn=to_spec_fn, control_step_freq=control_step_freq,
-            brain_kind=brain_kind,
+            brain_kind=brain_kind, profile=profile,
         )
         if res:
             results.append(res)
