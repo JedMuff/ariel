@@ -22,6 +22,12 @@ Inner loop:  One or more separate CMA-ES runs per body via
                    (same reward primitives as gecko_food_skills.py's
                    loco/left/right). Body fitness = mean of the 3.
 
+--eval-profile dsocial_zoo (shared.DSOCIAL_ZOO) normalises every skill to
+[0, 1] before the jerk/height penalties: translation over 0.5 m/s x duration,
+turns as net signed yaw over 360 degrees (the episode ends at a full turn), so
+multidirection and turn_avg average comparable numbers. Fitness stays
+minimised (= -mean skill objective).
+
 Unlike gecko_food_skills.py, there is no loco-fitness gate here: every
 configured skill is always trained for every individual, since the point of
 these tasks is a genuine average across skills rather than a gated pipeline.
@@ -38,6 +44,7 @@ import gc
 import json
 import random
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
@@ -52,9 +59,7 @@ from ariel.ec.genotypes.tree.tying import tied_fraction
 import genome_adapter
 from shared import (
     BRAIN_KINDS,
-    CONTROL_STEP_FREQ,
-    LOCO_DURATION,
-    TURN_DURATION,
+    EVAL_PROFILES,
     SkillReward,
     nsga2_survivor_selection,
     train_skill_for_body,
@@ -86,9 +91,10 @@ parser.add_argument("--tie-prob",      type=float, default=genome_adapter.DEFAUL
 parser.add_argument("--budget",        type=int,   default=40)
 parser.add_argument("--pop",           type=int,   default=20,  help="mu")
 parser.add_argument("--lam",           type=int,   default=20,  help="lambda")
-parser.add_argument("--skill-budget",  type=int,   default=100,
-                    help="CMA-ES generations per trained skill (matches "
-                         "gecko_food_skills.py's LOCO_BUDGET/TURN_BUDGET)")
+parser.add_argument("--skill-budget",  type=int,   default=None,
+                    help="CMA-ES generations per trained skill (default: the eval profile's, "
+                         "100 for sweep = gecko_food_skills.py's LOCO_BUDGET/TURN_BUDGET, "
+                         "20 for dsocial_zoo)")
 parser.add_argument("--brain-workers", type=int,   default=16,
                     help="Parallel workers for each skill's CMA-ES population "
                          "(matches CMA-ES popsize=16 by default)")
@@ -100,13 +106,20 @@ parser.add_argument("--strategy-type",
                     default="plus")
 parser.add_argument("--repeat-evals",  action="store_true",
                     help="Re-evaluate parents each generation (plus strategy only)")
-parser.add_argument("--control-step-freq", type=int, default=CONTROL_STEP_FREQ,
+parser.add_argument("--control-step-freq", type=int, default=None,
                     help="Physics steps between controller updates (physics runs at "
-                         "500Hz, so 9 = ~55.6Hz, 50 = 10Hz, 100 = 5Hz)")
+                         "500Hz, so 9 = ~55.6Hz, 25 = 20Hz, 50 = 10Hz; default: the eval "
+                         "profile's, 9 for sweep, 25 for dsocial_zoo)")
 parser.add_argument("--brain",         choices=BRAIN_KINDS, default="ann",
                     help="Controller trained per skill: 'ann' (closed-loop MLP on "
-                         "proprioception), 'cpg' (open-loop sine oscillators) or "
-                         "'revolve_cpg' (revolve's coupled-oscillator CPG)")
+                         "proprioception), 'cpg' (open-loop sine oscillators), "
+                         "'revolve_cpg' (revolve's coupled-oscillator CPG) or 'dann' "
+                         "(the distributed ANN shared by every hinge, see shared.DannBrain)")
+parser.add_argument("--eval-profile",  choices=list(EVAL_PROFILES), default="sweep",
+                    help="Skill episodes, penalties and inner CMA-ES (see shared.EvalProfile): "
+                         "'sweep' = the original sweep's; 'dsocial_zoo' = d_social_learning's zoo "
+                         "preset (zoo modules, 15 s at 20 Hz, 20 CMA-ES gens from x0 = 0) with "
+                         "every skill normalised to [0, 1] and turns scored as net yaw up to 360 deg")
 parser.add_argument("--rowing-penalty", action="store_true",
                     help="Scale a skill's forward displacement by 1 - rowing_frac, the "
                          "share of the stroke rowing_detect.py calls rowing")
@@ -122,7 +135,8 @@ GENOME_TYPE    = args.genome_type
 BUDGET         = args.budget
 MU             = args.pop
 LAM            = args.lam
-SKILL_BUDGET   = args.skill_budget
+PROFILE        = EVAL_PROFILES[args.eval_profile]
+SKILL_BUDGET   = args.skill_budget if args.skill_budget is not None else PROFILE.skill_budget
 BRAIN_WORKERS  = max(1, args.brain_workers)
 NUM_MODULES    = args.max_modules
 MAX_DEPTH      = args.max_depth
@@ -130,10 +144,10 @@ BASE_SEED      = args.seed
 STRATEGY       = args.strategy_type
 REPEAT_EVALS   = args.repeat_evals
 TIME_LIMIT     = args.time_limit
-CTRL_STRIDE    = args.control_step_freq
+CTRL_STRIDE    = args.control_step_freq if args.control_step_freq is not None else PROFILE.control_step_freq
 BRAIN          = args.brain
 ROWING_PENALTY = args.rowing_penalty
-ZOO_MODULES    = args.zoo_modules
+ZOO_MODULES    = args.zoo_modules or PROFILE.zoo_modules
 
 TOURNAMENT_SIZE = 4
 N_DIRECTIONS    = 5   # multidirection: 360 / 5 = 72 degrees apart
@@ -149,7 +163,8 @@ TIMING_PATH = DATA / "timing.jsonl"
 RNG = np.random.default_rng(BASE_SEED)
 
 with (DATA / "run_config.json").open("w") as _fh:
-    json.dump(vars(args), _fh, indent=2)
+    json.dump({**vars(args), "skill_budget": SKILL_BUDGET, "control_step_freq": CTRL_STRIDE,
+               "zoo_modules": ZOO_MODULES, "eval_profile_settings": asdict(PROFILE)}, _fh, indent=2)
 
 ADAPTER = genome_adapter.genome_adapter_from_cli(GENOME_TYPE, NUM_MODULES, tie_prob=args.tie_prob)
 TO_SPEC = with_zoo_modules(ADAPTER.to_spec) if ZOO_MODULES else ADAPTER.to_spec
@@ -162,18 +177,18 @@ if ZOO_MODULES:
 
 def _skills_for_task(task: str) -> list[tuple[str, SkillReward]]:
     if task == "forward":
-        return [("fwd", SkillReward(kind="translate", angle_deg=0.0, duration=LOCO_DURATION))]
+        return [("fwd", SkillReward(kind="translate", angle_deg=0.0, duration=PROFILE.loco_duration))]
     if task == "multidirection":
         step = 360.0 / N_DIRECTIONS
         return [
-            (f"dir{i}", SkillReward(kind="translate", angle_deg=i * step, duration=LOCO_DURATION))
+            (f"dir{i}", SkillReward(kind="translate", angle_deg=i * step, duration=PROFILE.loco_duration))
             for i in range(N_DIRECTIONS)
         ]
     if task == "turn_avg":
         return [
-            ("fwd",   SkillReward(kind="translate", angle_deg=0.0, duration=LOCO_DURATION)),
-            ("left",  SkillReward(kind="rotate", turn_sign=+1, duration=TURN_DURATION)),
-            ("right", SkillReward(kind="rotate", turn_sign=-1, duration=TURN_DURATION)),
+            ("fwd",   SkillReward(kind="translate", angle_deg=0.0, duration=PROFILE.loco_duration)),
+            ("left",  SkillReward(kind="rotate", turn_sign=+1, duration=PROFILE.turn_duration)),
+            ("right", SkillReward(kind="rotate", turn_sign=-1, duration=PROFILE.turn_duration)),
         ]
     raise ValueError(f"Unknown task: {task!r}")
 
@@ -196,6 +211,7 @@ def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
             control_step_freq=CTRL_STRIDE,
             brain_kind=BRAIN,
             rowing_penalty=ROWING_PENALTY,
+            profile=PROFILE,
         )
         fitness = float(min(learning_curve)) if learning_curve else float("inf")
         console.log(f"    {name}: best_fitness={fitness:.4f}")
@@ -205,7 +221,7 @@ def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
             "fitness":        fitness,
             "learning_curve": learning_curve,
             "eval_time_s":    eval_time,
-            **best_info,  # raw_score (unpenalised), rowing_frac / rowing_label with --rowing-penalty
+            **best_info,  # raw_score (unpenalised), score (normalised profiles), rowing_frac / rowing_label with --rowing-penalty
         }
 
     return {
@@ -470,7 +486,8 @@ def main() -> None:
     console.log(
         f"task={TASK}  genome_type={GENOME_TYPE}  skills={[name for name, _ in SKILLS]}  "
         f"strategy={STRATEGY}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
-        f"skill_budget={SKILL_BUDGET}  brain_workers={BRAIN_WORKERS}  "
+        f"skill_budget={SKILL_BUDGET}  brain={BRAIN}  eval_profile={args.eval_profile}  "
+        f"stride={CTRL_STRIDE}  zoo_modules={ZOO_MODULES}  brain_workers={BRAIN_WORKERS}  "
         f"repeat_evals={REPEAT_EVALS}  seed={BASE_SEED}"
     )
 

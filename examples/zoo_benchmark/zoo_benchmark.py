@@ -81,7 +81,7 @@ def make_brain_for(
     if kind in DANN_VARIANTS:
         if body is None:
             raise ValueError(f"{kind} needs body= to build its topology")
-        return ZooDistributedAnnV2(body, model, data, **DANN_VARIANTS[kind])
+        return ZooDistributedAnnV2(body_topology(body, parent_slot="back"), model, data, **DANN_VARIANTS[kind])
     return make_brain(kind, len(get_state_from_data(data)), model.nu, model.opt.timestep, duration)
 
 

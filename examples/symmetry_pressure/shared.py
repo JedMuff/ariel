@@ -125,8 +125,9 @@ def fill_parameters(net: nn.Module, vector: np.ndarray) -> None:
 # The returned raw action is then alpha-blended and clipped by the caller, so
 # the post-processing (and jerk penalty) is identical across brain types.
 
-BrainKind = Literal["ann", "cpg", "revolve_cpg"]
-BRAIN_KINDS: tuple[str, ...] = ("ann", "cpg", "revolve_cpg")
+BrainKind = Literal["ann", "cpg", "revolve_cpg", "dann"]
+BRAIN_KINDS: tuple[str, ...] = ("ann", "cpg", "revolve_cpg", "dann")
+DANN_VARIANT = "dann_pos_hinge_h16"  # zoo_benchmark/brains.py DANN_VARIANTS: the default distributed ANN
 
 CPG_F_MIN = 0.5  # Hz
 CPG_F_MAX = 3.0  # Hz
@@ -248,7 +249,43 @@ class RevolveCpgBrain:
         return self.output_at(float(data.time) - SETTLE_DURATION)
 
 
-Brain = "AnnBrain | CpgBrain | RevolveCpgBrain"
+class DannBrain:
+    """The distributed ANN (zoo_benchmark/brains.py ZooDistributedAnnV2, variant
+    DANN_VARIANT): one 42-16-1 MLP (705 params) shared by every hinge, whose
+    inputs are the hinge's own vel/angle, its nearest hinges slotted by
+    direction, its rest position, the core orientation and a sine clock.
+
+    The body topology is read from the compiled model's body names
+    (brains.model_topology), so it works for any robogen body. The clock is a
+    control-step counter, so set_params and reset restart it; callers decode a
+    fresh candidate before every episode. Joint velocities come from the
+    MjData the brain was built with, so act() must be called on that data.
+    """
+
+    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        import sys
+        zoo_dir = str(Path(__file__).resolve().parent.parent / "zoo_benchmark")
+        if zoo_dir not in sys.path:
+            sys.path.insert(0, zoo_dir)
+        import brains  # lazy: brains.py imports this module
+
+        self._net = brains.ZooDistributedAnnV2(
+            brains.model_topology(model), model, data, **brains.DANN_VARIANTS[DANN_VARIANT],
+        )
+        self.num_params = self._net.num_params
+
+    def set_params(self, vec: np.ndarray) -> None:
+        self._net.set_params(vec)
+        self._net.reset()
+
+    def reset(self) -> None:
+        self._net.reset()
+
+    def act(self, data: Any, state: np.ndarray) -> np.ndarray:
+        return self._net.act(float(data.time) - SETTLE_DURATION, state)
+
+
+Brain = "AnnBrain | CpgBrain | RevolveCpgBrain | DannBrain"
 
 
 def make_brain(kind: str, input_dim: int, output_dim: int) -> Brain:
@@ -258,13 +295,15 @@ def make_brain(kind: str, input_dim: int, output_dim: int) -> Brain:
         return CpgBrain(input_dim, output_dim)
     if kind == "revolve_cpg":
         return RevolveCpgBrain(input_dim, output_dim)
+    if kind == "dann":
+        raise ValueError("dann needs the body: use make_brain_for_model")
     raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")
 
 
 def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
                          params: Optional[np.ndarray] = None) -> Brain:
     """Build a brain sized for this body (proprioceptive input, one output per actuator)."""
-    brain = make_brain(kind, len(get_robot_state(data)), model.nu)
+    brain = DannBrain(model, data) if kind == "dann" else make_brain(kind, len(get_robot_state(data)), model.nu)
     if params is not None:
         brain.set_params(params)
     return brain
@@ -1071,6 +1110,65 @@ JERK_PENALTY_WEIGHT       = 3.0   # penalty per unit of mean absolute ctrl delta
 JERK_THRESHOLD            = 0.15  # hurdle: mean_jerk below this is free
 ROWING_RECORD_EVERY_N     = 10    # rowing penalty: body poses sampled every N sim steps (50Hz, as behavior_50hz)
 
+
+@dataclass(frozen=True)
+class EvalProfile:
+    """Episode, penalty and inner CMA-ES settings for skill training.
+
+    SWEEP_PROFILE is this module's constants (the original symmetry-pressure
+    sweep). DSOCIAL_ZOO matches /home/jed/workspaces/ariel's
+    examples/d_social_learning: sim_ariel/evaluator.py's "zoo" preset (zoo
+    modules, 15 s episodes at 20 Hz control, alpha and jerk constants rescaled
+    from the 9-step to the 25-step control period, spawn-height penalty above
+    0.5 m) and experiment.py's inner CMA-ES (20 generations, popsize 16,
+    sigma 0.5 from x0 = 0). It also normalises every skill to [0, 1]
+    (translate_score, turn_score) before the penalties are subtracted.
+    """
+
+    loco_duration: float = LOCO_DURATION
+    turn_duration: float = TURN_DURATION
+    control_step_freq: int = CONTROL_STEP_FREQ
+    skill_budget: int = 100
+    zoo_modules: bool = False
+    ctrl_alpha: float = CTRL_ALPHA
+    jerk_weight: float = JERK_PENALTY_WEIGHT
+    jerk_threshold: float = JERK_THRESHOLD
+    height_threshold: float = HEIGHT_PENALTY_THRESHOLD
+    height_at_spawn: bool = False   # core height at reset (d_social) instead of after settling
+    cma_sigma: float = CMA_SIGMA
+    cma_popsize: int = CMA_POPSIZE
+    cma_init_scale: float = CMA_INIT_SCALE  # x0 ~ U(-s, s); 0 = start from zeros
+    normalised: bool = False
+
+
+_DSOCIAL_STEP_RATIO = 25 / 9  # zoo control period / legacy control period
+SWEEP_PROFILE = EvalProfile()
+DSOCIAL_ZOO = EvalProfile(
+    loco_duration=15.0, turn_duration=15.0, control_step_freq=25, skill_budget=20, zoo_modules=True,
+    ctrl_alpha=1.0 - (1.0 - CTRL_ALPHA) ** _DSOCIAL_STEP_RATIO,
+    jerk_weight=JERK_PENALTY_WEIGHT / _DSOCIAL_STEP_RATIO,
+    jerk_threshold=JERK_THRESHOLD * _DSOCIAL_STEP_RATIO,
+    height_threshold=0.5, height_at_spawn=True,
+    cma_sigma=0.5, cma_popsize=16, cma_init_scale=0.0,
+    normalised=True,
+)
+EVAL_PROFILES = {"sweep": SWEEP_PROFILE, "dsocial_zoo": DSOCIAL_ZOO}
+
+TRANSLATE_REF_SPEED = 0.5        # m/s; a normalised translate skill scores 1 at this mean speed
+TURN_TARGET         = 2 * math.pi  # rad of net yaw for a normalised turn skill to score 1 (ends the episode)
+
+
+def translate_score(disp: float, duration: float) -> float:
+    """Normalised translate skill: displacement along the reward axis over
+    TRANSLATE_REF_SPEED * duration, clipped to [0, 1]."""
+    return float(np.clip(disp / (TRANSLATE_REF_SPEED * duration), 0.0, 1.0))
+
+
+def turn_score(net_yaw: float) -> float:
+    """Normalised turn skill: net signed yaw in the target direction over
+    TURN_TARGET (one full turn), clipped to [0, 1]."""
+    return float(np.clip(net_yaw / TURN_TARGET, 0.0, 1.0))
+
 # The core-mounted camera's local mount (euler + position) is fixed in
 # core.py and never rotated relative to the world, since every body here
 # spawns with rotation=None (SimpleFlatWorld default = no rotation). Its
@@ -1166,6 +1264,7 @@ def _skill_worker_init(
     seed: int, reward: SkillReward, genome_dict: dict, to_spec_fn, control_step_freq: int,
     brain_kind: str = "ann",
     rowing_penalty: bool = False,
+    profile: EvalProfile = SWEEP_PROFILE,
 ) -> None:
     global _skill_worker_ctx  # noqa: PLW0603
     torch.set_num_threads(1)
@@ -1176,13 +1275,19 @@ def _skill_worker_init(
         "model": model, "data": data, "brain": brain, "reward": reward,
         "control_step_freq": control_step_freq,
         "rowing_bodies": robot_bodies(model) if rowing_penalty else None,
+        "profile": profile,
     }
 
 
 def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]]:
     """(fitness, info) of one candidate. info holds raw_score (displacement or
-    accumulated yaw) and, with the rowing penalty on, rowing_frac and
-    rowing_label."""
+    accumulated yaw), score (the normalised skill score, with a normalised
+    profile) and, with the rowing penalty on, rowing_frac and rowing_label.
+
+    With a normalised profile a turn accumulates net signed yaw (turning back
+    cancels) and the episode ends once it reaches TURN_TARGET; otherwise only
+    yaw in the target direction counts and the episode always runs its full
+    duration."""
     assert _skill_worker_ctx is not None
     ctx       = _skill_worker_ctx
     model     = ctx["model"]
@@ -1191,8 +1296,12 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
     reward: SkillReward = ctx["reward"]
     control_step_freq: int = ctx["control_step_freq"]
     rowing_bodies: Optional[list[int]] = ctx["rowing_bodies"]
+    profile: EvalProfile = ctx["profile"]
     brain.set_params(np.array(weights_list, dtype=np.float32))
+    if hasattr(brain, "reset"):
+        brain.reset()
     mujoco.mj_resetData(model, data)
+    spawn_height = float(data.qpos[2])
 
     sim_step = 0
     while data.time < SETTLE_DURATION:
@@ -1200,7 +1309,7 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
         sim_step += 1
 
     core_id        = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
-    initial_height = float(data.xpos[core_id, 2])
+    initial_height = spawn_height if profile.height_at_spawn else float(data.xpos[core_id, 2])
     step           = 0
     current_action = np.zeros(model.nu)
     prev_ctrl: Optional[np.ndarray] = None
@@ -1222,7 +1331,7 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
             state      = get_robot_state(data).astype(np.float32)
             raw_action = brain.act(data, state)
             current_action = np.clip(
-                current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
+                current_action * (1.0 - profile.ctrl_alpha) + raw_action * profile.ctrl_alpha,
                 -math.pi / 2, math.pi / 2,
             )
             if prev_ctrl is not None:
@@ -1234,8 +1343,8 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
 
         if reward.kind == "rotate":
             r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
-            delta  = signed_vertical_yaw_delta(r_prev, r_curr)
-            accumulated += max(0.0, delta * reward.turn_sign)
+            delta  = signed_vertical_yaw_delta(r_prev, r_curr) * reward.turn_sign
+            accumulated += delta if profile.normalised else max(0.0, delta)
             r_prev = r_curr.copy()
 
         # Same sampling as behavior_common.replay_skill_episode's pose rows,
@@ -1246,11 +1355,13 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
 
         step += 1
         sim_step += 1
+        if reward.kind == "rotate" and profile.normalised and accumulated >= TURN_TARGET:
+            break  # a full turn: the score is capped at 1, so stop early
 
     mean_jerk    = jerk_sum / max(ctrl_step - 1, 1)
-    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
+    jerk_penalty = profile.jerk_weight * mean_jerk if mean_jerk >= profile.jerk_threshold else 0.0
 
-    height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
+    height_penalty = initial_height if initial_height > profile.height_threshold else 0.0
     if reward.kind == "translate":
         xy_now = np.array([data.qpos[0], data.qpos[1]])
         raw    = float(np.dot(xy_now - xy0, reward_axis))
@@ -1261,6 +1372,9 @@ def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]
     if rowing_bodies is not None:
         info.update(rowing_info(poses, quats, ROWING_RECORD_EVERY_N * float(model.opt.timestep)))
         score = rowing_scaled_disp(raw, info["rowing_frac"])
+    if profile.normalised:
+        score = translate_score(score, reward.duration) if reward.kind == "translate" else turn_score(score)
+        info["score"] = score
     return -(score - height_penalty - jerk_penalty), info
 
 
@@ -1274,6 +1388,7 @@ def train_skill_for_body(
     control_step_freq: int = CONTROL_STEP_FREQ,
     brain_kind: str = "ann",
     rowing_penalty: bool = False,
+    profile: EvalProfile = SWEEP_PROFILE,
 ) -> tuple[np.ndarray, list[float], float, dict[str, Any]]:
     """Train one skill via CMA-ES for a specific body.
 
@@ -1282,6 +1397,9 @@ def train_skill_for_body(
     (see make_brain); the returned vector is that brain's flat parameters.
     rowing_penalty scales a forward displacement by 1 - rowing_frac (see
     rowing_scaled_disp), the share of the stroke rowing_detect calls rowing.
+    profile sets the penalties, CMA-ES settings and score normalisation (see
+    EvalProfile); durations, control_step_freq and budget are still taken
+    from the arguments.
 
     Returns (best_weights, learning_curve, eval_time_s, best_info), best_info
     being _skill_worker_eval's info for best_weights.
@@ -1292,11 +1410,14 @@ def train_skill_for_body(
     num_params  = make_brain_for_model(brain_kind, model, data).num_params
 
     rng = np.random.default_rng(seed)
-    x0  = rng.uniform(-CMA_INIT_SCALE, CMA_INIT_SCALE, size=num_params).tolist()
+    if profile.cma_init_scale > 0:
+        x0 = rng.uniform(-profile.cma_init_scale, profile.cma_init_scale, size=num_params).tolist()
+    else:
+        x0 = [0.0] * num_params
 
     es = cma.CMAEvolutionStrategy(
-        x0, CMA_SIGMA,
-        {"popsize": CMA_POPSIZE, "seed": seed, "verbose": -9, "maxiter": 10**9},
+        x0, profile.cma_sigma,
+        {"popsize": profile.cma_popsize, "seed": seed, "verbose": -9, "maxiter": 10**9},
     )
 
     best_fit = float("inf")
@@ -1304,11 +1425,11 @@ def train_skill_for_body(
     best_info: dict[str, Any] = {}
     learning_curve: list[float] = []
 
-    effective_workers = min(CMA_POPSIZE, workers)
+    effective_workers = min(profile.cma_popsize, workers)
     with ProcessPoolExecutor(
         max_workers=effective_workers,
         initializer=_skill_worker_init,
-        initargs=(seed, reward, genome_dict, to_spec_fn, control_step_freq, brain_kind, rowing_penalty),
+        initargs=(seed, reward, genome_dict, to_spec_fn, control_step_freq, brain_kind, rowing_penalty, profile),
     ) as pool:
         gen = 0
         while gen < budget:

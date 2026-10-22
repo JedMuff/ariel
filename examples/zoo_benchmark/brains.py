@@ -27,6 +27,7 @@ Brains:
 from __future__ import annotations
 
 import math
+import re
 import sys
 from typing import Any
 from pathlib import Path
@@ -359,6 +360,11 @@ def body_topology(body: str, parent_slot: str = "attach_face") -> dict[str, Any]
     finally:
         canonical_bodies.Attacher.__call__ = attach
 
+    return {"type": types, "slots": _face_slots(body, types, edges, parent_slot), "edges": edges}
+
+
+def _face_slots(body: str, types: dict[str, int], edges: list[tuple[str, str, ModuleFaces]],
+                parent_slot: str) -> dict[str, list[str | None]]:
     slots: dict[str, list[str | None]] = {}
     for node in types:
         s: list[str | None] = [None] * DIST_N_FACES
@@ -371,7 +377,39 @@ def body_topology(body: str, parent_slot: str = "attach_face") -> dict[str, Any]
                     raise ValueError(f"{body}: child {child} collides with {node}'s parent slot")
                 s[face.value] = child
         slots[node] = s
-    return {"type": types, "slots": slots, "edges": edges}
+    return slots
+
+
+# robogen_lite's constructor names every attached module's bodies
+# "<prefix><parent node>-<child node>-<face value>-<part>" (constructor.py);
+# a module on a hinge also inherits the hinge's "<p>-<c>-<f>-" prefix, so
+# names can nest ("13-14-0-14-15-0-brick"), and the last triple is the edge.
+_ROBOGEN_BODY_RE = re.compile(r"^robot1_((?:\d+-\d+-\d+-)*(\d+)-(\d+)-(\d+))-(brick|hinge)$")
+_ROBOGEN_TYPES = {"brick": ModuleType.BRICK, "hinge": ModuleType.HINGE}
+
+
+def model_topology(model: mujoco.MjModel, parent_slot: str = "back") -> dict[str, Any]:
+    """body_topology for a compiled robogen body (tree, cppn, local or zoo
+    modules), read from its body names, so no genome is needed. Module names
+    are the body names' "<parent>-<child>-<face>" part, nested prefixes and
+    all, as in the joint names ("robot1_<name>-servo"); the core is "core". Same return value and parent_slot rule as
+    body_topology; with "back", a child on a hinge's or brick's BACK raises
+    (robogen_lite gives those modules no BACK site, so it never happens).
+    """
+    found = []
+    for b in range(model.nbody):
+        m = _ROBOGEN_BODY_RE.match(model.body(b).name)
+        if m:
+            found.append((int(m[2]), int(m[3]), ModuleFaces(int(m[4])), _ROBOGEN_TYPES[m[5]], m[1]))
+    children = {c for _, c, _, _, _ in found}
+    roots = {p for p, _, _, _, _ in found} - children
+    if len(roots) > 1:
+        raise ValueError(f"robogen body has several roots: {sorted(roots)}")
+    key = {c: name for _, c, _, _, name in found} | dict.fromkeys(roots, "core")
+    types = {"core": _DIST_TYPE_ONEHOT[ModuleType.CORE]}
+    types |= {key[c]: _DIST_TYPE_ONEHOT[t] for _, c, _, t, _ in found}
+    edges = [(key[p], key[c], face) for p, c, face, _, _ in found]
+    return {"type": types, "slots": _face_slots("robogen body", types, edges, parent_slot), "edges": edges}
 
 
 class ZooDistributedAnn:
@@ -523,14 +561,16 @@ class ZooDistributedAnnV2:
     Per hinge input: [self features, 6 neighbour slots x 5 features (zeros when
     empty), clock, core orientation (3), (position (3))]. The clock is
     sin(2 pi k / 25) at control step k as in the original, or for the phase
-    variant sin and cos of (2 pi f t + phase_i). Parameters: the MLP's
+    variant sin and cos of (2 pi f t + phase_i). topology must use the "back"
+    parent slot: body_topology(body, parent_slot="back") for a zoo body,
+    model_topology(model) for a robogen one. Parameters: the MLP's
     (W1, b1, W2, b2), then (phase variant) the frequency gene and n phase genes,
     phase_i = pi * gene.
     """
 
-    def __init__(self, body: str, model: mujoco.MjModel, data: mujoco.MjData, *, position: bool = False,
-                 phase: bool = False, neighbours: str = "module", hidden: int = DIST_HIDDEN) -> None:
-        topology = body_topology(body, parent_slot="back")
+    def __init__(self, topology: dict[str, Any], model: mujoco.MjModel, data: mujoco.MjData, *,
+                 position: bool = False, phase: bool = False, neighbours: str = "module",
+                 hidden: int = DIST_HIDDEN) -> None:
         self._data = data
         self.position, self.phase, self.hidden = position, phase, hidden
         n = model.nu
