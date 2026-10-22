@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 from plot_zoo_fitness_curves import (  # noqa: E402
-    BRAIN_COLORS, BRAINS, INK, MUTED, N_GRID, draw_brains, label_line_ends, load_curves, step_resample, style_axis,
+    BRAIN_COLORS, BRAINS, INK, brain_label, MUTED, N_GRID, draw_brains, label_line_ends, load_curves, step_resample, style_axis,
 )
 
 
@@ -48,10 +48,12 @@ def plot_wall_time(runs, out: Path, dpi: int) -> None:
         med = np.median(wall)
         ax_brain.plot([i - 0.3, i + 0.3], [med, med], color=INK, lw=2, solid_capstyle="round")
         ax_brain.annotate(f"{med:.1f} min", xy=(i + 0.32, med), va="center", fontsize=8, color=INK)
-    ax_brain.set_xticks(range(len(brains)), brains)
+    ax_brain.set_xticks(range(len(brains)), [brain_label(b) for b in brains], rotation=30, ha="right", rotation_mode="anchor")
     ax_brain.set_xlim(-0.5, len(brains) - 0.2)
     ax_brain.set_ylabel("Wall time per run (min)", fontsize=10, color=INK)
-    ax_brain.set_title(f"Per run (n={len(runs) // len(brains)} per brain); bar = median",
+    counts = runs["brain"].value_counts()
+    n_label = str(counts.iloc[0]) if counts.nunique() == 1 else f"{counts.min()}-{counts.max()}"
+    ax_brain.set_title(f"Per run (n={n_label} per brain); bar = median",
                        fontsize=10, color=INK, loc="left")
 
     # Right: one dot per body (median over reps), with a line through the mean per hinge count.
@@ -61,7 +63,7 @@ def plot_wall_time(runs, out: Path, dpi: int) -> None:
         sub = per_body[per_body["brain"] == brain]
         color = BRAIN_COLORS[brain]
         ax_hinge.scatter(sub["n_hinges"] + offsets[brain], sub["wall_min"], s=22, color=color,
-                         edgecolor="white", lw=0.8, zorder=3, label=brain)
+                         edgecolor="white", lw=0.8, zorder=3, label=brain_label(brain))
         trend = sub.groupby("n_hinges")["wall_min"].mean()
         ax_hinge.plot(trend.index + offsets[brain], trend.to_numpy(), color=color, lw=1.5, alpha=0.8)
     ax_hinge.set_xticks(sorted(per_body["n_hinges"].unique()))
@@ -123,15 +125,19 @@ def main() -> None:
     parser.add_argument("root", type=Path)
     parser.add_argument("-o", "--out-dir", type=Path, default=None, help="default: root")
     parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument("--brains", nargs="+", default=None, help="plot only these brains (default: all)")
+    parser.add_argument("--suffix", default="", help="appended to the figure file names, e.g. _dann")
     args = parser.parse_args()
 
     out_dir = args.out_dir or args.root
     out_dir.mkdir(parents=True, exist_ok=True)
     runs, _ = load_curves(args.root)
+    if args.brains:
+        runs = runs[runs["brain"].isin(args.brains)].reset_index(drop=True)
     print(f"{len(runs)} runs, {runs['body'].nunique()} bodies, {runs['brain'].nunique()} brains")
 
-    plot_wall_time(runs, out_dir / "zoo_wall_time.png", args.dpi)
-    plot_fitness_vs_wall_time(runs, out_dir / "zoo_fitness_vs_wall_time.png", args.dpi)
+    plot_wall_time(runs, out_dir / f"zoo_wall_time{args.suffix}.png", args.dpi)
+    plot_fitness_vs_wall_time(runs, out_dir / f"zoo_fitness_vs_wall_time{args.suffix}.png", args.dpi)
 
 
 if __name__ == "__main__":

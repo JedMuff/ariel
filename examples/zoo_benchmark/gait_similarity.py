@@ -83,7 +83,7 @@ def record_module_trajectories(run_dir: Path) -> dict:
     torch.set_num_threads(1)
     cfg = json.loads((run_dir / "config.json").read_text())
     model, data = build_world(cfg["body"])
-    brain = make_brain_for(cfg["brain"], model, data, cfg["duration"])
+    brain = make_brain_for(cfg["brain"], model, data, cfg["duration"], cfg["body"])
     brain.set_params(np.load(run_dir / "champion.npy"))
     steps_per_ctrl = round(1.0 / (cfg["control_freq"] * model.opt.timestep))
     core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, CORE_BODY)

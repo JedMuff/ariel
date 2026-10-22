@@ -9,7 +9,7 @@ writes two figures to the output dir:
 
 Curves are resampled onto a common evaluation grid (popsize, and hence the eval
 count per generation, differs between brains). Runs that stop early hold their
-final best-so-far until the budget.
+final best-so-far until the budget. Unfinished runs (no summary.json) are skipped.
 
 Usage:
   python plot_zoo_fitness_curves.py __data__/ariel_zoo_benchmark [-o OUTDIR]
@@ -27,12 +27,24 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-BRAINS = ["ann", "matsuoka", "revolve_cpg", "sine", "square", "square_sync", "bang_bang"]
+BRAINS = ["ann", "matsuoka", "revolve_cpg", "sine", "square", "square_sync", "bang_bang", "distributed_ann",
+          "dann_fixed", "dann_pos", "dann_phase", "dann_hinge", "dann_pos_hinge", "dann_pos_hinge_h16"]
 BRAIN_COLORS = {"ann": "#2a78d6", "matsuoka": "#eb6834", "revolve_cpg": "#1baf7a", "sine": "#eda100",
                 "square": "#4a3aa7", "square_sync": "#e87ba4",
-                "bang_bang": "#008300"}
+                "bang_bang": "#008300", "distributed_ann": "#3d3d3a",
+                "dann_fixed": "#8a8a85", "dann_pos": "#8c564b", "dann_phase": "#17becf", "dann_hinge": "#bcbd22",
+                "dann_pos_hinge": "#c49c94", "dann_pos_hinge_h16": "#7b3fbf"}
+# Names shown in figures. dann_pos_hinge_h16 is the default distributed ANN; the
+# DistributedMLP port it improves on is distributed_ann. Unlisted brains show their kind.
+BRAIN_LABELS = {"ann": "ANN", "bang_bang": "bang-bang", "matsuoka": "Matsuoka", "revolve_cpg": "RevolveCPG",
+                "square_sync": "square (sync)", "dann_pos_hinge_h16": "distributed ANN",
+                "distributed_ann": "distributed ANN (original)"}
 INK, MUTED, GRID = "#1a1a19", "#6b6a63", "#e4e3dc"
 N_GRID = 201
+
+
+def brain_label(brain: str) -> str:
+    return BRAIN_LABELS.get(brain, brain)
 
 
 def step_resample(x: np.ndarray, y: np.ndarray, grid: np.ndarray) -> np.ndarray:
@@ -45,6 +57,8 @@ def load_curves(root: Path) -> tuple[pd.DataFrame, np.ndarray]:
     """Return (runs, grid): one row per run with its best-so-far resampled onto grid."""
     records = []
     for hist_path in sorted(root.glob("*/history.csv")):
+        if not (hist_path.parent / "summary.json").exists():
+            continue  # still running (local runs write to .tmp_* until done)
         cfg = json.loads((hist_path.parent / "config.json").read_text())
         hist = pd.read_csv(hist_path)
         records.append({"body": cfg["body"], "brain": cfg["brain"], "seed": cfg["seed"],
@@ -89,7 +103,7 @@ def draw_brains(ax, groups: dict[str, np.ndarray], grid: np.ndarray, lw: float) 
         mean, ci = mean_ci(groups[brain])
         color = BRAIN_COLORS[brain]
         ax.fill_between(grid, mean - ci, mean + ci, color=color, alpha=0.18, lw=0)
-        ax.plot(grid, mean, color=color, lw=lw, label=brain)
+        ax.plot(grid, mean, color=color, lw=lw, label=brain_label(brain))
         finals[brain] = mean[-1]
     return finals
 
@@ -102,7 +116,7 @@ def label_line_ends(ax, finals: dict[str, float], x_end: float) -> None:
     for brain, y in sorted(finals.items(), key=lambda kv: kv[1]):
         y_lab = max(y, placed[-1] + min_gap) if placed else y
         placed.append(y_lab)
-        ax.annotate(f"{brain}  {y:.3f}", xy=(x_end, y), xytext=(x_end * 1.015, y_lab),
+        ax.annotate(f"{brain_label(brain)}  {y:.3f}", xy=(x_end, y), xytext=(x_end * 1.015, y_lab),
                     va="center", fontsize=9, color=INK, annotation_clip=False)
         ax.plot([x_end], [y], "o", ms=5, color=BRAIN_COLORS[brain], mec="white", mew=1.5, clip_on=False)
 
@@ -172,7 +186,6 @@ def plot_aggregate(runs: pd.DataFrame, grid: np.ndarray, out: Path, dpi: int) ->
     ax.set_title(f"CMA-ES best-so-far x-speed across {n_bodies} bodies\n"
                  f"mean of per-body means, shaded 95% CI over bodies",
                  fontsize=11, color=INK, loc="left")
-    ax.legend(loc="upper left", frameon=False, fontsize=9, title="Brain", title_fontsize=9)
     fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {out}")
@@ -183,15 +196,19 @@ def main() -> None:
     parser.add_argument("root", type=Path)
     parser.add_argument("-o", "--out-dir", type=Path, default=None, help="default: root")
     parser.add_argument("--dpi", type=int, default=150)
+    parser.add_argument("--brains", nargs="+", default=None, help="plot only these brains (default: all)")
+    parser.add_argument("--suffix", default="", help="appended to the figure file names, e.g. _dann")
     args = parser.parse_args()
 
     out_dir = args.out_dir or args.root
     out_dir.mkdir(parents=True, exist_ok=True)
     runs, grid = load_curves(args.root)
+    if args.brains:
+        runs = runs[runs["brain"].isin(args.brains)].reset_index(drop=True)
     print(f"{len(runs)} runs, {runs['body'].nunique()} bodies, {runs['brain'].nunique()} brains")
 
-    plot_per_body(runs, grid, out_dir / "zoo_fitness_per_body.png", args.dpi)
-    plot_aggregate(runs, grid, out_dir / "zoo_fitness_aggregate.png", args.dpi)
+    plot_per_body(runs, grid, out_dir / f"zoo_fitness_per_body{args.suffix}.png", args.dpi)
+    plot_aggregate(runs, grid, out_dir / f"zoo_fitness_aggregate{args.suffix}.png", args.dpi)
 
 
 if __name__ == "__main__":

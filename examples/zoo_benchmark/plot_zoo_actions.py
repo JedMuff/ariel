@@ -32,7 +32,7 @@ def replay(run_dir: Path) -> dict:
     """Run the champion's episode; return action (per control step) and joint angle (per physics step)."""
     cfg = json.loads((run_dir / "config.json").read_text())
     model, data = build_world(cfg["body"])
-    brain = make_brain_for(cfg["brain"], model, data, cfg["duration"])
+    brain = make_brain_for(cfg["brain"], model, data, cfg["duration"], cfg["body"])
     brain.set_params(np.load(run_dir / "champion.npy"))
     steps_per_ctrl = round(1.0 / (cfg["control_freq"] * model.opt.timestep))
     qadr = model.jnt_qposadr[model.actuator_trnid[:, 0]]

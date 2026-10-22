@@ -13,7 +13,8 @@ Replicates apets-ariel's src/aapets/zoo/evolve.py so the numbers are comparable:
 The same CMA-ES settings are used for every brain, except that the ANN starts
 at x0 = 0 (DEFAULT_INITIAL_MEAN): at 0.5 its ~1.5k weights saturate every tanh
 output, all candidates hold the same pose, fitness is flat and tolflatfitness
-stops the run after 10 generations.
+stops the run after 10 generations. distributed_ann starts at 0 as well, as
+its CMA-ES did in the d_social_learning experiments, and so do the dann_* variants.
 
 Known deviation: bodies are spawned in the local SimpleFlatWorld, not kgd's
 make_world, so floor/contact parameters may differ slightly.
@@ -40,7 +41,7 @@ import numpy as np
 import torch
 
 import canonical_bodies
-from brains import BRAIN_KINDS, make_brain
+from brains import BRAIN_KINDS, DANN_VARIANTS, ZooDistributedAnn, ZooDistributedAnnV2, body_topology, make_brain
 from ariel.simulation.controllers.utils.data_get import get_state_from_data
 from ariel.simulation.environments import SimpleFlatWorld
 
@@ -48,7 +49,8 @@ CORE_BODY = "robot1_core"
 
 # CMA-ES x0 per brain (see module docstring for why the ANN differs).
 DEFAULT_INITIAL_MEAN = {"ann": 0.0, "sine": 0.5, "revolve_cpg": 0.5, "matsuoka": 0.5,
-                        "square": 0.5, "square_sync": 0.5, "bang_bang": 0.5}
+                        "square": 0.5, "square_sync": 0.5, "bang_bang": 0.5, "distributed_ann": 0.0,
+                        **{v: 0.0 for v in DANN_VARIANTS}}
 
 
 # ── World / episode ───────────────────────────────────────────────────────────
@@ -67,8 +69,19 @@ def build_world(body: str) -> tuple[mujoco.MjModel, mujoco.MjData]:
     return model, data
 
 
-def make_brain_for(kind: str, model: mujoco.MjModel, data: mujoco.MjData, duration: float = 15.0) -> Any:
+def make_brain_for(
+    kind: str, model: mujoco.MjModel, data: mujoco.MjData, duration: float = 15.0, body: str | None = None,
+) -> Any:
+    """Build a brain for a compiled body; distributed_ann also needs the body's name."""
     mujoco.mj_resetData(model, data)
+    if kind == "distributed_ann":
+        if body is None:
+            raise ValueError("distributed_ann needs body= to build its topology")
+        return ZooDistributedAnn(body_topology(body), model, data)
+    if kind in DANN_VARIANTS:
+        if body is None:
+            raise ValueError(f"{kind} needs body= to build its topology")
+        return ZooDistributedAnnV2(body, model, data, **DANN_VARIANTS[kind])
     return make_brain(kind, len(get_state_from_data(data)), model.nu, model.opt.timestep, duration)
 
 
@@ -104,7 +117,7 @@ def _worker_init(body: str, brain_kind: str, duration: float, control_freq: floa
     torch.set_num_threads(1)
     model, data = build_world(body)
     _worker_ctx = {
-        "model": model, "data": data, "brain": make_brain_for(brain_kind, model, data, duration),
+        "model": model, "data": data, "brain": make_brain_for(brain_kind, model, data, duration, body),
         "duration": duration, "control_freq": control_freq,
     }
 
@@ -140,7 +153,7 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     model, data = build_world(args.body)
-    brain = make_brain_for(args.brain, model, data, args.duration)
+    brain = make_brain_for(args.brain, model, data, args.duration, args.body)
     n_params = brain.num_params
 
     config = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}

@@ -35,7 +35,7 @@ def render_run(run_dir: Path, fps: int, width: int, height: int, out_path: Path 
     params = np.load(run_dir / "champion.npy")
 
     model, data = build_world(cfg["body"])
-    brain = make_brain_for(cfg["brain"], model, data, cfg["duration"])
+    brain = make_brain_for(cfg["brain"], model, data, cfg["duration"], cfg["body"])
     brain.set_params(params)
 
     control_freq, duration = cfg["control_freq"], cfg["duration"]

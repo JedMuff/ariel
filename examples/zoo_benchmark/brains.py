@@ -16,6 +16,12 @@ Brains:
   square       eased square wave per hinge (square_wave.py), 12 genes per hinge
   square_sync  as square, but one frequency ModulatedValue shared by every hinge
   bang_bang    as square_sync, but fixed +-90 deg and instant switches (5 genes per hinge)
+  distributed_ann  one MLP shared by every hinge on local observations (DistributedMLP
+                   from the d_social_learning experiments); needs the body's topology,
+                   so it is built by zoo_benchmark.make_brain_for(..., body=...)
+  dann_*       improved distributed ANN variants (DANN_VARIANTS), built the same way;
+               dann_pos_hinge_h16 is the default distributed ANN (labelled "distributed ANN"
+               in figures), distributed_ann the original port it improves on
 """
 
 from __future__ import annotations
@@ -25,13 +31,20 @@ import sys
 from typing import Any
 from pathlib import Path
 
+import mujoco
 import numpy as np
+
+import canonical_bodies
+from ariel.body_phenotypes.robogen_lite.config import ModuleFaces, ModuleType
+from ariel.simulation.controllers.distributed_mlp import DistributedMLP
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "symmetry_pressure"))
 from shared import AnnBrain, CpgBrain, RevolveCpgBrain  # noqa: E402
 from square_wave import ModulatedValue, PatternState, ServoPattern, step  # noqa: E402
 
-BRAIN_KINDS: tuple[str, ...] = ("ann", "sine", "revolve_cpg", "matsuoka", "square", "square_sync", "bang_bang")
+BRAIN_KINDS: tuple[str, ...] = ("ann", "sine", "revolve_cpg", "matsuoka", "square", "square_sync", "bang_bang",
+                                "distributed_ann", "dann_fixed", "dann_pos", "dann_phase", "dann_hinge",
+                                "dann_pos_hinge", "dann_pos_hinge_h16")
 
 HALF_PI = math.pi / 2
 
@@ -303,6 +316,300 @@ class ZooBangBang(_ZooSquareBase):
         }
 
 
+# One-hot index per module type, as ariel's MorphologyAdapter (0 = empty, 4 unused).
+_DIST_TYPE_ONEHOT = {ModuleType.BRICK: 1, ModuleType.HINGE: 2, ModuleType.CORE: 3}
+DIST_N_FACES = len(ModuleFaces)          # 6 neighbour slots per node
+DIST_FEATURES = 8                        # vel, 0, angle / (pi/2), 5-slot type one-hot
+DIST_HIDDEN = 32
+DIST_TIME_PERIOD = 25                    # control steps per period of the sine time input
+
+
+def body_topology(body: str, parent_slot: str = "attach_face") -> dict[str, Any]:
+    """Module types and face-neighbour slots of a canonical body.
+
+    The zoo bodies are built by canonical_bodies.Attacher, not from a robogen
+    graph, so the parent/face/child edges are recorded by wrapping Attacher
+    while the body is built. Slots follow MorphologyAdapter.from_graph exactly:
+    a node's slot f holds its parent if the node is attached at the parent's
+    face f, then each child attached at the node's own face f overwrites slot f
+    (so a hinge on a parent's FRONT with a child on its own FRONT does not see
+    its parent; kept for fidelity with the original brain).
+
+    parent_slot="back" fixes that: the parent goes in the BACK slot, the face
+    through which every hinge and brick touches its parent. Children never
+    attach to a hinge's or brick's BACK (asserted), so nothing is overwritten.
+
+    Returns {"type": {name: one-hot index}, "slots": {name: [name | None] * 6},
+    "edges": [(parent, child, face)]}.
+    """
+    edges: list[tuple[str, str, ModuleFaces]] = []
+    types: dict[str, int] = {}
+    attach = canonical_bodies.Attacher.__call__
+
+    def recording_attach(self, parent, face, module_t, name=None, rotation=0):  # noqa: ANN001, ANN202
+        module = attach(self, parent, face, module_t, name, rotation)
+        edges.append((parent.name, module.name, face))
+        types[parent.name] = _DIST_TYPE_ONEHOT[parent.module_type]
+        types[module.name] = _DIST_TYPE_ONEHOT[module.module_type]
+        return module
+
+    canonical_bodies.Attacher.__call__ = recording_attach
+    try:
+        canonical_bodies.get(body)
+    finally:
+        canonical_bodies.Attacher.__call__ = attach
+
+    slots: dict[str, list[str | None]] = {}
+    for node in types:
+        s: list[str | None] = [None] * DIST_N_FACES
+        for parent, child, face in edges:
+            if child == node:
+                s[ModuleFaces.BACK.value if parent_slot == "back" else face.value] = parent
+        for parent, child, face in edges:
+            if parent == node:
+                if parent_slot == "back" and s[face.value] is not None:
+                    raise ValueError(f"{body}: child {child} collides with {node}'s parent slot")
+                s[face.value] = child
+        slots[node] = s
+    return {"type": types, "slots": slots, "edges": edges}
+
+
+class ZooDistributedAnn:
+    """DistributedMLP (one 57-32-1 MLP shared by every hinge), as used with
+    ariel's MorphologyAdapter in the d_social_learning experiments.
+
+    Each hinge's input is its own node features, those of its 6 face slots
+    (zeros when empty) and sin(2 pi k / 25) for control step k. Node features
+    are [joint velocity, 0, joint angle / (pi/2) clipped to +-1, type one-hot];
+    bricks and the core have no joint, so only their one-hot is non-zero. The
+    output tanh is scaled to +-pi/2 (MorphologyAdapter's evaluator also
+    alpha-blends it, which this protocol does not). The parameter count is
+    fixed (1889 at hidden 32), whatever the body.
+
+    Joint velocities are not in the protocol's state vector, so the brain
+    reads them from the MjData it was built with; act() must be called once
+    per control step on that data.
+    """
+
+    def __init__(self, topology: dict[str, Any], model: mujoco.MjModel, data: mujoco.MjData,
+                 hidden: int = DIST_HIDDEN) -> None:
+        self._net = DistributedMLP(n_neighbors=DIST_N_FACES, features_per_node=DIST_FEATURES, hidden=hidden)
+        self.num_params = self._net.n_params
+        self._data = data
+
+        names = list(topology["type"])
+        row = {n: i for i, n in enumerate(names)}
+        empty = len(names)                # all-zero feature row for empty slots
+        self._features = np.zeros((empty + 1, DIST_FEATURES), dtype=np.float32)
+        for n, oh in topology["type"].items():
+            self._features[row[n], 3 + oh] = 1.0
+
+        hinges, qpos, dof = [], [], []
+        for a in range(model.nu):
+            joint = model.actuator_trnid[a, 0]
+            jname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint)
+            module = jname.removeprefix("robot1_").removesuffix("-servo")
+            if topology["type"].get(module) != _DIST_TYPE_ONEHOT[ModuleType.HINGE]:
+                raise ValueError(f"actuator {a} ({jname}) does not drive a recorded hinge module")
+            hinges.append(row[module])
+            qpos.append(model.jnt_qposadr[joint])
+            dof.append(model.jnt_dofadr[joint])
+        self._hinge_rows = np.array(hinges)
+        self._qpos, self._dof = np.array(qpos), np.array(dof)
+        # (nu, 7) feature-row indices: self, then the 6 face slots
+        self._gather = np.array([
+            [row[names[h]]] + [row[nb] if nb is not None else empty for nb in topology["slots"][names[h]]]
+            for h in hinges
+        ])
+        self._step = 0
+        self.set_params(np.zeros(self.num_params))
+
+    def set_params(self, vec: np.ndarray) -> None:
+        if len(vec) != self.num_params:
+            raise IndexError("Parameter vector length mismatch")
+        self._net.set_theta(vec)
+
+    def reset(self) -> None:
+        self._step = 0
+
+    def node_inputs(self) -> np.ndarray:
+        """(nu, 57) network inputs at the current data and control step."""
+        f = self._features
+        f[self._hinge_rows, 0] = self._data.qvel[self._dof]
+        f[self._hinge_rows, 2] = np.clip(self._data.qpos[self._qpos] / HALF_PI, -1.0, 1.0)
+        x = f[self._gather].reshape(len(self._gather), -1)
+        t = np.full((len(x), 1), math.sin(2 * math.pi * self._step / DIST_TIME_PERIOD), dtype=np.float32)
+        return np.hstack([x, t])
+
+    def act(self, t: float, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
+        net = self._net
+        h = np.maximum(0.0, self.node_inputs() @ net._w1.T + net._b1)  # noqa: SLF001
+        out = np.tanh(h @ net._w2.T + net._b2)[:, 0]  # noqa: SLF001
+        self._step += 1
+        return out.astype(np.float64) * HALF_PI
+
+
+# ── Improved distributed ANN variants ─────────────────────────────────────────
+#
+# Every variant keeps DistributedMLP's shape (one MLP, ReLU hidden layer, tanh
+# output, shared by every hinge) and fixes three things relative to the
+# original:
+#   - the parent sits in the BACK slot (body_topology(parent_slot="back")), so
+#     no hinge loses its parent to the child-overwrite bug;
+#   - node features are [joint velocity / 10 clipped to +-1, joint angle / (pi/2),
+#     brick, hinge, core]: velocity is scaled like the angle, and the always-zero
+#     vel_y and the two unused one-hot slots are dropped (8 -> 5 features), which
+#     cuts ~220 parameters and pays for the extra inputs below;
+#   - the core's orientation (the state vector's quaternion x, y, z, as the ann
+#     sees it) is appended, the same for every hinge.
+# On top of that, each variant adds at most one way to tell hinges apart:
+#   position   the hinge's rest-pose joint position in the core frame (/0.5 m):
+#              transferable across bodies, lets mirror-image legs differ
+#   phase      learned per-hinge clock phase + one shared clock frequency (0.2-2 Hz),
+#              clock as sin and cos; body-specific genes (n + 1)
+#   hinge      neighbours are the nearest hinges (through bricks and the core),
+#              slotted by the direction to them in the core frame (+x, -x, +y,
+#              -y, +z, -z; nearest wins a slot), so hinges see moving joints
+#              rather than bricks
+
+DANN_VARIANTS: dict[str, dict[str, Any]] = {
+    "dann_fixed": {},
+    "dann_pos": {"position": True},
+    "dann_phase": {"phase": True},
+    "dann_hinge": {"neighbours": "hinge"},
+    "dann_pos_hinge": {"position": True, "neighbours": "hinge"},
+    "dann_pos_hinge_h16": {"position": True, "neighbours": "hinge", "hidden": 16},
+}
+DANN_FEATURES = 5               # vel, angle, brick, hinge, core
+DANN_VEL_SCALE = 10.0           # rad/s; champions' |qvel| 99th percentile is ~7
+DANN_POS_SCALE = 0.5            # m; hinges sit up to ~1.2 m from the core
+DANN_F_RANGE = (0.2, 2.0)       # Hz, learned clock frequency (phase variant)
+
+
+def _hinge_neighbour_slots(topology: dict[str, Any], positions: dict[str, np.ndarray]) -> dict[str, list]:
+    """Per hinge, its nearest hinges in the body tree (paths through bricks and
+    the core only), slotted by the dominant axis of the direction to them."""
+    adj: dict[str, set[str]] = {n: set() for n in topology["type"]}
+    for parent, child, _ in topology["edges"]:
+        adj[parent].add(child)
+        adj[child].add(parent)
+    is_hinge = {n: oh == _DIST_TYPE_ONEHOT[ModuleType.HINGE] for n, oh in topology["type"].items()}
+
+    slots = {}
+    for h in positions:
+        found, seen, frontier = [], {h}, [h]
+        while frontier:  # flood through non-hinge modules, stopping at hinges
+            nxt = []
+            for n in frontier:
+                for m in adj[n] - seen:
+                    seen.add(m)
+                    (found if is_hinge[m] else nxt).append(m)
+            frontier = nxt
+        s: list[str | None] = [None] * DIST_N_FACES
+        best = [np.inf] * DIST_N_FACES
+        for m in found:
+            d = positions[m] - positions[h]
+            axis = int(np.argmax(np.abs(d)))
+            k = 2 * axis + (d[axis] < 0)
+            if np.linalg.norm(d) < best[k]:
+                s[k], best[k] = m, float(np.linalg.norm(d))
+        slots[h] = s
+    return slots
+
+
+class ZooDistributedAnnV2:
+    """Improved distributed ANN (see DANN_VARIANTS above).
+
+    Per hinge input: [self features, 6 neighbour slots x 5 features (zeros when
+    empty), clock, core orientation (3), (position (3))]. The clock is
+    sin(2 pi k / 25) at control step k as in the original, or for the phase
+    variant sin and cos of (2 pi f t + phase_i). Parameters: the MLP's
+    (W1, b1, W2, b2), then (phase variant) the frequency gene and n phase genes,
+    phase_i = pi * gene.
+    """
+
+    def __init__(self, body: str, model: mujoco.MjModel, data: mujoco.MjData, *, position: bool = False,
+                 phase: bool = False, neighbours: str = "module", hidden: int = DIST_HIDDEN) -> None:
+        topology = body_topology(body, parent_slot="back")
+        self._data = data
+        self.position, self.phase, self.hidden = position, phase, hidden
+        n = model.nu
+
+        mujoco.mj_resetData(model, data)
+        mujoco.mj_forward(model, data)
+        core = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
+        rot = data.xmat[core].reshape(3, 3)
+
+        hinges, qpos, dof, pos = [], [], [], {}
+        for a in range(n):
+            joint = model.actuator_trnid[a, 0]
+            module = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint).removeprefix("robot1_").removesuffix("-servo")
+            if topology["type"].get(module) != _DIST_TYPE_ONEHOT[ModuleType.HINGE]:
+                raise ValueError(f"actuator {a} does not drive a recorded hinge module ({module})")
+            hinges.append(module)
+            qpos.append(model.jnt_qposadr[joint])
+            dof.append(model.jnt_dofadr[joint])
+            pos[module] = rot.T @ (data.xanchor[joint] - data.xpos[core])
+        self._qpos, self._dof = np.array(qpos), np.array(dof)
+
+        slots = _hinge_neighbour_slots(topology, pos) if neighbours == "hinge" else topology["slots"]
+        names = list(topology["type"])
+        row = {m: i for i, m in enumerate(names)}
+        empty = len(names)
+        self._features = np.zeros((empty + 1, DANN_FEATURES), dtype=np.float64)
+        for m, oh in topology["type"].items():
+            self._features[row[m], 1 + oh] = 1.0  # one-hot 1..3 -> columns 2..4
+        self._hinge_rows = np.array([row[h] for h in hinges])
+        self._gather = np.array([[row[h]] + [row[m] if m is not None else empty for m in slots[h]]
+                                 for h in hinges])
+        self._pos = np.array([pos[h] for h in hinges]) / DANN_POS_SCALE
+
+        self.n_inputs = (1 + DIST_N_FACES) * DANN_FEATURES + (2 if phase else 1) + 3 + (3 if position else 0)
+        self._shapes = [(hidden, self.n_inputs), (hidden,), (1, hidden), (1,)]
+        self._n_mlp = sum(int(np.prod(s)) for s in self._shapes)
+        self.num_params = self._n_mlp + (1 + n if phase else 0)
+        self._step = 0
+        self.set_params(np.zeros(self.num_params))
+
+    def set_params(self, vec: np.ndarray) -> None:
+        g = np.asarray(vec, dtype=np.float64)
+        if len(g) != self.num_params:
+            raise IndexError("Parameter vector length mismatch")
+        out, i = [], 0
+        for shape in self._shapes:
+            size = int(np.prod(shape))
+            out.append(g[i:i + size].reshape(shape))
+            i += size
+        self._w1, self._b1, self._w2, self._b2 = out
+        if self.phase:
+            self._freq = _sigmoid_range(g[i], *DANN_F_RANGE)
+            self._phases = math.pi * g[i + 1:]
+
+    def reset(self) -> None:
+        self._step = 0
+
+    def node_inputs(self, t: float, state: np.ndarray) -> np.ndarray:
+        f = self._features
+        f[self._hinge_rows, 0] = np.clip(self._data.qvel[self._dof] / DANN_VEL_SCALE, -1.0, 1.0)
+        f[self._hinge_rows, 1] = np.clip(self._data.qpos[self._qpos] / HALF_PI, -1.0, 1.0)
+        n = len(self._gather)
+        parts = [f[self._gather].reshape(n, -1)]
+        if self.phase:
+            arg = 2 * math.pi * self._freq * t + self._phases
+            parts += [np.sin(arg)[:, None], np.cos(arg)[:, None]]
+        else:
+            parts.append(np.full((n, 1), math.sin(2 * math.pi * self._step / DIST_TIME_PERIOD)))
+        parts.append(np.broadcast_to(state[:3], (n, 3)))
+        if self.position:
+            parts.append(self._pos)
+        return np.hstack(parts)
+
+    def act(self, t: float, state: np.ndarray) -> np.ndarray:
+        h = np.maximum(0.0, self.node_inputs(t, state) @ self._w1.T + self._b1)
+        self._step += 1
+        return np.tanh(h @ self._w2.T + self._b2)[:, 0] * HALF_PI
+
+
 def make_brain(
     kind: str, n_inputs: int, n_hinges: int, physics_dt: float = 0.002, duration: float = 15.0,
 ) -> ZooAnn | ZooSine | RevolveCpg | Matsuoka | ZooSquare | ZooSquareSync | ZooBangBang:
@@ -320,4 +627,6 @@ def make_brain(
         return ZooSquareSync(n_inputs, n_hinges, duration)
     if kind == "bang_bang":
         return ZooBangBang(n_inputs, n_hinges, duration)
+    if kind == "distributed_ann" or kind in DANN_VARIANTS:
+        raise ValueError(f"{kind} needs the body topology: use zoo_benchmark.make_brain_for(..., body=...)")
     raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")
