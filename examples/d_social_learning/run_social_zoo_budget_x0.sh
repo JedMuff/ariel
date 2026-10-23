@@ -2,8 +2,10 @@
 #
 # x = 0 (novelty-only selection) companion to run_social_zoo_budget.sh: same
 # parameters and code, restricted to the ig10 budget, x = 0 and reps 0-9 (the
-# subset the final results use). Part 1 of 2: generations 0-30. Extend to 60
-# with run_social_zoo_budget_x0_extend.sh once these finish.
+# subset the final results use). Unlike the x = 0.5 / 1 runs, which ran 30
+# generations and were then resumed to 60 (run_social_zoo_budget_extend.sh),
+# these run all 60 generations in one go, so the whole run uses one random
+# stream and is written to a single database.db.
 #
 # Usage:
 #   sbatch examples/d_social_learning/run_social_zoo_budget_x0.sh
@@ -17,7 +19,7 @@
 #SBATCH --job-name=social-zoo-x0
 #SBATCH --output=out_files/social-zoo-x0-%A_%a.out
 #SBATCH --error=out_files/social-zoo-x0-%A_%a.err
-#SBATCH --time=02:30:00
+#SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=40G
 #SBATCH --partition=genoa
@@ -74,7 +76,7 @@ INNER_GENS="${BUDGETS[$BUDGET_IDX]}"
 # Parameters (as run_social_parta_only.sh, except INNER_GENS and SIM_PRESET)
 # ---------------------------------------------------------------------------
 
-GENS=30
+GENS=60
 POP=20
 LAM=20
 INNER_POP=20
