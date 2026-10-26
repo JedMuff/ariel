@@ -34,7 +34,6 @@
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=16G
 #SBATCH --array=0-44
-#SBATCH --nodelist=node02,node03
 
 set -euo pipefail
 
