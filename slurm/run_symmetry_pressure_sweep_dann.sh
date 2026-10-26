@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Symmetry-pressure task x genome sweep with the distributed ANN (DANN) brain:
-# 3 tasks x 3 genome representations x N_REPS repetitions.
+# 3 tasks x 2 genome representations x N_REPS repetitions.
 #
 # Same outer EA as slurm/run_symmetry_pressure_sweep.sh (mu=10, lambda=20,
 # budget 30, --repeat-evals), but each skill trains the DANN (--brain dann,
@@ -13,7 +13,7 @@
 # yaw over 540 deg, ending the episode at 540 deg).
 #
 # Tasks:   forward | multidirection | turn_avg  (examples/symmetry_pressure/gecko_skill_tasks.py)
-# Genomes: tree | tree_symmetric | cppn          (examples/symmetry_pressure/genome_adapter.py)
+# Genomes: tree | tree_symmetric                 (examples/symmetry_pressure/genome_adapter.py)
 #
 # Timing (local, tree_symmetric, 20 workers per run with three runs side by
 # side): 30 generations took 30 min (forward); turn_avg took 57 min for 20,
@@ -33,7 +33,7 @@
 #SBATCH --time=08:00:00
 #SBATCH --cpus-per-task=20
 #SBATCH --mem=16G
-#SBATCH --array=0-44
+#SBATCH --array=0-29
 
 set -euo pipefail
 
@@ -48,12 +48,12 @@ SCRIPTS_DIR=$REPO/examples/symmetry_pressure
 
 N_REPS=5
 TASKS=(forward multidirection turn_avg)
-GENOME_TYPES=(tree tree_symmetric cppn)
+GENOME_TYPES=(tree tree_symmetric)
 
 ID=$SLURM_ARRAY_TASK_ID
 TASK_IDX=$(( ID % 3 ))
-GENOME_IDX=$(( (ID / 3) % 3 ))
-REP=$(( (ID / 9) % N_REPS ))
+GENOME_IDX=$(( (ID / 3) % 2 ))
+REP=$(( (ID / 6) % N_REPS ))
 
 TASK=${TASKS[$TASK_IDX]}
 GENOME_TYPE=${GENOME_TYPES[$GENOME_IDX]}
