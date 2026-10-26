@@ -22,10 +22,10 @@ Inner loop:  One or more separate CMA-ES runs per body via
                    (same reward primitives as gecko_food_skills.py's
                    loco/left/right). Body fitness = mean of the 3.
 
---eval-profile dsocial_zoo (shared.DSOCIAL_ZOO) normalises every skill to
-[0, 1] before the jerk/height penalties: translation over 0.5 m/s x duration,
-turns as net signed yaw over 360 degrees (the episode ends at a full turn), so
-multidirection and turn_avg average comparable numbers. Fitness stays
+--eval-profile dsocial_zoo (shared.DSOCIAL_ZOO) normalises every skill
+before the jerk/height penalties: translation to [0, 2] as 2 x displacement
+over 0.5 m/s x duration, turns to [0, 1] as net signed yaw over 540 degrees
+(the episode ends at 540 degrees). Fitness stays
 minimised (= -mean skill objective).
 
 Unlike gecko_food_skills.py, there is no loco-fitness gate here: every
@@ -128,7 +128,7 @@ parser.add_argument("--eval-profile",  choices=list(EVAL_PROFILES), default="swe
                     help="Skill episodes, penalties and inner CMA-ES (see shared.EvalProfile): "
                          "'sweep' = the original sweep's; 'dsocial_zoo' = d_social_learning's zoo "
                          "preset (zoo modules, 15 s at 20 Hz, 5 s turns, 10 CMA-ES gens x 20 from x0 = 0) with "
-                         "every skill normalised to [0, 1] and turns scored as net yaw up to 360 deg")
+                         "translation scored in [0, 2] and turns as net yaw up to 540 deg in [0, 1]")
 parser.add_argument("--rowing-penalty", action="store_true",
                     help="Scale a skill's forward displacement by 1 - rowing_frac, the "
                          "share of the stroke rowing_detect.py calls rowing")

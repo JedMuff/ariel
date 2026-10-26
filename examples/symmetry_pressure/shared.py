@@ -1121,8 +1121,8 @@ class EvalProfile:
     modules, 15 s translate episodes at 20 Hz control (turns: 5 s), alpha and jerk constants rescaled
     from the 9-step to the 25-step control period, spawn-height penalty above
     0.5 m) and its inner CMA-ES from x0 = 0 with sigma 0.5 (experiment.py),
-    10 generations of popsize 20 (run_social_zoo_budget.sh's ig10 budget). It also normalises every skill to [0, 1]
-    (translate_score, turn_score) before the penalties are subtracted.
+    10 generations of popsize 20 (run_social_zoo_budget.sh's ig10 budget). It also normalises every skill
+    (translate_score to [0, 2], turn_score to [0, 1]) before the penalties are subtracted.
     """
 
     loco_duration: float = LOCO_DURATION
@@ -1154,19 +1154,21 @@ DSOCIAL_ZOO = EvalProfile(
 )
 EVAL_PROFILES = {"sweep": SWEEP_PROFILE, "dsocial_zoo": DSOCIAL_ZOO}
 
-TRANSLATE_REF_SPEED = 0.5        # m/s; a normalised translate skill scores 1 at this mean speed
-TURN_TARGET         = 2 * math.pi  # rad of net yaw for a normalised turn skill to score 1 (ends the episode)
+TRANSLATE_REF_SPEED = 0.5        # m/s; a normalised translate skill scores TRANSLATE_MAX at this mean speed
+TRANSLATE_MAX       = 2.0        # normalised translate score cap
+TURN_TARGET         = 3 * math.pi  # rad (540 deg) of net yaw for a normalised turn skill to score 1 (ends the episode)
 
 
 def translate_score(disp: float, duration: float) -> float:
-    """Normalised translate skill: displacement along the reward axis over
-    TRANSLATE_REF_SPEED * duration, clipped to [0, 1]."""
-    return float(np.clip(disp / (TRANSLATE_REF_SPEED * duration), 0.0, 1.0))
+    """Normalised translate skill: TRANSLATE_MAX x displacement along the
+    reward axis over TRANSLATE_REF_SPEED * duration, clipped to
+    [0, TRANSLATE_MAX] (0.5 m/s or faster scores 2)."""
+    return float(np.clip(TRANSLATE_MAX * disp / (TRANSLATE_REF_SPEED * duration), 0.0, TRANSLATE_MAX))
 
 
 def turn_score(net_yaw: float) -> float:
     """Normalised turn skill: net signed yaw in the target direction over
-    TURN_TARGET (one full turn), clipped to [0, 1]."""
+    TURN_TARGET (540 degrees), clipped to [0, 1]."""
     return float(np.clip(net_yaw / TURN_TARGET, 0.0, 1.0))
 
 # The core-mounted camera's local mount (euler + position) is fixed in
@@ -1370,7 +1372,7 @@ def run_skill_episode(
         step += 1
         sim_step += 1
         if reward.kind == "rotate" and profile.normalised and accumulated >= TURN_TARGET:
-            break  # a full turn: the score is capped at 1, so stop early
+            break  # 540 deg: the score is capped at 1, so stop early
 
     mean_jerk    = jerk_sum / max(ctrl_step - 1, 1)
     jerk_penalty = profile.jerk_weight * mean_jerk if mean_jerk >= profile.jerk_threshold else 0.0

@@ -10,7 +10,7 @@ Covers:
     parent slot)
   - the dann brain's parameter count, output range and clock reset
   - translate_score / turn_score normalisation, and the early end of a
-    normalised turn episode at a full turn
+    normalised turn episode at 540 degrees
   - SWEEP_PROFILE is the module's original constants
 """
 
@@ -143,15 +143,15 @@ def test_dann_rejects_wrong_length():
         make_brain_for_model("dann", model, data).set_params(np.zeros(10))
 
 
-def test_translate_score_clips_to_unit_range():
+def test_translate_score_clips_to_0_2():
     assert translate_score(-1.0, 15.0) == 0.0
-    assert translate_score(0.25 * 15.0, 15.0) == pytest.approx(0.5)
-    assert translate_score(100.0, 15.0) == 1.0
+    assert translate_score(0.25 * 15.0, 15.0) == pytest.approx(1.0)  # 0.25 m/s
+    assert translate_score(100.0, 15.0) == 2.0
 
 
 def test_turn_score_clips_to_unit_range():
     assert turn_score(-1.0) == 0.0
-    assert turn_score(math.pi) == pytest.approx(0.5)
+    assert turn_score(2 * math.pi) == pytest.approx(2 / 3)  # one full turn of 540 deg
     assert turn_score(3 * TURN_TARGET) == 1.0
 
 
@@ -169,9 +169,9 @@ def _turn_episode(monkeypatch, profile: EvalProfile, yaw_per_step: float):
 
 def test_normalised_turn_ends_at_full_turn(monkeypatch):
     profile = EvalProfile(**{**DSOCIAL_ZOO.__dict__, "turn_duration": 5.0})
-    _, info, t_end = _turn_episode(monkeypatch, profile, 0.01)  # 2 pi after ~629 steps (1.26 s)
+    _, info, t_end = _turn_episode(monkeypatch, profile, 0.01)  # 3 pi after ~943 steps (1.9 s)
     assert info["score"] == 1.0
-    assert t_end < shared.SETTLE_DURATION + 2.0
+    assert t_end < shared.SETTLE_DURATION + 2.5
 
 
 def test_normalised_turn_counts_net_yaw(monkeypatch):

@@ -8,9 +8,9 @@
 # dann_pos_hinge_h16: one 705-param MLP shared by every hinge) under
 # --eval-profile dsocial_zoo (shared.DSOCIAL_ZOO): d_social_learning's zoo
 # preset (zoo modules, 15 s episodes at 20 Hz control; 5 s for turns) and inner CMA-ES
-# (10 gens, popsize 20, sigma 0.5 from x0 = 0), with every skill normalised to
-# [0, 1] (translation over 0.5 m/s x duration, turns as net yaw up to 360 deg,
-# ending the episode at a full turn).
+# (10 gens, popsize 20, sigma 0.5 from x0 = 0), with translation scored in
+# [0, 2] (2 x displacement over 0.5 m/s x duration) and turns in [0, 1] (net
+# yaw over 540 deg, ending the episode at 540 deg).
 #
 # Tasks:   forward | multidirection | turn_avg  (examples/symmetry_pressure/gecko_skill_tasks.py)
 # Genomes: tree | tree_symmetric | cppn          (examples/symmetry_pressure/genome_adapter.py)
