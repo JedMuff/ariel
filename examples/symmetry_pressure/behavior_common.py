@@ -2,11 +2,10 @@
 Recording replay + behavioural descriptors for gecko_skill_tasks.py
 checkpoints (forward / multidirection / turn_avg locomotion runs).
 
-``replay_skill_episode`` mirrors ``shared._skill_worker_eval`` step for step
-(settle, stride-gated control with CTRL_ALPHA smoothing, rotor-floor contact
-counting, yaw accumulation, jerk / height penalties, and the rowing penalty
-for --rowing-penalty runs) so its recomputed fitness
-reproduces the stored per-skill fitness, and additionally records:
+``replay_skill_episode`` runs the training episode itself
+(``shared.run_skill_episode``, under the run's eval profile and with the
+rowing penalty for --rowing-penalty runs) through its recorder hooks, so its
+fitness reproduces the stored per-skill fitness, and additionally records:
 
   - saved traces, subsampled every ``record_every_n`` sim steps: hinge
     angles/velocities, world pose + floor contact of every robot body, and
@@ -28,6 +27,8 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+import itertools
+from collections.abc import Iterator, Sequence
 from typing import Optional
 
 import mujoco
@@ -39,22 +40,16 @@ from shared import (
     EVAL_PROFILES,
     SWEEP_PROFILE,
     EvalProfile,
-    CTRL_ALPHA,
+    SkillReward,
     FORWARD_AXIS,
-    HEIGHT_PENALTY_THRESHOLD,
-    JERK_PENALTY_WEIGHT,
-    JERK_THRESHOLD,
-    ROWING_RECORD_EVERY_N,
-    SETTLE_DURATION,
     _rotate_2d,
     build_loco_world_for_body,
     floor_id,
     genome_to_spec,
     make_brain_for_model,
     robot_bodies,
+    run_skill_episode,
     rotor_geom_ids,
-    rowing_info,
-    rowing_scaled_disp,
     signed_vertical_yaw_delta,
     with_zoo_modules,
 )
@@ -139,6 +134,8 @@ class EpisodeTrace:
     dt: float
     replayed_fitness: float = float("nan")
     raw_score: float = float("nan")  # displacement along skill axis, or accumulated yaw
+    score: float = float("nan")  # normalised skill score; only for normalised eval profiles
+    tie_choice: Optional[list[int]] = None  # dann neighbour-tie resolution replayed (None = default)
     rowing_frac: float = float("nan")  # rowing_detect's rowing share; only for rowing-penalty runs
     mean_jerk: float = 0.0
     c_hinge: int = 0
@@ -178,17 +175,19 @@ def replay_skill_episode(
     record_every_n: int = 100,
     brain_kind: str = "ann",
     rowing_penalty: bool = False,
+    profile: EvalProfile = SWEEP_PROFILE,
+    tie_choice: Optional[Sequence[int]] = None,
 ) -> EpisodeTrace:
-    """Replay one trained skill; see module docstring. The control/fitness
-    logic must stay in lockstep with shared._skill_worker_eval.
+    """Replay one trained skill; see module docstring. The episode itself is
+    shared.run_skill_episode (the training loop), driven through its
+    recorder hooks, so the replayed fitness is the training fitness.
+    tie_choice: see shared.DannBrain (dann_tie_choices enumerates them).
     """
-    from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
-
     t0 = time.perf_counter()
     model, data = build_loco_world_for_body(genome, to_spec_fn=to_spec_fn)
-    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32))
+    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32), tie_choice)
 
-    rotor_ids = rotor_geom_ids(model)
+    rotor_ids = set(rotor_geom_ids(model))
     floor = floor_id(model)
     core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
 
@@ -206,6 +205,7 @@ def replay_skill_episode(
         body_names=[model.body(b).name for b in bodies],
         actuator_joint=[jnt_col.get(int(model.actuator_trnid[a, 0]), -1) for a in range(model.nu)],
     )
+    trace.tie_choice = list(tie_choice) if tie_choice is not None else None
     ctrl_record_every = max(1, record_every_n // control_step_freq)
 
     def body_contacts() -> np.ndarray:
@@ -220,7 +220,25 @@ def replay_skill_episode(
                     mask[col] = True
         return mask
 
-    def record_step(sim_step: int, contacts: Optional[np.ndarray] = None) -> None:
+    def rotor_contacts() -> set[int]:
+        curr: set[int] = set()
+        for k in range(data.ncon):
+            c = data.contact[k]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if g1 == floor and g2 in rotor_ids:
+                curr.add(g2)
+            elif g2 == floor and g1 in rotor_ids:
+                curr.add(g1)
+        return curr
+
+    # Mutable rollout state shared by the hooks below.
+    st = {"sim_step": 0, "ctrl_step": 0, "c_hinge": 0, "prev_contacts": set(), "r_prev": None,
+          "settle_height": float("nan")}
+    core_xy, core_z, core_tilt, yaw_delta = [], [], [], []
+    joint_angles, body_contact, ctrl_applied = [], [], []
+
+    def record_step(contacts: Optional[np.ndarray] = None) -> None:
+        sim_step = st["sim_step"]
         if sim_step % record_every_n != 0:
             return
         if contacts is None:
@@ -232,124 +250,80 @@ def replay_skill_episode(
             sim_step, data.time, data.xpos[bodies].copy(), data.xquat[bodies].copy(), contacts,
         ))
 
-    mujoco.mj_resetData(model, data)
-    # Hinge anchors in the core frame at the genome's rest pose (before settle
-    # deformation), for pairing left/right mirror joints.
-    mujoco.mj_kinematics(model, data)
-    core_R = data.xmat[core_id].reshape(3, 3)
-    trace.joint_anchors_core = (data.xanchor[hinge_joints] - data.xpos[core_id]) @ core_R
+    def on_settle_step(_data: mujoco.MjData) -> None:
+        record_step()
+        st["sim_step"] += 1
+        st["r_prev"] = np.array(data.xmat[core_id]).reshape(3, 3).copy()
+        st["settle_height"] = float(data.xpos[core_id, 2])
 
-    sim_step = 0
-    while data.time < SETTLE_DURATION:
-        mujoco.mj_step(model, data)
-        record_step(sim_step)
-        sim_step += 1
+    def on_control(state: np.ndarray, raw_action: np.ndarray, applied: np.ndarray) -> None:
+        if st["ctrl_step"] % ctrl_record_every == 0:
+            trace.ctrl_rows.append((
+                st["ctrl_step"], st["sim_step"], data.time, state.copy(),
+                np.asarray(raw_action).copy(), applied.copy(),
+            ))
+        ctrl_applied.append(applied.copy())
+        st["ctrl_step"] += 1
 
-    initial_height = float(data.xpos[core_id, 2])
-
-    step = 0
-    current_action = np.zeros(model.nu)
-    c_hinge = 0
-    prev_contacts: set[int] = set()
-    prev_ctrl: Optional[np.ndarray] = None
-    jerk_sum = 0.0
-    ctrl_step = 0
-
-    kind = reward_spec["kind"]
-    if kind == "translate":
-        xy0 = np.array([data.qpos[0], data.qpos[1]])
-        reward_axis = _rotate_2d(FORWARD_AXIS, reward_spec["angle_deg"])
-    else:
-        accumulated = 0.0
-    r_prev = np.array(data.xmat[core_id]).reshape(3, 3).copy()
-
-    core_xy, core_z, core_tilt, yaw_delta = [], [], [], []
-    row_poses, row_quats = [], []  # 50Hz poses for the rowing penalty, as shared._skill_worker_eval
-    joint_angles, body_contact, ctrl_applied = [], [], []
-
-    episode_end = SETTLE_DURATION + reward_spec["duration"]
-    while data.time < episode_end:
-        if step % control_step_freq == 0:
-            state = get_robot_state(data).astype(np.float32)
-            raw_action = brain.act(data, state)
-            current_action = np.clip(
-                current_action * (1.0 - CTRL_ALPHA) + raw_action * CTRL_ALPHA,
-                -math.pi / 2, math.pi / 2,
-            )
-            if prev_ctrl is not None:
-                jerk_sum += float(np.mean(np.abs(current_action - prev_ctrl)))
-            prev_ctrl = current_action.copy()
-            if ctrl_step % ctrl_record_every == 0:
-                trace.ctrl_rows.append((
-                    ctrl_step, sim_step, data.time, state.copy(),
-                    np.asarray(raw_action).copy(), current_action.copy(),
-                ))
-            ctrl_applied.append(current_action.copy())
-            ctrl_step += 1
-        data.ctrl[:] = current_action
-        mujoco.mj_step(model, data)
-
-        curr: set[int] = set()
-        for k in range(data.ncon):
-            c = data.contact[k]
-            g1, g2 = int(c.geom1), int(c.geom2)
-            if g1 == floor and g2 in rotor_ids:
-                curr.add(g2)
-            elif g2 == floor and g1 in rotor_ids:
-                curr.add(g1)
-        c_hinge += len(curr - prev_contacts)
-        prev_contacts = curr
+    def recorder(_data: mujoco.MjData, _raw_so_far: float) -> None:
+        curr = rotor_contacts()
+        st["c_hinge"] += len(curr - st["prev_contacts"])
+        st["prev_contacts"] = curr
 
         r_curr = np.array(data.xmat[core_id]).reshape(3, 3)
-        delta = signed_vertical_yaw_delta(r_prev, r_curr)
-        if kind == "rotate":
-            accumulated += max(0.0, delta * reward_spec["turn_sign"])
-        r_prev = r_curr.copy()
+        yaw_delta.append(signed_vertical_yaw_delta(st["r_prev"], r_curr))
+        st["r_prev"] = r_curr.copy()
 
         contacts = body_contacts()
         core_xy.append((data.qpos[0], data.qpos[1]))
         core_z.append(data.xpos[core_id, 2])
         core_tilt.append(math.acos(max(-1.0, min(1.0, float(r_curr[2, 2])))))
-        yaw_delta.append(delta)
         joint_angles.append(data.qpos[qpos_adr].copy())
         body_contact.append(contacts)
-        record_step(sim_step, contacts)
-        if rowing_penalty and sim_step % ROWING_RECORD_EVERY_N == 0:
-            row_poses.append(data.xpos[bodies].copy())
-            row_quats.append(data.xquat[bodies].copy())
+        record_step(contacts)
+        st["sim_step"] += 1
 
-        step += 1
-        sim_step += 1
+    # Hinge anchors in the core frame at the genome's rest pose (before settle
+    # deformation), for pairing left/right mirror joints.
+    mujoco.mj_resetData(model, data)
+    mujoco.mj_kinematics(model, data)
+    core_R = data.xmat[core_id].reshape(3, 3)
+    trace.joint_anchors_core = (data.xanchor[hinge_joints] - data.xpos[core_id]) @ core_R
 
-    mean_jerk = jerk_sum / max(ctrl_step - 1, 1)
-    jerk_penalty = JERK_PENALTY_WEIGHT * mean_jerk if mean_jerk >= JERK_THRESHOLD else 0.0
-    height_penalty = initial_height if initial_height > HEIGHT_PENALTY_THRESHOLD else 0.0
-    if kind == "translate":
-        xy_now = np.array([data.qpos[0], data.qpos[1]])
-        raw_score = float(np.dot(xy_now - xy0, reward_axis))
-    else:
-        raw_score = accumulated
-    score = raw_score
-    if rowing_penalty:
-        trace.rowing_frac = rowing_info(row_poses, row_quats, ROWING_RECORD_EVERY_N * float(model.opt.timestep))["rowing_frac"]
-        score = rowing_scaled_disp(raw_score, trace.rowing_frac)
-    # c_hinge is a behavioural descriptor only; training no longer scores it.
-    fitness = -(score - height_penalty - jerk_penalty)
+    fitness, info = run_skill_episode(
+        model, data, brain, SkillReward(**reward_spec), control_step_freq, profile,
+        rowing_bodies=bodies if rowing_penalty else None,
+        recorder=recorder, on_settle_step=on_settle_step, on_control=on_control,
+    )
 
     trace.replayed_fitness = fitness
-    trace.raw_score = raw_score
-    trace.mean_jerk = mean_jerk
-    trace.c_hinge = c_hinge
-    trace.initial_height = initial_height
+    trace.raw_score = info["raw_score"]
+    trace.score = info.get("score", float("nan"))
+    trace.rowing_frac = info.get("rowing_frac", float("nan"))
+    ctrl = np.asarray(ctrl_applied, dtype=np.float64).reshape(-1, model.nu)
+    trace.mean_jerk = float(np.abs(np.diff(ctrl, axis=0)).mean(axis=1).mean()) if len(ctrl) > 1 else 0.0
+    trace.c_hinge = st["c_hinge"]
+    trace.initial_height = st["settle_height"]  # core height after settling
     trace.core_xy = np.asarray(core_xy, dtype=np.float64).reshape(-1, 2)
     trace.core_z = np.asarray(core_z, dtype=np.float64)
     trace.core_tilt = np.asarray(core_tilt, dtype=np.float64)
     trace.yaw_delta = np.asarray(yaw_delta, dtype=np.float64)
     trace.joint_angles = np.asarray(joint_angles, dtype=np.float64).reshape(-1, len(hinge_joints))
     trace.body_contact = np.asarray(body_contact, dtype=bool).reshape(-1, len(bodies))
-    trace.ctrl_applied = np.asarray(ctrl_applied, dtype=np.float64).reshape(-1, model.nu)
+    trace.ctrl_applied = ctrl
     trace.wall_time_s = time.perf_counter() - t0
     return trace
+
+
+def dann_tie_choices(genome: dict, to_spec_fn=genome_to_spec) -> Iterator[tuple[int, ...]]:
+    """Every way to resolve the dann brain's exact neighbour ties for this
+    body (shared.DannBrain tie_choice), the default (all zeros) first. DANN
+    runs trained before the ties were made deterministic resolved them in
+    Python's per-process set order, so replaying one of their controllers
+    means finding the resolution its job happened to use."""
+    model, data = build_loco_world_for_body(genome, to_spec_fn=to_spec_fn)
+    ties = make_brain_for_model("dann", model, data).neighbour_ties
+    return itertools.product(*(range(len(c)) for _, _, c in ties))
 
 
 def drop_full_rate(trace: EpisodeTrace) -> None:

@@ -29,6 +29,7 @@ from __future__ import annotations
 import math
 import re
 import sys
+from collections.abc import Sequence
 from typing import Any
 from pathlib import Path
 
@@ -524,42 +525,75 @@ DANN_POS_SCALE = 0.5            # m; hinges sit up to ~1.2 m from the core
 DANN_F_RANGE = (0.2, 2.0)       # Hz, learned clock frequency (phase variant)
 
 
-def _hinge_neighbour_slots(topology: dict[str, Any], positions: dict[str, np.ndarray]) -> dict[str, list]:
-    """Per hinge, its nearest hinges in the body tree (paths through bricks and
-    the core only), slotted by the dominant axis of the direction to them."""
+def hinge_neighbour_ties(topology: dict[str, Any], positions: dict[str, np.ndarray]) -> list[tuple[str, int, list[str]]]:
+    """Per hinge and direction slot, the hinges tied for nearest, as
+    (hinge, slot, sorted candidates) for every slot with more than one."""
+    return [(h, k, c) for h, cands in _hinge_neighbour_candidates(topology, positions).items()
+            for k, c in enumerate(cands) if len(c) > 1]
+
+
+def _hinge_neighbour_candidates(topology: dict[str, Any], positions: dict[str, np.ndarray]) -> dict[str, list]:
+    """Per hinge and slot, the sorted names of the nearest hinges in that slot
+    (one, or several at exactly the same distance)."""
     adj: dict[str, set[str]] = {n: set() for n in topology["type"]}
     for parent, child, _ in topology["edges"]:
         adj[parent].add(child)
         adj[child].add(parent)
     is_hinge = {n: oh == _DIST_TYPE_ONEHOT[ModuleType.HINGE] for n, oh in topology["type"].items()}
 
-    slots = {}
+    out = {}
     for h in positions:
         found, seen, frontier = [], {h}, [h]
         while frontier:  # flood through non-hinge modules, stopping at hinges
             nxt = []
             for n in frontier:
-                for m in adj[n] - seen:
+                for m in sorted(adj[n] - seen):
                     seen.add(m)
                     (found if is_hinge[m] else nxt).append(m)
             frontier = nxt
-        s: list[str | None] = [None] * DIST_N_FACES
+        cands: list[list[str]] = [[] for _ in range(DIST_N_FACES)]
         best = [np.inf] * DIST_N_FACES
         for m in found:
             d = positions[m] - positions[h]
             axis = int(np.argmax(np.abs(d)))
             k = 2 * axis + (d[axis] < 0)
-            if np.linalg.norm(d) < best[k]:
-                s[k], best[k] = m, float(np.linalg.norm(d))
-        slots[h] = s
-    return slots
+            dist = float(np.linalg.norm(d))
+            if dist < best[k]:
+                cands[k], best[k] = [m], dist
+            elif dist == best[k]:
+                cands[k].append(m)
+        out[h] = [sorted(c) for c in cands]
+    return out
+
+
+def _hinge_neighbour_slots(topology: dict[str, Any], positions: dict[str, np.ndarray],
+                           tie_choice: Sequence[int] | None = None) -> dict[str, list]:
+    """Per hinge, its nearest hinges in the body tree (paths through bricks and
+    the core only), slotted by the dominant axis of the direction to them.
+
+    Hinges at exactly the same distance used to be picked in set-iteration
+    order, which follows Python's per-process string hashing, so runs trained
+    before this was fixed resolved those ties differently in each job. Ties
+    now go to the first name; tie_choice instead picks, for each entry of
+    hinge_neighbour_ties in order, the index of its candidate (to replay an
+    older run's controller)."""
+    cands = _hinge_neighbour_candidates(topology, positions)
+    pick = {}
+    if tie_choice is not None:
+        ties = hinge_neighbour_ties(topology, positions)
+        if len(tie_choice) != len(ties):
+            raise ValueError(f"tie_choice has {len(tie_choice)} entries, the body has {len(ties)} ties")
+        pick = {(h, k): c[i] for (h, k, c), i in zip(ties, tie_choice)}
+    return {h: [pick.get((h, k), c[0] if c else None) for k, c in enumerate(cs)] for h, cs in cands.items()}
 
 
 class ZooDistributedAnnV2:
     """Improved distributed ANN (see DANN_VARIANTS above).
 
     Per hinge input: [self features, 6 neighbour slots x 5 features (zeros when
-    empty), clock, core orientation (3), (position (3))]. The clock is
+    empty), clock, core orientation (3), (extra (extra_inputs)), (position (3))].
+    extra is a vector broadcast to every hinge, passed to act (e.g. camera
+    sections for the food task). The clock is
     sin(2 pi k / 25) at control step k as in the original, or for the phase
     variant sin and cos of (2 pi f t + phase_i). topology must use the "back"
     parent slot: body_topology(body, parent_slot="back") for a zoo body,
@@ -570,9 +604,11 @@ class ZooDistributedAnnV2:
 
     def __init__(self, topology: dict[str, Any], model: mujoco.MjModel, data: mujoco.MjData, *,
                  position: bool = False, phase: bool = False, neighbours: str = "module",
-                 hidden: int = DIST_HIDDEN) -> None:
+                 hidden: int = DIST_HIDDEN, extra_inputs: int = 0,
+                 tie_choice: Sequence[int] | None = None) -> None:
         self._data = data
         self.position, self.phase, self.hidden = position, phase, hidden
+        self.extra_inputs = extra_inputs
         n = model.nu
 
         mujoco.mj_resetData(model, data)
@@ -592,7 +628,9 @@ class ZooDistributedAnnV2:
             pos[module] = rot.T @ (data.xanchor[joint] - data.xpos[core])
         self._qpos, self._dof = np.array(qpos), np.array(dof)
 
-        slots = _hinge_neighbour_slots(topology, pos) if neighbours == "hinge" else topology["slots"]
+        # Exact ties for the hinge-neighbour slots (see _hinge_neighbour_slots).
+        self.neighbour_ties = hinge_neighbour_ties(topology, pos) if neighbours == "hinge" else []
+        slots = _hinge_neighbour_slots(topology, pos, tie_choice) if neighbours == "hinge" else topology["slots"]
         names = list(topology["type"])
         row = {m: i for i, m in enumerate(names)}
         empty = len(names)
@@ -604,7 +642,7 @@ class ZooDistributedAnnV2:
                                  for h in hinges])
         self._pos = np.array([pos[h] for h in hinges]) / DANN_POS_SCALE
 
-        self.n_inputs = (1 + DIST_N_FACES) * DANN_FEATURES + (2 if phase else 1) + 3 + (3 if position else 0)
+        self.n_inputs = (1 + DIST_N_FACES) * DANN_FEATURES + (2 if phase else 1) + 3 + extra_inputs + (3 if position else 0)
         self._shapes = [(hidden, self.n_inputs), (hidden,), (1, hidden), (1,)]
         self._n_mlp = sum(int(np.prod(s)) for s in self._shapes)
         self.num_params = self._n_mlp + (1 + n if phase else 0)
@@ -628,7 +666,7 @@ class ZooDistributedAnnV2:
     def reset(self) -> None:
         self._step = 0
 
-    def node_inputs(self, t: float, state: np.ndarray) -> np.ndarray:
+    def node_inputs(self, t: float, state: np.ndarray, extra: np.ndarray | None = None) -> np.ndarray:
         f = self._features
         f[self._hinge_rows, 0] = np.clip(self._data.qvel[self._dof] / DANN_VEL_SCALE, -1.0, 1.0)
         f[self._hinge_rows, 1] = np.clip(self._data.qpos[self._qpos] / HALF_PI, -1.0, 1.0)
@@ -640,12 +678,14 @@ class ZooDistributedAnnV2:
         else:
             parts.append(np.full((n, 1), math.sin(2 * math.pi * self._step / DIST_TIME_PERIOD)))
         parts.append(np.broadcast_to(state[:3], (n, 3)))
+        if self.extra_inputs:
+            parts.append(np.broadcast_to(np.asarray(extra, dtype=np.float64), (n, self.extra_inputs)))
         if self.position:
             parts.append(self._pos)
         return np.hstack(parts)
 
-    def act(self, t: float, state: np.ndarray) -> np.ndarray:
-        h = np.maximum(0.0, self.node_inputs(t, state) @ self._w1.T + self._b1)
+    def act(self, t: float, state: np.ndarray, extra: np.ndarray | None = None) -> np.ndarray:
+        h = np.maximum(0.0, self.node_inputs(t, state, extra) @ self._w1.T + self._b1)
         self._step += 1
         return np.tanh(h @ self._w2.T + self._b2)[:, 0] * HALF_PI
 

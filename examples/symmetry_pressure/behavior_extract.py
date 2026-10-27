@@ -63,8 +63,10 @@ from rich.console import Console
 from behavior_common import (
     DESCRIPTOR_NAMES,
     EpisodeTrace,
+    dann_tie_choices,
     drop_full_rate,
     replay_skill_episode,
+    resolve_eval_profile,
     resolve_replay_config,
     run_rowing_penalty,
     skills_for_task,
@@ -77,6 +79,8 @@ console = Console()
 LOCOMOTION_TASKS = ("forward", "multidirection", "turn_avg")
 _LOCO_RUN_RE = re.compile(r"^(sympress_(forward|multidirection|turn_avg)_|ctrlstride_)")
 _CKPT_RE = re.compile(r"^gen(\d+)_body(\d+)$")
+FIT_TOL = 1e-6          # replayed vs stored per-skill fitness, for the dann tie search
+MAX_TIE_CHOICES = 64    # tie resolutions tried per episode
 
 
 # ── Run discovery / episode selection ─────────────────────────────────────────
@@ -135,16 +139,22 @@ def load_stored_records(run_dir: Path, task: str) -> dict[tuple[int, int], dict]
     return records
 
 
-def build_jobs(ckpts: list[Path], task: str, record_every_n: int, max_modules: int | None) -> list[tuple]:
+def build_jobs(ckpts: list[Path], task: str, record_every_n: int, max_modules: int | None,
+               stored: dict[tuple[int, int], dict] | None = None) -> list[tuple]:
+    """One job per (checkpoint, trained skill), carrying the stored per-skill
+    fitness (nan if unknown) for the dann tie search in _replay_worker."""
+    stored = stored or {}
     jobs = []
     for ckpt in ckpts:
         m = _CKPT_RE.match(ckpt.name)
         if not m:
             continue
         gen, body_idx = int(m.group(1)), int(m.group(2))
-        for skill, reward_spec in skills_for_task(task):
+        for skill, reward_spec in skills_for_task(task, resolve_eval_profile(ckpt)):
             if (ckpt / f"{skill}_weights.npy").exists():
-                jobs.append((str(ckpt), gen, body_idx, skill, reward_spec, record_every_n, max_modules))
+                fit = stored.get((gen, body_idx), {}).get("per_skill", {}).get(skill, {}).get("fitness")
+                fit = float(fit) if fit is not None else float("nan")
+                jobs.append((str(ckpt), gen, body_idx, skill, reward_spec, record_every_n, max_modules, fit))
     return jobs
 
 
@@ -157,17 +167,31 @@ def _pool_init() -> None:
 
 
 def _replay_worker(job: tuple) -> tuple[int, int, str, EpisodeTrace | None, dict | None, str]:
-    ckpt_s, gen, body_idx, skill, reward_spec, record_every_n, max_modules = job
+    ckpt_s, gen, body_idx, skill, reward_spec, record_every_n, max_modules, stored_fit = job
     ckpt = Path(ckpt_s)
     try:
         genome = json.loads((ckpt / "best_genome.json").read_text())
         weights = np.load(ckpt / f"{skill}_weights.npy")
         to_spec_fn, stride, brain_kind = resolve_replay_config(ckpt, max_modules=max_modules)
-        trace = replay_skill_episode(
-            genome, weights, skill, reward_spec,
-            to_spec_fn=to_spec_fn, control_step_freq=stride, record_every_n=record_every_n,
-            brain_kind=brain_kind, rowing_penalty=run_rowing_penalty(ckpt),
-        )
+
+        def replay(tie_choice=None) -> EpisodeTrace:
+            return replay_skill_episode(
+                genome, weights, skill, reward_spec,
+                to_spec_fn=to_spec_fn, control_step_freq=stride, record_every_n=record_every_n,
+                brain_kind=brain_kind, rowing_penalty=run_rowing_penalty(ckpt),
+                profile=resolve_eval_profile(ckpt), tie_choice=tie_choice,
+            )
+
+        trace = replay()
+        # A dann run trained before brains.py made neighbour ties deterministic
+        # resolved them by its job's hash seed: find the resolution that
+        # reproduces the stored fitness (kept as trace.tie_choice).
+        if brain_kind == "dann" and math.isfinite(stored_fit) and abs(trace.replayed_fitness - stored_fit) > FIT_TOL:
+            for choice in list(dann_tie_choices(genome, to_spec_fn))[1:MAX_TIE_CHOICES]:
+                alt = replay(choice)
+                if abs(alt.replayed_fitness - stored_fit) <= FIT_TOL:
+                    trace = alt
+                    break
         desc = trace_descriptors(trace)
         drop_full_rate(trace)
         return gen, body_idx, skill, trace, desc, ""
@@ -217,7 +241,8 @@ def write_results(
             "n_joints": len(trace.joint_names), "n_bodies": len(trace.body_names),
             "stored_fitness": stored_fit if stored_fit is not None else float("nan"),
             "replayed_fitness": trace.replayed_fitness,
-            "raw_score": trace.raw_score, "rowing_frac": trace.rowing_frac, "mean_jerk": trace.mean_jerk,
+            "raw_score": trace.raw_score, "score": trace.score,
+            "tie_choice": json.dumps(trace.tie_choice), "rowing_frac": trace.rowing_frac, "mean_jerk": trace.mean_jerk,
             "initial_height": trace.initial_height,
             "yz_symmetry": rec.get("yz_symmetry", float("nan")),
             "wall_time_s": trace.wall_time_s,
@@ -271,7 +296,7 @@ def write_results(
             arrays["ctrl_state__length"] = np.array(state_len, dtype=np.int16)
             arrays["ctrl_state__values"] = np.concatenate(state_flat).astype(np.float16)
 
-    str_cols = {"skill", "task", "genome_type", "joint_names_json", "body_names_json", "actuator_joint_json"}
+    str_cols = {"skill", "task", "genome_type", "tie_choice", "joint_names_json", "body_names_json", "actuator_joint_json"}
     int_cols = {"episode_idx", "gen", "body_idx", "ind_id", "control_step_freq", "n_joints", "n_bodies"}
     for k in meta_rows[0] if meta_rows else []:
         vals = [r[k] for r in meta_rows]
@@ -358,7 +383,8 @@ def main() -> None:
     genome_type = run_cfg.get("genome_type", "unknown")
 
     ckpts = select_checkpoints(run_dir, task, args.gens, args.top_n)
-    jobs = build_jobs(ckpts, task, args.record_every_n, args.max_modules)
+    stored = load_stored_records(run_dir, task)
+    jobs = build_jobs(ckpts, task, args.record_every_n, args.max_modules, stored)
     console.rule(f"[bold cyan]{run_dir.name}: task={task} genome={genome_type} "
                  f"stride={run_cfg.get('control_step_freq', 'default')}  "
                  f"{len(ckpts)} checkpoints -> {len(jobs)} episodes")
@@ -379,7 +405,6 @@ def main() -> None:
         if err:
             console.print(f"[red]gen{gen:03d}_body{body_idx:02d} {skill}: {err}[/red]")
 
-    stored = load_stored_records(run_dir, task)
     out_dir = args.out_dir or run_dir.parent / "behavior" / run_dir.name
     write_results(out_dir, run_dir, task, genome_type, results, stored, save_traces=not args.no_traces)
 

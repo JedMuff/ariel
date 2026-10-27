@@ -9,6 +9,8 @@ Covers:
   - no child ever attaches to a hinge's or brick's BACK face (the DANN's
     parent slot)
   - the dann brain's parameter count, output range and clock reset
+  - extra broadcast inputs (gecko_food_dann.py's vision): none leaves the
+    brain unchanged, three add 3 x 16 weights and change the action
   - translate_score / turn_score normalisation, and the early end of a
     normalised turn episode at 540 degrees
   - SWEEP_PROFILE is the module's original constants
@@ -143,6 +145,25 @@ def test_dann_rejects_wrong_length():
         make_brain_for_model("dann", model, data).set_params(np.zeros(10))
 
 
+def test_dann_extra_inputs():
+    model, data = build_loco_world_for_body(*_first_body())
+    plain = make_brain_for_model("dann", model, data)
+    same = shared.DannBrain(model, data, extra_inputs=0)
+    params = np.random.default_rng(0).normal(0, 2, plain.num_params)
+    plain.set_params(params)
+    same.set_params(params)
+    mujoco.mj_resetData(model, data)
+    state = get_robot_state(data)
+    np.testing.assert_array_equal(same.act(data, state), plain.act(data, state))
+
+    seeing = shared.DannBrain(model, data, extra_inputs=3)
+    assert seeing.num_params == 705 + 3 * 16
+    seeing.set_params(np.random.default_rng(1).normal(0, 2, seeing.num_params))
+    blind = seeing.act(data, state, np.zeros(3))
+    seeing.reset()
+    assert not np.allclose(seeing.act(data, state, np.array([0.0, 0.5, 0.0])), blind)
+
+
 def test_translate_score_clips_to_0_2():
     assert translate_score(-1.0, 15.0) == 0.0
     assert translate_score(0.25 * 15.0, 15.0) == pytest.approx(1.0)  # 0.25 m/s
@@ -216,3 +237,48 @@ def test_replay_with_recorder_matches_training_eval():
                                         recorder=lambda _d, raw: seen.append(raw))
     assert replayed == trained
     assert seen and seen[-1] == replayed[1]["raw_score"]
+
+
+_SLOTS_SCRIPT = """
+import sys, json
+sys.path[:0] = [{here!r}, {zoo!r}]
+import genome_adapter, shared
+adapter = genome_adapter.genome_adapter_from_cli("tree_symmetric", 25)
+out = []
+for g in json.load(open({genomes!r})):
+    model, data = shared.build_loco_world_for_body(g, adapter.to_spec)
+    out.append(shared.make_brain_for_model("dann", model, data)._net._gather.tolist())
+print(json.dumps(out))
+"""
+
+
+def test_dann_wiring_ignores_hash_seed(tmp_path):
+    """Neighbour ties used to follow Python's per-process string hashing.
+    (Random genomes depend on it too, so the bodies are made here.)"""
+    import json
+    import os
+    import subprocess
+
+    _, genotypes = _bodies("tree_symmetric", n=15, seed=4)
+    genomes = tmp_path / "genomes.json"
+    genomes.write_text(json.dumps(genotypes))
+    here = str(Path(__file__).resolve().parent)
+    code = _SLOTS_SCRIPT.format(here=here, zoo=str(Path(here).parent / "zoo_benchmark"), genomes=str(genomes))
+    runs = [subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                           env={**os.environ, "PYTHONHASHSEED": seed}).stdout for seed in ("0", "1", "3")]
+    assert runs[0] == runs[1] == runs[2]
+
+
+def test_dann_tie_choices_cover_every_resolution():
+    from behavior_common import dann_tie_choices
+
+    adapter, genotypes = _bodies("tree_symmetric", n=20, seed=5)
+    for genotype in genotypes:
+        model, data = build_loco_world_for_body(genotype, adapter.to_spec)
+        default = make_brain_for_model("dann", model, data)
+        choices = list(dann_tie_choices(genotype, adapter.to_spec))
+        assert choices[0] == (0,) * len(default.neighbour_ties)
+        gathers = {make_brain_for_model("dann", model, data, tie_choice=c)._net._gather.tobytes() for c in choices}
+        assert len(gathers) == len(choices)  # each choice wires the brain differently
+        assert make_brain_for_model("dann", model, data, tie_choice=choices[0])._net._gather.tobytes() \
+            == default._net._gather.tobytes()

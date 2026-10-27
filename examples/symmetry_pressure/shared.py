@@ -19,6 +19,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Callable, Literal, Optional, cast
 
 import cma
@@ -260,9 +261,17 @@ class DannBrain:
     control-step counter, so set_params and reset restart it; callers decode a
     fresh candidate before every episode. Joint velocities come from the
     MjData the brain was built with, so act() must be called on that data.
+    extra_inputs > 0 adds that many inputs broadcast to every hinge, given as
+    act(..., extra=...) (gecko_food_dann.py's camera sections). topology
+    overrides brains.model_topology(model), for bodies not named the robogen
+    way (zoo canonical bodies: brains.body_topology(body, parent_slot="back")).
+    tie_choice resolves hinges tied for a neighbour slot the way an older run
+    did (brains._hinge_neighbour_slots); neighbour_ties lists those ties.
     """
 
-    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, extra_inputs: int = 0,
+                 topology: Optional[dict[str, Any]] = None,
+                 tie_choice: Optional[Sequence[int]] = None) -> None:
         import sys
         zoo_dir = str(Path(__file__).resolve().parent.parent / "zoo_benchmark")
         if zoo_dir not in sys.path:
@@ -270,9 +279,11 @@ class DannBrain:
         import brains  # lazy: brains.py imports this module
 
         self._net = brains.ZooDistributedAnnV2(
-            brains.model_topology(model), model, data, **brains.DANN_VARIANTS[DANN_VARIANT],
+            topology or brains.model_topology(model), model, data, **brains.DANN_VARIANTS[DANN_VARIANT],
+            extra_inputs=extra_inputs, tie_choice=tie_choice,
         )
         self.num_params = self._net.num_params
+        self.neighbour_ties = self._net.neighbour_ties
 
     def set_params(self, vec: np.ndarray) -> None:
         self._net.set_params(vec)
@@ -281,8 +292,8 @@ class DannBrain:
     def reset(self) -> None:
         self._net.reset()
 
-    def act(self, data: Any, state: np.ndarray) -> np.ndarray:
-        return self._net.act(float(data.time) - SETTLE_DURATION, state)
+    def act(self, data: Any, state: np.ndarray, extra: Optional[np.ndarray] = None) -> np.ndarray:
+        return self._net.act(float(data.time) - SETTLE_DURATION, state, extra)
 
 
 Brain = "AnnBrain | CpgBrain | RevolveCpgBrain | DannBrain"
@@ -301,9 +312,14 @@ def make_brain(kind: str, input_dim: int, output_dim: int) -> Brain:
 
 
 def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
-                         params: Optional[np.ndarray] = None) -> Brain:
-    """Build a brain sized for this body (proprioceptive input, one output per actuator)."""
-    brain = DannBrain(model, data) if kind == "dann" else make_brain(kind, len(get_robot_state(data)), model.nu)
+                         params: Optional[np.ndarray] = None,
+                         tie_choice: Optional[Sequence[int]] = None) -> Brain:
+    """Build a brain sized for this body (proprioceptive input, one output per
+    actuator). tie_choice: see DannBrain."""
+    if kind == "dann":
+        brain = DannBrain(model, data, tie_choice=tie_choice)
+    else:
+        brain = make_brain(kind, len(get_robot_state(data)), model.nu)
     if params is not None:
         brain.set_params(params)
     return brain
@@ -1295,6 +1311,8 @@ def run_skill_episode(
     control_step_freq: int, profile: EvalProfile = SWEEP_PROFILE,
     rowing_bodies: Optional[list[int]] = None,
     recorder: Optional[Callable[[mujoco.MjData, float], None]] = None,
+    on_settle_step: Optional[Callable[[mujoco.MjData], None]] = None,
+    on_control: Optional[Callable[[np.ndarray, np.ndarray, np.ndarray], None]] = None,
 ) -> tuple[float, dict[str, Any]]:
     """(fitness, info) of one skill episode of a brain whose params are set.
     info holds raw_score (displacement or accumulated yaw), score (the
@@ -1305,7 +1323,10 @@ def run_skill_episode(
     cancels) and the episode ends once it reaches TURN_TARGET; otherwise only
     yaw in the target direction counts and the episode always runs its full
     duration. recorder, if given, is called as recorder(data, raw_so_far)
-    after every post-settle physics step (videos); it must not change data.
+    after every post-settle physics step (videos); on_settle_step(data) after
+    every settle step, and on_control(state, raw_action, applied_action) at
+    every control update (behavior_common's recording replay). None of them
+    may change data.
     """
     if hasattr(brain, "reset"):
         brain.reset()
@@ -1315,6 +1336,8 @@ def run_skill_episode(
     sim_step = 0
     while data.time < SETTLE_DURATION:
         mujoco.mj_step(model, data)
+        if on_settle_step is not None:
+            on_settle_step(data)
         sim_step += 1
 
     core_id        = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
@@ -1351,6 +1374,8 @@ def run_skill_episode(
             if prev_ctrl is not None:
                 jerk_sum += float(np.mean(np.abs(current_action - prev_ctrl)))
             prev_ctrl = current_action.copy()
+            if on_control is not None:
+                on_control(state, raw_action, current_action)
             ctrl_step += 1
         data.ctrl[:] = current_action
         mujoco.mj_step(model, data)

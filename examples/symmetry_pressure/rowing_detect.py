@@ -380,7 +380,7 @@ def analyse_run(npz: Path, snap_deg: float = SNAP_DEG) -> tuple[pd.DataFrame, pd
 def _run_job(job: tuple[dict, Path, float]) -> str:
     r, out, snap_deg = job
     ind, prs = analyse_run(r["npz"], snap_deg)
-    for i, k in enumerate(("run", "genome", "stride", "rep")):
+    for i, k in enumerate(("run", "task", "genome", "stride", "rep")):
         ind.insert(i, k, r[k])
     (out / "runs").mkdir(parents=True, exist_ok=True)
     (out / "pairs").mkdir(parents=True, exist_ok=True)

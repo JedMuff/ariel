@@ -68,7 +68,11 @@ GENOMES = ("tree", "tree_symmetric")
 STRIDE_TAG_RE = re.compile(
     r"^ctrlstride_forward_(?P<genome>tree_symmetric|tree_tied|tree|cppn)_s(?P<stride>\d+)_rep(?P<rep>\d+)_\d+_\d+$"
 )
-META_COLS = ("gen", "body_idx", "ind_id", "stored_fitness", "replayed_fitness", "n_joints", "n_bodies")
+META_COLS = ("gen", "body_idx", "ind_id", "skill", "stored_fitness", "replayed_fitness", "n_joints", "n_bodies")
+SYMPRESS_TAG_RE = re.compile(  # sweep_common's run tags (slurm/run_symmetry_pressure_sweep*.sh)
+    r"^sympress_(?P<task>forward|multidirection|turn_avg)_(?P<genome>tree_symmetric|tree_tied|tree|cppn)"
+    r"_rep(?P<rep>\d+)_\d+_\d+$"
+)
 CYCLE_COLS = ("period_s", "autocorr", "aperiodic", "cycle_rms_m", "body_size_m", "rel_amplitude")
 
 
@@ -198,15 +202,23 @@ def label_of(rep: int, gen: int, body_idx: int) -> str:
 
 
 def discover(root: Path, subdir: str, genomes: list[str], only: list[str] | None) -> list[dict]:
+    """behavior_extract.py outputs under root/subdir, for control-stride runs
+    (ctrlstride_*, the forward task) and symmetry-pressure runs (sympress_*,
+    whose stride is read from the npz)."""
     runs = []
-    for d in sorted((root / subdir).glob("ctrlstride_*")):
-        m = STRIDE_TAG_RE.match(d.name)
+    for d in sorted((root / subdir).glob("*_*")):
+        m = STRIDE_TAG_RE.match(d.name) or SYMPRESS_TAG_RE.match(d.name)
         if not m or m["genome"] not in genomes or (only and d.name not in only):
             continue
         if not (d / "behavior.npz").exists():
             print(f"[warn] no behavior.npz in {d}, skipping")
             continue
-        runs.append({"run": d.name, "genome": m["genome"], "stride": int(m["stride"]),
+        if "stride" in m.groupdict():
+            task, stride = "forward", int(m["stride"])
+        else:
+            with np.load(d / "behavior.npz") as z:
+                task, stride = m["task"], int(z["episode_meta__control_step_freq"][0])
+        runs.append({"run": d.name, "task": task, "genome": m["genome"], "stride": stride,
                      "rep": int(m["rep"]), "npz": d / "behavior.npz"})
     return runs
 
