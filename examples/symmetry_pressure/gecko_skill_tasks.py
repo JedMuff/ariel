@@ -69,6 +69,8 @@ import genome_adapter
 from shared import (
     BRAIN_KINDS,
     EVAL_PROFILES,
+    ZOO_HINGE,
+    HingeActuator,
     SkillReward,
     nsga2_survivor_selection,
     train_skill_for_body,
@@ -122,8 +124,10 @@ parser.add_argument("--control-step-freq", type=int, default=None,
 parser.add_argument("--brain",         choices=BRAIN_KINDS, default="ann",
                     help="Controller trained per skill: 'ann' (closed-loop MLP on "
                          "proprioception), 'cpg' (open-loop sine oscillators), "
-                         "'revolve_cpg' (revolve's coupled-oscillator CPG) or 'dann' "
-                         "(the distributed ANN shared by every hinge, see shared.DannBrain)")
+                         "'revolve_cpg' (revolve's coupled-oscillator CPG), 'dann' "
+                         "(the distributed ANN shared by every hinge, see shared.DannBrain) or "
+                         "'bang_bang' (the zoo benchmark's open-loop +-90 deg square wave, see "
+                         "shared.BangBangBrain)")
 parser.add_argument("--eval-profile",  choices=list(EVAL_PROFILES), default="sweep",
                     help="Skill episodes, penalties and inner CMA-ES (see shared.EvalProfile): "
                          "'sweep' = the original sweep's; 'dsocial_zoo' = d_social_learning's zoo "
@@ -135,6 +139,15 @@ parser.add_argument("--rowing-penalty", action="store_true",
 parser.add_argument("--zoo-modules", action="store_true",
                     help="Build bodies with kgd's zoo modules: sizes, masses and hinge "
                          "(kp, kv, armature, +-90 deg joint limit); see shared.zoo_modules_spec")
+parser.add_argument("--hinge-kp",      type=float, default=None,
+                    help="Zoo modules only: hinge actuator gain (default: the zoo hinge's)")
+parser.add_argument("--hinge-kv",      type=float, default=None,
+                    help="Zoo modules only: hinge actuator damping (default: the zoo hinge's)")
+parser.add_argument("--hinge-armature", type=float, default=None,
+                    help="Zoo modules only: hinge joint armature (default: the zoo hinge's)")
+parser.add_argument("--hinge-limit",   action=argparse.BooleanOptionalAction, default=None,
+                    help="Zoo modules only: hard +-90 deg hinge joint limit (default: on, as the "
+                         "zoo hinge); see shared.HingeActuator")
 parser.add_argument("--time-limit",    type=float, default=None,
                     help="Wall-clock seconds; stop after current generation completes")
 args = parser.parse_args()
@@ -157,6 +170,12 @@ CTRL_STRIDE    = args.control_step_freq if args.control_step_freq is not None el
 BRAIN          = args.brain
 ROWING_PENALTY = args.rowing_penalty
 ZOO_MODULES    = args.zoo_modules or PROFILE.zoo_modules
+_HINGE_ARGS    = {"kp": args.hinge_kp, "kv": args.hinge_kv, "armature": args.hinge_armature,
+                  "limited": args.hinge_limit}
+if not ZOO_MODULES and any(v is not None for v in _HINGE_ARGS.values()):
+    parser.error("--hinge-kp/--hinge-kv/--hinge-armature/--hinge-limit need zoo modules "
+                 "(--zoo-modules or --eval-profile dsocial_zoo)")
+HINGE_ACTUATOR = HingeActuator(**{**asdict(ZOO_HINGE), **{k: v for k, v in _HINGE_ARGS.items() if v is not None}})
 
 TOURNAMENT_SIZE = 4
 N_DIRECTIONS    = 5   # multidirection: 360 / 5 = 72 degrees apart
@@ -173,10 +192,11 @@ RNG = np.random.default_rng(BASE_SEED)
 
 with (DATA / "run_config.json").open("w") as _fh:
     json.dump({**vars(args), "skill_budget": SKILL_BUDGET, "control_step_freq": CTRL_STRIDE,
-               "zoo_modules": ZOO_MODULES, "eval_profile_settings": asdict(PROFILE)}, _fh, indent=2)
+               "zoo_modules": ZOO_MODULES, "eval_profile_settings": asdict(PROFILE),
+               **({"hinge_actuator": asdict(HINGE_ACTUATOR)} if ZOO_MODULES else {})}, _fh, indent=2)
 
 ADAPTER = genome_adapter.genome_adapter_from_cli(GENOME_TYPE, NUM_MODULES, tie_prob=args.tie_prob)
-TO_SPEC = with_zoo_modules(ADAPTER.to_spec) if ZOO_MODULES else ADAPTER.to_spec
+TO_SPEC = with_zoo_modules(ADAPTER.to_spec, actuator=HINGE_ACTUATOR) if ZOO_MODULES else ADAPTER.to_spec
 if ZOO_MODULES:
     use_zoo_modules_globally()  # the genome operators' collision checks use the zoo geometry too
 
@@ -496,7 +516,8 @@ def main() -> None:
         f"task={TASK}  genome_type={GENOME_TYPE}  skills={[name for name, _ in SKILLS]}  "
         f"strategy={STRATEGY}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
         f"skill_budget={SKILL_BUDGET}  brain={BRAIN}  eval_profile={args.eval_profile}  "
-        f"stride={CTRL_STRIDE}  zoo_modules={ZOO_MODULES}  brain_workers={BRAIN_WORKERS}  "
+        f"stride={CTRL_STRIDE}  zoo_modules={ZOO_MODULES}"
+        f"{f'  hinge={HINGE_ACTUATOR.label}' if ZOO_MODULES else ''}  brain_workers={BRAIN_WORKERS}  "
         f"repeat_evals={REPEAT_EVALS}  seed={BASE_SEED}"
     )
 

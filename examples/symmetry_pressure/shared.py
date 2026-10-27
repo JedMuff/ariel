@@ -126,8 +126,11 @@ def fill_parameters(net: nn.Module, vector: np.ndarray) -> None:
 # The returned raw action is then alpha-blended and clipped by the caller, so
 # the post-processing (and jerk penalty) is identical across brain types.
 
-BrainKind = Literal["ann", "cpg", "revolve_cpg", "dann"]
-BRAIN_KINDS: tuple[str, ...] = ("ann", "cpg", "revolve_cpg", "dann")
+BrainKind = Literal["ann", "cpg", "revolve_cpg", "dann", "bang_bang"]
+BRAIN_KINDS: tuple[str, ...] = ("ann", "cpg", "revolve_cpg", "dann", "bang_bang")
+# CMA-ES mean when a profile starts from a fixed point (cma_init_scale = 0): the
+# square-wave genes are centred for x0 = 0.5 (zoo_benchmark.py DEFAULT_INITIAL_MEAN).
+BRAIN_X0: dict[str, float] = {"bang_bang": 0.5}
 DANN_VARIANT = "dann_pos_hinge_h16"  # zoo_benchmark/brains.py DANN_VARIANTS: the default distributed ANN
 
 CPG_F_MIN = 0.5  # Hz
@@ -298,7 +301,34 @@ class DannBrain:
         return self._net.act(float(data.time) - SETTLE_DURATION, state, extra)
 
 
-Brain = "AnnBrain | CpgBrain | RevolveCpgBrain | DannBrain"
+class BangBangBrain:
+    """The zoo benchmark's bang_bang brain (zoo_benchmark/brains.py ZooBangBang):
+    open loop, every hinge switching instantly between -90 and +90 deg on one
+    shared (modulated) frequency, with its own duty cycle and phase (4 + 5 x
+    hinges params). Its frequency and duty modulations run over duration s,
+    so build it with the skill's episode duration."""
+
+    def __init__(self, n_hinges: int, duration: float) -> None:
+        import sys
+        zoo_dir = str(Path(__file__).resolve().parent.parent / "zoo_benchmark")
+        if zoo_dir not in sys.path:
+            sys.path.insert(0, zoo_dir)
+        import brains  # lazy: brains.py imports this module
+
+        self._net = brains.ZooBangBang(0, n_hinges, duration)
+        self.num_params = self._net.num_params
+
+    def set_params(self, vec: np.ndarray) -> None:
+        self._net.set_params(vec)
+
+    def reset(self) -> None:
+        self._net.reset()
+
+    def act(self, data: Any, state: np.ndarray) -> np.ndarray:
+        return self._net.act(float(data.time) - SETTLE_DURATION, state)
+
+
+Brain = "AnnBrain | CpgBrain | RevolveCpgBrain | DannBrain | BangBangBrain"
 
 
 def make_brain(kind: str, input_dim: int, output_dim: int) -> Brain:
@@ -308,18 +338,22 @@ def make_brain(kind: str, input_dim: int, output_dim: int) -> Brain:
         return CpgBrain(input_dim, output_dim)
     if kind == "revolve_cpg":
         return RevolveCpgBrain(input_dim, output_dim)
-    if kind == "dann":
-        raise ValueError("dann needs the body: use make_brain_for_model")
+    if kind in ("dann", "bang_bang"):
+        raise ValueError(f"{kind} needs the body: use make_brain_for_model")
     raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")
 
 
 def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
                          params: Optional[np.ndarray] = None,
-                         tie_choice: Optional[Sequence[int]] = None) -> Brain:
+                         tie_choice: Optional[Sequence[int]] = None,
+                         duration: float = 15.0) -> Brain:
     """Build a brain sized for this body (proprioceptive input, one output per
-    actuator). tie_choice: see DannBrain."""
+    actuator). tie_choice: see DannBrain; duration (the skill's episode
+    length): see BangBangBrain."""
     if kind == "dann":
         brain = DannBrain(model, data, tie_choice=tie_choice)
+    elif kind == "bang_bang":
+        brain = BangBangBrain(model.nu, duration)
     else:
         brain = make_brain(kind, len(get_robot_state(data)), model.nu)
     if params is not None:
@@ -369,6 +403,26 @@ ZOO_CORE_DIMENSIONS   = (0.075, 0.075, 0.075)  # half-extents (m)
 ZOO_BRICK_DIMENSIONS  = (0.0375, 0.0375, 0.0375)
 ZOO_STATOR_DIMENSIONS = (0.026, 0.022, 0.026)
 ZOO_ROTOR_DIMENSIONS  = (0.026, 0.0155, 0.026)
+
+
+@dataclass(frozen=True)
+class HingeActuator:
+    """Hinge servo applied to zoo bodies (apply_zoo_modules): a position
+    actuator with gain kp and damping kv, the joint's armature, and whether
+    the joint has a hard +-90 deg limit (the ctrl range is +-90 deg either way)."""
+
+    kp: float
+    kv: float
+    armature: float
+    limited: bool
+
+    @property
+    def label(self) -> str:
+        return f"kp{self.kp:g}_kv{self.kv:g}_arm{self.armature:g}_lim{int(self.limited)}"
+
+
+ZOO_HINGE   = HingeActuator(ZOO_HINGE_KP, ZOO_HINGE_KV, ZOO_HINGE_ARMATURE, True)
+LOCAL_HINGE = HingeActuator(1.0, 1.0, 0.0, False)  # hinge.py's servo: kp = kv = 1, no armature, no joint limit
 
 _ZOO_LOCK = threading.RLock()
 
@@ -421,35 +475,42 @@ def use_zoo_modules_globally() -> None:
     _set_module_constants(_zoo_module_overrides())
 
 
-def apply_zoo_modules(spec: mujoco.MjSpec) -> mujoco.MjSpec:
-    """Give a robot spec kgd's zoo hinge actuator (kp, kv, armature, a +-90 deg
-    joint limit), in place. Hard-coded in hinge.py, so set after construction."""
+def apply_zoo_modules(spec: mujoco.MjSpec, actuator: HingeActuator = ZOO_HINGE) -> mujoco.MjSpec:
+    """Give a robot spec a hinge actuator (kp, kv, armature, joint limit), in
+    place; kgd's zoo hinge by default. Hard-coded in hinge.py, so set after
+    construction."""
     for a in spec.actuators:
-        a.gainprm[0] = ZOO_HINGE_KP
-        a.biasprm[1] = -ZOO_HINGE_KP
-        a.biasprm[2] = -ZOO_HINGE_KV
+        a.gainprm[0] = actuator.kp
+        a.biasprm[1] = -actuator.kp
+        a.biasprm[2] = -actuator.kv
     scale = 180.0 / math.pi if spec.compiler.degree else 1.0
     for j in spec.joints:
         if j.type == mujoco.mjtJoint.mjJNT_HINGE:
-            j.armature = ZOO_HINGE_ARMATURE
-            j.range = [r * scale for r in ZOO_HINGE_RANGE]
-            j.limited = mujoco.mjtLimited.mjLIMITED_TRUE
+            j.armature = actuator.armature
+            if actuator.limited:
+                j.range = [r * scale for r in ZOO_HINGE_RANGE]
+                j.limited = mujoco.mjtLimited.mjLIMITED_TRUE
+            else:
+                j.limited = mujoco.mjtLimited.mjLIMITED_FALSE
     return spec
 
 
-def zoo_modules_spec(genome_dict: dict, to_spec_fn=genome_to_spec) -> Optional[mujoco.MjSpec]:
+def zoo_modules_spec(
+    genome_dict: dict, to_spec_fn=genome_to_spec, actuator: HingeActuator = ZOO_HINGE,
+) -> Optional[mujoco.MjSpec]:
     """to_spec_fn(genome_dict) built with kgd's zoo modules: sizes and masses
-    (zoo_module_constants) and hinge actuator (apply_zoo_modules). Picklable
-    via with_zoo_modules."""
+    (zoo_module_constants) and a hinge actuator (apply_zoo_modules, the zoo
+    one by default). Picklable via with_zoo_modules."""
     with zoo_module_constants():
         spec = to_spec_fn(genome_dict)
-    return apply_zoo_modules(spec) if spec is not None else None
+    return apply_zoo_modules(spec, actuator) if spec is not None else None
 
 
-def with_zoo_modules(to_spec_fn=genome_to_spec):
-    """A to_spec_fn that builds bodies with kgd's zoo modules (--zoo-modules)."""
+def with_zoo_modules(to_spec_fn=genome_to_spec, actuator: HingeActuator = ZOO_HINGE):
+    """A to_spec_fn that builds bodies with kgd's zoo modules (--zoo-modules),
+    with the given hinge actuator (--hinge-kp etc.)."""
     import functools  # noqa: PLC0415
-    return functools.partial(zoo_modules_spec, to_spec_fn=to_spec_fn)
+    return functools.partial(zoo_modules_spec, to_spec_fn=to_spec_fn, actuator=actuator)
 
 
 def build_world_for_body(
@@ -1290,7 +1351,7 @@ def _skill_worker_init(
     torch.set_num_threads(1)
     np.random.seed((seed + os.getpid()) % (2**32 - 1))
     model, data = build_loco_world_for_body(genome_dict, to_spec_fn)
-    brain       = make_brain_for_model(brain_kind, model, data)
+    brain       = make_brain_for_model(brain_kind, model, data, duration=reward.duration)
     _skill_worker_ctx = {
         "model": model, "data": data, "brain": brain, "reward": reward,
         "control_step_freq": control_step_freq,
@@ -1446,13 +1507,13 @@ def train_skill_for_body(
     t_start = time.perf_counter()
 
     model, data = build_loco_world_for_body(genome_dict, to_spec_fn)
-    num_params  = make_brain_for_model(brain_kind, model, data).num_params
+    num_params  = make_brain_for_model(brain_kind, model, data, duration=reward.duration).num_params
 
     rng = np.random.default_rng(seed)
     if profile.cma_init_scale > 0:
         x0 = rng.uniform(-profile.cma_init_scale, profile.cma_init_scale, size=num_params).tolist()
     else:
-        x0 = [0.0] * num_params
+        x0 = [BRAIN_X0.get(brain_kind, 0.0)] * num_params
 
     es = cma.CMAEvolutionStrategy(
         x0, profile.cma_sigma,

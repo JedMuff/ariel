@@ -39,7 +39,9 @@ from shared import (
     CONTROL_STEP_FREQ,
     EVAL_PROFILES,
     SWEEP_PROFILE,
+    ZOO_HINGE,
     EvalProfile,
+    HingeActuator,
     SkillReward,
     FORWARD_AXIS,
     _rotate_2d,
@@ -102,7 +104,9 @@ def resolve_replay_config(ckpt_dir: Path, max_modules: Optional[int] = None) -> 
         else genome_to_spec
     )
     if run_config.get("zoo_modules", False):  # gecko_skill_tasks.py --zoo-modules
-        to_spec_fn = with_zoo_modules(to_spec_fn)
+        # --hinge-kp etc.; runs predating them used the zoo hinge
+        actuator = HingeActuator(**run_config["hinge_actuator"]) if "hinge_actuator" in run_config else ZOO_HINGE
+        to_spec_fn = with_zoo_modules(to_spec_fn, actuator=actuator)
     control_step_freq = run_config.get("control_step_freq", CONTROL_STEP_FREQ)
     brain_kind = run_config.get("brain", "ann")
     return to_spec_fn, control_step_freq, brain_kind
@@ -185,7 +189,8 @@ def replay_skill_episode(
     """
     t0 = time.perf_counter()
     model, data = build_loco_world_for_body(genome, to_spec_fn=to_spec_fn)
-    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32), tie_choice)
+    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32), tie_choice,
+                                 duration=float(reward_spec["duration"]))
 
     rotor_ids = set(rotor_geom_ids(model))
     floor = floor_id(model)
