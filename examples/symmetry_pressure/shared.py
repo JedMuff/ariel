@@ -267,11 +267,12 @@ class DannBrain:
     way (zoo canonical bodies: brains.body_topology(body, parent_slot="back")).
     tie_choice resolves hinges tied for a neighbour slot the way an older run
     did (brains._hinge_neighbour_slots); neighbour_ties lists those ties.
+    hidden overrides the variant's hidden layer size.
     """
 
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, extra_inputs: int = 0,
                  topology: Optional[dict[str, Any]] = None,
-                 tie_choice: Optional[Sequence[int]] = None) -> None:
+                 tie_choice: Optional[Sequence[int]] = None, hidden: Optional[int] = None) -> None:
         import sys
         zoo_dir = str(Path(__file__).resolve().parent.parent / "zoo_benchmark")
         if zoo_dir not in sys.path:
@@ -279,7 +280,8 @@ class DannBrain:
         import brains  # lazy: brains.py imports this module
 
         self._net = brains.ZooDistributedAnnV2(
-            topology or brains.model_topology(model), model, data, **brains.DANN_VARIANTS[DANN_VARIANT],
+            topology or brains.model_topology(model), model, data,
+            **{**brains.DANN_VARIANTS[DANN_VARIANT], **({"hidden": hidden} if hidden else {})},
             extra_inputs=extra_inputs, tie_choice=tie_choice,
         )
         self.num_params = self._net.num_params
