@@ -3,6 +3,7 @@
 *.mp4
 # Dirs
 __data__
+slurm_out/
 # Mujoco
 MUJOCO_LOG.TXT
 # DrawIo

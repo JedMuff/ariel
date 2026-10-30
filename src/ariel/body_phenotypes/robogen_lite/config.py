@@ -43,11 +43,13 @@ class ModuleRotationsIdx(Enum):
     DEG_0 = 0
     DEG_45 = 1
     DEG_90 = 2
-    # DEG_135 = 3
-    # DEG_180 = 4
-    # DEG_225 = 5
-    # DEG_270 = 6
-    # DEG_315 = 7
+    DEG_NEG_45 = 3
+    DEG_NEG_90 = 4
+    # DEG_135 = 5
+    # DEG_180 = 6
+    # DEG_225 = 7
+    # DEG_270 = 8
+    # DEG_315 = 9
 
 
 class ModuleRotationsTheta(Enum):
@@ -56,6 +58,8 @@ class ModuleRotationsTheta(Enum):
     DEG_0 = 0
     DEG_45 = 45
     DEG_90 = 90
+    DEG_NEG_45 = -45
+    DEG_NEG_90 = -90
     # DEG_135 = 135
     # DEG_180 = 180
     # DEG_225 = 225
@@ -106,13 +110,15 @@ ALLOWED_ROTATIONS: dict[ModuleType, list[ModuleRotationsIdx]] = {
         ModuleRotationsIdx.DEG_0,
         ModuleRotationsIdx.DEG_45,
         ModuleRotationsIdx.DEG_90,
-
+        ModuleRotationsIdx.DEG_NEG_45,
+        ModuleRotationsIdx.DEG_NEG_90,
     ],
     ModuleType.HINGE: [
         ModuleRotationsIdx.DEG_0,
         ModuleRotationsIdx.DEG_45,
         ModuleRotationsIdx.DEG_90,
-
+        ModuleRotationsIdx.DEG_NEG_45,
+        ModuleRotationsIdx.DEG_NEG_90,
     ],
     ModuleType.NONE: [ModuleRotationsIdx.DEG_0],
 }
