@@ -9,7 +9,7 @@ import pytest
 
 import replay
 from ariel.ec.genotypes.tree.symmetry import MirrorAxis
-from brains import BangBangBrain, BangBangFreeBrain, DannBrain, make_brain_for_model, model_topology
+from brains import BangBangBrain, BangBangDriftBrain, BangBangFreeBrain, DannBrain, make_brain_for_model, model_topology
 from sim import (
     PROFILE,
     TRANSLATE_MAX,
@@ -56,9 +56,33 @@ def test_bang_bang_free_frequencies_drift_apart():
     assert (out[:, 0] != out[:, 1]).mean() > 0.2
 
 
+def test_bang_bang_drift_with_offsets_at_x0_is_bang_bang():
+    n, rng = 5, np.random.default_rng(0)
+    shared = BangBangBrain(n)
+    g = rng.normal(size=shared.num_params)
+    shared.set_params(g)
+    per_hinge = g[4:].reshape(n, 5)
+    drift = BangBangDriftBrain(n)
+    drift.set_params(np.hstack([g[:4], np.hstack([np.full((n, 4), 0.5), per_hinge]).ravel()]))
+    for t in np.arange(0.0, 15.0, 0.05):
+        assert np.array_equal(shared.output_at(t), drift.output_at(t))
+
+
+def test_bang_bang_drift_offsets_move_hinges_apart():
+    n = 2
+    drift = BangBangDriftBrain(n)
+    g = np.full(drift.num_params, 0.5)
+    g[4 + 9:4 + 9 + 2] = 0.5 + 10.0  # hinge 1: start and end frequency one gene unit higher
+    drift.set_params(g)
+    assert drift.freq.start[1] > drift.freq.start[0]
+    out = np.array([drift.output_at(t) for t in np.arange(0.0, 15.0, 0.05)])
+    assert (out[:, 0] != out[:, 1]).mean() > 0.2
+
+
 def test_bang_bang_param_counts():
     assert BangBangBrain(4).num_params == 24
     assert BangBangFreeBrain(4).num_params == 36
+    assert BangBangDriftBrain(4).num_params == 40
 
 
 # ── DANN ──────────────────────────────────────────────────────────────────────
@@ -118,7 +142,7 @@ def test_translate_score_clips_to_0_2():
     assert translate_score(0.5 * 15.0 / 4, 15.0) == pytest.approx(0.5)
 
 
-@pytest.mark.parametrize("brain_kind", ["bang_bang", "bang_bang_free", "dann"])
+@pytest.mark.parametrize("brain_kind", ["bang_bang", "bang_bang_free", "bang_bang_drift", "dann"])
 def test_replay_reproduces_training_episode(brain_kind):
     genome = body()
     model, data = build_world(genome)

@@ -6,13 +6,19 @@
 # evaluations per body (skill budget 10), outer (10+20) for 30 generations
 # with --repeat-evals.
 #
-# Index decoding: genome fastest, then brain, rep slowest, so all six arms of
-# a seed run before the next seed. Array size = 3 x 2 x N_REPS (60 for 10).
-# Seeds 42 + rep, so runs pair by seed.
+# BRAINS overrides the brain list, e.g. BRAINS=bang_bang_drift for the control
+# arm (shared frequency plus small per-hinge offsets: bang_bang_free's extra
+# genes without its out-of-step start).
+#
+# Index decoding: genome fastest, then brain, rep slowest, so all arms of a
+# seed run before the next seed. Array size = 3 x n_brains x N_REPS (60 for
+# the default two brains x 10, 30 for one brain). Seeds 42 + rep, so runs pair
+# by seed.
 #
 # Usage:
 #   sbatch slurm/symmetry_paper/e1_coordination_ablation.sh
 #   sbatch --array=0-59%30 slurm/symmetry_paper/e1_coordination_ablation.sh    # throttled
+#   BRAINS=bang_bang_drift sbatch --array=0-29 slurm/symmetry_paper/e1_coordination_ablation.sh
 # Then:
 #   E3_ROOTS=$FINAL_ROOT/e1 E3_NAME=e1 sbatch --array=0-59 slurm/symmetry_paper/e3_behaviour.sh
 #   python examples/symmetry_paper/analyse_e1.py --root $FINAL_ROOT/e1 --behaviour $FINAL_ROOT/e3/e1
@@ -30,13 +36,14 @@ set -euo pipefail
 source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
 
 GENOME_TYPES=(tree tree_symmetric tree_tied)
-BRAINS=(bang_bang bang_bang_free)
+read -r -a BRAINS <<< "${BRAINS:-bang_bang bang_bang_free}"
+N_BRAINS=${#BRAINS[@]}
 N_REPS=${N_REPS:-10}
 
 ID=$SLURM_ARRAY_TASK_ID
 GENOME=${GENOME_TYPES[$(( ID % 3 ))]}
-BRAIN=${BRAINS[$(( (ID / 3) % 2 ))]}
-REP=$(( ID / 6 ))
+BRAIN=${BRAINS[$(( (ID / 3) % N_BRAINS ))]}
+REP=$(( ID / (3 * N_BRAINS) ))
 if [ "$REP" -ge "$N_REPS" ]; then echo "Index $ID past the ablation; nothing to do"; exit 0; fi
 SEED=$((42 + REP))
 TAG=e1_${BRAIN}_${GENOME}_s${SEED}_${SLURM_ARRAY_JOB_ID}_${ID}

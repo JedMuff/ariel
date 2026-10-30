@@ -28,7 +28,8 @@ from sim import ZOO_HINGE, HingeActuator
 
 DATA_SUBDIRS = ("evolve", "gecko_skill_tasks")
 GENOME_LABEL = {"tree": "tree", "tree_symmetric": "symmetric", "tree_tied": "tied"}
-BRAIN_LABEL = {"bang_bang": "bang_bang", "bang_bang_free": "bang_bang (free frequency)", "dann": "DANN"}
+BRAIN_LABEL = {"bang_bang": "bang_bang", "bang_bang_free": "bang_bang (free frequency)",
+               "bang_bang_drift": "bang_bang (shared + drift)", "dann": "DANN"}
 N_BOOT = 10_000
 _CKPT_RE = re.compile(r"^gen(\d+)_body(\d+)$")
 

@@ -11,11 +11,14 @@
 #   evolved  the best last-generation body of every tree / tree_symmetric E1
 #            run (after E1 finishes)
 # One task per (body, brain), running the 3 training seeds (42 43 44) in turn;
-# bang_bang and bang_bang_free train for 1600 evaluations, dann for 5000.
+# bang_bang, bang_bang_free and bang_bang_drift train for 1600 evaluations,
+# dann for 5000. BRAINS overrides the brain list (default: bang_bang
+# bang_bang_free dann), e.g. BRAINS=bang_bang_drift with --array=0-79 for the
+# drift control on the random bodies.
 # Finished seeds are skipped, so a task can be resubmitted.
 #
 # Index decoding: body fastest, brain slowest.
-# Array size = n_bodies x 3 (random: 80 x 3 = 240; evolved: 40 x 3 = 120).
+# Array size = n_bodies x n_brains (random: 80 x 3 = 240; evolved: 40 x 3 = 120).
 #
 # Usage:
 #   python examples/symmetry_paper/sample_bodies.py random --n 40 -o $FINAL_ROOT/e2/bodies_random.jsonl
@@ -41,13 +44,13 @@ BODY_SET=${BODY_SET:?set BODY_SET=random or BODY_SET=evolved}
 BODIES=$FINAL_ROOT/e2/bodies_${BODY_SET}.jsonl
 [ -f "$BODIES" ] || { echo "No $BODIES: run sample_bodies.py first"; exit 1; }
 N_BODIES=$(wc -l < "$BODIES")
-BRAINS=(bang_bang bang_bang_free dann)
-declare -A EVALS=([bang_bang]=1600 [bang_bang_free]=1600 [dann]=5000)
+read -r -a BRAINS <<< "${BRAINS:-bang_bang bang_bang_free dann}"
+declare -A EVALS=([bang_bang]=1600 [bang_bang_free]=1600 [bang_bang_drift]=1600 [dann]=5000)
 
 ID=$SLURM_ARRAY_TASK_ID
 LINE=$(( ID % N_BODIES ))
 BRAIN_IDX=$(( ID / N_BODIES ))
-if [ "$BRAIN_IDX" -ge 3 ]; then echo "Index $ID past $N_BODIES bodies x 3 brains; nothing to do"; exit 0; fi
+if [ "$BRAIN_IDX" -ge "${#BRAINS[@]}" ]; then echo "Index $ID past $N_BODIES bodies x ${#BRAINS[@]} brains; nothing to do"; exit 0; fi
 BRAIN=${BRAINS[$BRAIN_IDX]}
 
 setup_env

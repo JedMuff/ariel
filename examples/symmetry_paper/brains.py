@@ -12,6 +12,12 @@ every control update. act returns hinge targets in ctrl units ([-pi/2, pi/2]).
                   its own frequency genes, 9 n params (per hinge: frequency x4,
                   duty x4, phase). From x0 = 0.5 every hinge starts at the same
                   frequency; phases drift only if CMA-ES moves them apart.
+                  But each candidate samples every hinge's frequency genes
+                  independently, so candidates start out of step.
+  bang_bang_drift control for bang_bang_free's harder search: the shared
+                  frequency plus per-hinge offsets scaled by 0.1, 4 + 9 n
+                  params (more than bang_bang_free). Candidates start nearly
+                  in step, and CMA-ES can still move hinges apart.
   dann            distributed ANN (dann_pos_hinge_h16 of the zoo benchmark):
                   one 42-16-1 MLP (705 params) shared by every hinge; inputs are
                   the hinge's own velocity and angle, its nearest hinges slotted
@@ -36,10 +42,10 @@ import numpy as np
 
 from ariel.body_phenotypes.robogen_lite.config import ModuleFaces, ModuleType
 
-BRAIN_KINDS: tuple[str, ...] = ("bang_bang", "bang_bang_free", "dann")
+BRAIN_KINDS: tuple[str, ...] = ("bang_bang", "bang_bang_free", "bang_bang_drift", "dann")
 # CMA-ES mean (the profile starts from a fixed point): the square-wave genes
 # are centred for x0 = 0.5, the DANN's MLP for 0.
-BRAIN_X0: dict[str, float] = {"bang_bang": 0.5, "bang_bang_free": 0.5}
+BRAIN_X0: dict[str, float] = {"bang_bang": 0.5, "bang_bang_free": 0.5, "bang_bang_drift": 0.5}
 
 SETTLE_DURATION = 3.0  # s before the controller starts; brains see t - SETTLE_DURATION
 HALF_PI = math.pi / 2
@@ -58,6 +64,7 @@ SQUARE_WOBBLE_RATE = 1.0                # Hz, both wobbles
 SQUARE_WOBBLE_BIAS = 3.0                # wobble amp = max * sigmoid(g - bias): near off at x0
 SQUARE_MAX_ANGLE = 90.0                 # deg
 SQUARE_PHASE_SCALE = 0.1                # phase_offset = 0.1 g mod 1 (cycles)
+DRIFT_SCALE = 0.1                       # bang_bang_drift: per-hinge frequency offset per gene unit
 
 
 @dataclass
@@ -156,6 +163,24 @@ class BangBangFreeBrain(_BangBangBase):
     def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, ModulatedValue, np.ndarray]:
         h = g.reshape(self.n, 9).T
         return (_square_rhythm(h[0:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP),
+                _square_rhythm(h[4:8], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
+                np.mod(SQUARE_PHASE_SCALE * h[8], 1.0))
+
+
+class BangBangDriftBrain(_BangBangBase):
+    """A shared frequency (4 genes) plus, per hinge, 4 frequency-offset genes
+    scaled by DRIFT_SCALE, then duty x4 and phase: 4 + 9 n params. Offsets are
+    centred on x0 = 0.5, so candidates start nearly in step (a tenth of
+    bang_bang_free's frequency spread) and CMA-ES can still move hinges apart."""
+
+    @property
+    def num_params(self) -> int:
+        return 4 + 9 * self.n
+
+    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, ModulatedValue, np.ndarray]:
+        h = g[4:].reshape(self.n, 9).T
+        freq_genes = g[:4, None] + DRIFT_SCALE * (h[0:4] - BRAIN_X0["bang_bang_drift"])
+        return (_square_rhythm(freq_genes, SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP),
                 _square_rhythm(h[4:8], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
                 np.mod(SQUARE_PHASE_SCALE * h[8], 1.0))
 
@@ -347,7 +372,7 @@ class DannBrain:
         return np.tanh(h @ self._w2.T + self._b2)[:, 0] * HALF_PI
 
 
-Brain = "BangBangBrain | BangBangFreeBrain | DannBrain"
+Brain = "BangBangBrain | BangBangFreeBrain | BangBangDriftBrain | DannBrain"
 
 
 def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
@@ -361,6 +386,8 @@ def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
         brain = BangBangBrain(model.nu, duration)
     elif kind == "bang_bang_free":
         brain = BangBangFreeBrain(model.nu, duration)
+    elif kind == "bang_bang_drift":
+        brain = BangBangDriftBrain(model.nu, duration)
     elif kind == "dann":
         brain = DannBrain(model, data, tie_choice=tie_choice)
     else:

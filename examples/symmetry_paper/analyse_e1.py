@@ -2,7 +2,8 @@
 E1: the coordination ablation (R6).
 
 {bang_bang, bang_bang_free} x {tree, tree_symmetric, tree_tied} x 10 seeds
-(slurm e1_coordination_ablation.sh). Paired by seed:
+(slurm e1_coordination_ablation.sh), and optionally bang_bang_drift, the
+control for bang_bang_free's harder search (BRAINS=bang_bang_drift). Paired by seed:
   symmetric - tree   the symmetric advantage, with and without a shared frequency
   tied - tree        paired limbs without mirroring
   symmetric - tied   mirroring itself
@@ -34,18 +35,19 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 import runs  # noqa: E402
-from brains import BangBangFreeBrain  # noqa: E402
+from brains import BangBangDriftBrain, BangBangFreeBrain  # noqa: E402
 
 COMPARISONS = [("tree_symmetric", "tree"), ("tree_tied", "tree"), ("tree_symmetric", "tree_tied")]
+FREQ_BRAINS = ("bang_bang_free", "bang_bang_drift")  # brains with per-hinge frequencies
 LOCKED_MIN = 0.5  # a champion is phase-locked if locked pairs carry at least this share of its stroke
 
 
-def frequency_spread(run_dir: Path) -> float:
+def frequency_spread(run_dir: Path, brain_kind: str) -> float:
     """Coefficient of variation of the hinges' mean evolved frequency in a
-    bang_bang_free champion (0 = all hinges share one frequency)."""
+    bang_bang_free or bang_bang_drift champion (0 = all hinges share one frequency)."""
     ckpt = runs.best_checkpoint(run_dir)
     w = np.load(ckpt / "fwd_weights.npy")
-    brain = BangBangFreeBrain(len(w) // 9)
+    brain = BangBangFreeBrain(len(w) // 9) if brain_kind == "bang_bang_free" else BangBangDriftBrain((len(w) - 4) // 9)
     brain.set_params(w)
     f = (np.asarray(brain.freq.start) + np.asarray(brain.freq.end)) / 2
     return float(f.std() / f.mean())
@@ -69,9 +71,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     df = runs.load_runs(args.root)
-    df["freq_cv"] = [frequency_spread(Path(p)) if b == "bang_bang_free" else 0.0 for p, b in zip(df["path"], df["brain"])]
+    df["freq_cv"] = [frequency_spread(Path(p), b) if b in FREQ_BRAINS else 0.0 for p, b in zip(df["path"], df["brain"])]
     df.to_csv(out / "e1_runs.csv", index=False)
-    print("mean score per arm (and frequency spread of bang_bang_free champions):")
+    print("mean score per arm (and frequency spread of free / drift champions):")
     print(df.groupby(["brain", "genome"])[["score", "freq_cv"]].agg(["mean", "count"]).round(3).to_string())
 
     gaps = pd.concat([runs.gap_table(df, ["brain"], a=a, b=b).assign(comparison=f"{a} - {b}")
@@ -91,7 +93,7 @@ def main() -> None:
         print(tab.round(2).to_string())
         locked = tab["phase_locked"].to_dict()
 
-    brains = [b for b in ("bang_bang", "bang_bang_free") if b in set(df["brain"])]
+    brains = [b for b in ("bang_bang", "bang_bang_free", "bang_bang_drift") if b in set(df["brain"])]
     fig, axes = plt.subplots(1, len(brains), figsize=(4.4 * len(brains), 3.4), sharey=True, squeeze=False,
                              constrained_layout=True)
     for ax, brain in zip(axes[0], brains):
