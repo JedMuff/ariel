@@ -268,3 +268,4 @@ RECYCLE.BIN/
 *.msp
 # Windows shortcuts
 *.lnk
+out_files/
