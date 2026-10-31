@@ -10,6 +10,9 @@
 #            (can run now, in parallel with E1)
 #   evolved  the best last-generation body of every tree / tree_symmetric E1
 #            run (after E1 finishes)
+#   tied           40 tree_tied bodies with the random symmetric bodies' hinge counts
+#   shape_matched  40 tree bodies matched to the random symmetric bodies on rest
+#                  shape (from a pool of 12000; ~2 min on 20 CPUs)
 # One task per (body, brain), running the 3 training seeds (42 43 44) in turn;
 # bang_bang, bang_bang_free and bang_bang_drift train for 1600 evaluations,
 # dann for 5000. BRAINS overrides the brain list (default: bang_bang
@@ -25,7 +28,14 @@
 #   BODY_SET=random sbatch --array=0-239 slurm/symmetry_paper/e2_fixed_body_curves.sh
 #   python examples/symmetry_paper/sample_bodies.py evolved --runs-root $FINAL_ROOT/e1 -o $FINAL_ROOT/e2/bodies_evolved.jsonl
 #   BODY_SET=evolved sbatch --array=0-119 slurm/symmetry_paper/e2_fixed_body_curves.sh
+#   python examples/symmetry_paper/sample_bodies.py tied --like $FINAL_ROOT/e2/bodies_random.jsonl -o $FINAL_ROOT/e2/bodies_tied.jsonl
+#   python examples/symmetry_paper/sample_bodies.py shape_matched --like $FINAL_ROOT/e2/bodies_random.jsonl --pool 12000 \
+#       -o $FINAL_ROOT/e2/bodies_shape_matched.jsonl
+#   BODY_SET=tied BRAINS="bang_bang dann" sbatch --array=0-79 slurm/symmetry_paper/e2_fixed_body_curves.sh
+#   BODY_SET=shape_matched BRAINS="bang_bang dann" sbatch --array=0-79 slurm/symmetry_paper/e2_fixed_body_curves.sh
 # Then:
+#   python examples/symmetry_paper/analyse_matched.py --roots $FINAL_ROOT/e2/{random,tied,shape_matched} \
+#       --bodies $FINAL_ROOT/e2/bodies_{random,tied,shape_matched}.jsonl --out $FINAL_ROOT/e2/analysis_matched
 #   E3_ROOTS=$FINAL_ROOT/e2/random E3_NAME=e2_random sbatch --array=0-719%100 slurm/symmetry_paper/e3_behaviour.sh
 #   python examples/symmetry_paper/analyse_e2.py --roots $FINAL_ROOT/e2/random $FINAL_ROOT/e2/evolved
 
@@ -40,7 +50,7 @@
 set -euo pipefail
 source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
 
-BODY_SET=${BODY_SET:?set BODY_SET=random or BODY_SET=evolved}
+BODY_SET=${BODY_SET:?set BODY_SET=random, evolved, tied or shape_matched}
 BODIES=$FINAL_ROOT/e2/bodies_${BODY_SET}.jsonl
 [ -f "$BODIES" ] || { echo "No $BODIES: run sample_bodies.py first"; exit 1; }
 N_BODIES=$(wc -l < "$BODIES")

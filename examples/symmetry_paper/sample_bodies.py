@@ -1,14 +1,23 @@
 """
 Bodies for the fixed-body learning curves (E2).
 
-  random   --n bodies per genome drawn from the genome's initial distribution
-           (sim.create_individual, as evolve.py's first generation, zoo
-           geometry), matched on hinge count: a pool of --pool bodies per
-           genome is binned by hinge count and the n are taken from the bins
-           both genomes fill, in proportion to the smaller count, so the
-           genomes' hinge-count distributions are identical.
-  evolved  the best last-generation body of every tree and tree_symmetric run
-           under --runs-root (E1), with that run's brain, seed and score.
+  random         --n bodies per genome drawn from the genome's initial distribution
+                 (sim.create_individual, as evolve.py's first generation, zoo
+                 geometry), matched on hinge count: a pool of --pool bodies per
+                 genome is binned by hinge count and the n are taken from the bins
+                 both genomes fill, in proportion to the smaller count, so the
+                 genomes' hinge-count distributions are identical.
+  evolved        the best last-generation body of every tree and tree_symmetric run
+                 under --runs-root (E1), with that run's brain, seed and score.
+  tied           tree_tied bodies with the hinge counts of the symmetric bodies in
+                 --like (one per symmetric body, from a pool of --pool).
+  shape_matched  tree bodies matched to the symmetric bodies in --like on rest
+                 shape: a pool of --pool tree bodies is measured
+                 (analyse_bodies.body_measures) and, within each hinge count, the
+                 pool bodies are assigned to the symmetric ones (Hungarian, no
+                 reuse) on the standardised SHAPE_MEASURES. Each gets matched_to
+                 and match_dist. Tests whether body shape, not mirroring, carries
+                 the symmetric advantage.
 
 Writes one JSON line per body: body_id, body_source, genome_type, genome,
 n_modules, n_hinges, n_limbs (and run, run_brain, run_seed, run_score for
@@ -17,25 +26,44 @@ evolved bodies).
 Usage:
     python sample_bodies.py random --n 40 -o bodies_random.jsonl
     python sample_bodies.py evolved --runs-root /scratch/$USER/ariel_paper_e1 -o bodies_evolved.jsonl
+    python sample_bodies.py tied --like bodies_random.jsonl --pool 400 -o bodies_tied.jsonl
+    python sample_bodies.py shape_matched --like bodies_random.jsonl --pool 3000 --workers 20 -o bodies_shape_matched.jsonl
 """
 
 from __future__ import annotations
+
+import os
+
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
 
 import argparse
 import json
 import random
 from collections import Counter
+from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 import runs
 from ariel.ec.genotypes.tree.symmetry import MirrorAxis
 from replay import body_descriptors
+from analyse_bodies import body_measures
+from genomes import DEFAULT_TIE_PROB
 from sim import create_individual, use_zoo_modules_globally
 
-GENOMES = ("tree", "tree_symmetric")
-AXIS = {"tree": None, "tree_symmetric": MirrorAxis.Y_ZERO}
+GENOMES = ("tree", "tree_symmetric", "tree_tied")
+AXIS = {"tree": None, "tree_symmetric": MirrorAxis.Y_ZERO, "tree_tied": None}
+TIE_PROB = {"tree_tied": DEFAULT_TIE_PROB}
+# Rest-shape measures that account for most of the random-body gap (analyse_bodies.py).
+SHAPE_MEASURES = ("n_leg", "n_leg_yaw", "contact_len", "leg_reach", "height", "n_pitch")
+
+
+def random_genome(genome_type: str, max_modules: int, max_depth: int) -> dict:
+    return create_individual(max_modules, max_depth, symmetry_axis=AXIS[genome_type],
+                             tie_prob=TIE_PROB.get(genome_type)).genotype["morph"]
 
 
 def allocate(counts: dict[int, int], n: int) -> dict[int, int]:
@@ -54,17 +82,18 @@ def sample_random(n: int, pool: int, max_modules: int, max_depth: int, seed: int
     random.seed(seed)
     np.random.seed(seed)
     use_zoo_modules_globally()
-    bodies = {g: [] for g in GENOMES}
-    for g in GENOMES:
+    genomes = ("tree", "tree_symmetric")
+    bodies = {g: [] for g in genomes}
+    for g in genomes:
         for _ in range(pool):
-            genome = create_individual(max_modules, max_depth, symmetry_axis=AXIS[g]).genotype["morph"]
+            genome = random_genome(g, max_modules, max_depth)
             bodies[g].append({"genome_type": g, "genome": genome, **body_descriptors(genome)})
-    by_bin = {g: Counter(b["n_hinges"] for b in bodies[g]) for g in GENOMES}
+    by_bin = {g: Counter(b["n_hinges"] for b in bodies[g]) for g in genomes}
     common = {h: min(by_bin["tree"][h], by_bin["tree_symmetric"][h]) for h in by_bin["tree"] if h in by_bin["tree_symmetric"]}
     alloc = allocate(common, n)
     rng = np.random.default_rng(seed)
     out = []
-    for g in GENOMES:
+    for g in genomes:
         k = 0
         for h, m in sorted(alloc.items()):
             members = [b for b in bodies[g] if b["n_hinges"] == h]
@@ -72,6 +101,74 @@ def sample_random(n: int, pool: int, max_modules: int, max_depth: int, seed: int
                 out.append({"body_id": f"rand_{g}_{k:03d}", "body_source": "random", **members[i]})
                 k += 1
     return out
+
+
+def _pool(genome_type: str, pool: int, max_modules: int, max_depth: int, seed: int) -> list[dict]:
+    random.seed(seed)
+    np.random.seed(seed)
+    use_zoo_modules_globally()
+    out = []
+    for _ in range(pool):
+        genome = random_genome(genome_type, max_modules, max_depth)
+        out.append({"genome_type": genome_type, "genome": genome, **body_descriptors(genome)})
+    return out
+
+
+def _like_symmetric(like: Path) -> list[dict]:
+    return [b for b in map(json.loads, like.read_text().splitlines()) if b["genome_type"] == "tree_symmetric"]
+
+
+def sample_tied(like: Path, pool: int, max_modules: int, max_depth: int, seed: int) -> list[dict]:
+    """One tree_tied body per symmetric body in like, with its hinge count."""
+    need = Counter(b["n_hinges"] for b in _like_symmetric(like))
+    cands = _pool("tree_tied", pool, max_modules, max_depth, seed)
+    rng = np.random.default_rng(seed)
+    out = []
+    for h, m in sorted(need.items()):
+        members = [b for b in cands if b["n_hinges"] == h]
+        if len(members) < m:
+            raise SystemExit(f"only {len(members)} tied bodies with {h} hinges in the pool for {m}: raise --pool")
+        for i in rng.choice(len(members), size=m, replace=False):
+            out.append({"body_id": f"rand_tree_tied_{len(out):03d}", "body_source": "random", **members[i]})
+    return out
+
+
+def _measure(genome: dict) -> dict:
+    try:
+        return body_measures(genome)
+    except Exception:  # noqa: BLE001 -- an unbuildable body is just not a candidate
+        return {}
+
+
+def sample_shape_matched(like: Path, pool: int, max_modules: int, max_depth: int, seed: int,
+                         workers: int) -> list[dict]:
+    """Tree bodies matched one-to-one to the symmetric bodies in like on hinge
+    count (exactly) and SHAPE_MEASURES (standardised Euclidean distance)."""
+    sym = _like_symmetric(like)
+    cands = _pool("tree", pool, max_modules, max_depth, seed)
+    with Pool(workers) as p:
+        sym_m = p.map(_measure, [b["genome"] for b in sym])
+        cand_m = p.map(_measure, [b["genome"] for b in cands])
+    keep = [i for i, m in enumerate(cand_m) if m]
+    cands, cand_m = [cands[i] for i in keep], [cand_m[i] for i in keep]
+    S = np.array([[m[k] for k in SHAPE_MEASURES] for m in sym_m], dtype=float)
+    C = np.array([[m[k] for k in SHAPE_MEASURES] for m in cand_m], dtype=float)
+    sd = np.vstack([S, C]).std(axis=0)
+    sd[sd == 0] = 1.0
+    out = []
+    for h in sorted({b["n_hinges"] for b in sym}):
+        si = [i for i, b in enumerate(sym) if b["n_hinges"] == h]
+        ci = [i for i, b in enumerate(cands) if b["n_hinges"] == h]
+        if len(ci) < len(si):
+            raise SystemExit(f"only {len(ci)} tree bodies with {h} hinges in the pool for {len(si)}: raise --pool")
+        dist = np.linalg.norm((S[si][:, None] - C[ci][None]) / sd, axis=-1)
+        for a, c in zip(*linear_sum_assignment(dist)):
+            b = cands[ci[c]]
+            out.append({"body_id": f"match_tree_{sym[si[a]]['body_id'].rsplit('_', 1)[1]}", "body_source": "shape_matched",
+                        **b, "matched_to": sym[si[a]]["body_id"], "match_dist": float(dist[a, c]),
+                        **{f"shape_{k}": cand_m[ci[c]][k] for k in SHAPE_MEASURES},
+                        **{f"target_{k}": sym_m[si[a]][k] for k in SHAPE_MEASURES}})
+    return sorted(out, key=lambda b: b["body_id"])
 
 
 def sample_evolved(root: Path) -> list[dict]:
@@ -90,18 +187,28 @@ def sample_evolved(root: Path) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("source", choices=["random", "evolved"])
+    parser.add_argument("source", choices=["random", "evolved", "tied", "shape_matched"])
     parser.add_argument("--n", type=int, default=40, help="random: bodies per genome")
     parser.add_argument("--pool", type=int, default=400, help="random: candidates per genome")
     parser.add_argument("--max-modules", type=int, default=25)
     parser.add_argument("--max-depth", type=int, default=25)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--runs-root", type=Path, help="evolved: E1 output root")
+    parser.add_argument("--like", type=Path, help="tied, shape_matched: bodies file whose symmetric bodies to match")
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="shape_matched: measuring processes")
     parser.add_argument("-o", "--out", type=Path, required=True)
     args = parser.parse_args()
 
+    if args.source in ("tied", "shape_matched") and args.like is None:
+        parser.error(f"{args.source} needs --like")
     if args.source == "random":
         bodies = sample_random(args.n, args.pool, args.max_modules, args.max_depth, args.seed)
+    elif args.source == "tied":
+        bodies = sample_tied(args.like, args.pool, args.max_modules, args.max_depth, args.seed)
+    elif args.source == "shape_matched":
+        bodies = sample_shape_matched(args.like, args.pool, args.max_modules, args.max_depth, args.seed, args.workers)
+        d = [b["match_dist"] for b in bodies]
+        print(f"match distance (standardised): median {np.median(d):.2f}, max {max(d):.2f}")
     else:
         if args.runs_root is None:
             parser.error("evolved needs --runs-root")

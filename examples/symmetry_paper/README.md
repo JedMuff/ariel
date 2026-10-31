@@ -16,6 +16,7 @@ Code for the experiments in `PAPER_PLAN.md`. It is the part of the `symmetry-pre
 | `phase_shift.py`, `analyse_phase_shift.py` | E3 causal check: replay trained controllers with the left side's timing shifted or detuned, against the same number of random lateral hinges |
 | `analyse_e0.py` … `analyse_e3.py` | tables and figures per experiment |
 | `analyse_bodies.py` | R2: rest-pose body measures (size, height, contact spread, hinge axes, leg hinges) of the E2 bodies against training score and phase locking |
+| `analyse_matched.py` | E2 controls: random symmetric bodies against shape-matched tree bodies and random tied bodies (`sample_bodies.py tied` / `shape_matched`) |
 | `tests/` | `pytest examples/symmetry_paper/tests` |
 
 Score is the best forward score of a run's last generation, in [0, 2] minus penalties. Runs pair by seed (42 + rep in every cell).
@@ -40,6 +41,7 @@ The scripts in `slurm/symmetry_paper/` take `REPO` (default: that checkout) and 
 | **E1** coordination ablation | `sbatch slurm/symmetry_paper/e1_coordination_ablation.sh` | 60 | E3 on `e1`, then `analyse_e1.py --root $FINAL_ROOT/e1 --behaviour $FINAL_ROOT/e3/e1` |
 | **E2** random bodies (can start with E1) | `sample_bodies.py random --n 40 -o $FINAL_ROOT/e2/bodies_random.jsonl`, then `BODY_SET=random sbatch --array=0-239 slurm/symmetry_paper/e2_fixed_body_curves.sh` | 240 | E3 on `e2/random`, then `analyse_e2.py` |
 | **E2** evolved bodies (after E1) | `sample_bodies.py evolved --runs-root $FINAL_ROOT/e1 -o $FINAL_ROOT/e2/bodies_evolved.jsonl`, then `BODY_SET=evolved sbatch --array=0-119 slurm/symmetry_paper/e2_fixed_body_curves.sh` | 120 | as above |
+| **E2** controls: tied and shape-matched tree bodies | `sample_bodies.py tied --like $FINAL_ROOT/e2/bodies_random.jsonl -o $FINAL_ROOT/e2/bodies_tied.jsonl`; `sample_bodies.py shape_matched --like … --pool 12000 -o $FINAL_ROOT/e2/bodies_shape_matched.jsonl`; then per set `BODY_SET=<set> BRAINS="bang_bang dann" sbatch --array=0-79 slurm/symmetry_paper/e2_fixed_body_curves.sh` | 80 per set | `analyse_matched.py --roots $FINAL_ROOT/e2/{random,tied,shape_matched} --bodies $FINAL_ROOT/e2/bodies_{random,tied,shape_matched}.jsonl` |
 | **E3** behaviour | `E3_ROOTS=<run root(s)> E3_NAME=<name> sbatch --array=0-<n-1> slurm/symmetry_paper/e3_behaviour.sh` (n = `replay.py --list-runs <roots> \| wc -l`) | one per run | `gait_species.py --root $FINAL_ROOT/e3/<name>`; `analyse_e3.py --roots … --training-roots …` |
 | **E3** phase shift (after E3) | `PS_ROOTS=$FINAL_ROOT/e2/random PS_NAME=e2_random sbatch --array=0-23 slurm/symmetry_paper/e3_phase_shift.sh` (40 runs per task) | ceil(n / 40) | `analyse_phase_shift.py --roots $FINAL_ROOT/e3/phase_shift_e2_random …` |
 
