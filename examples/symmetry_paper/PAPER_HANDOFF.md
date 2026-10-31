@@ -4,6 +4,19 @@ Oct 31, 2026 · for drafting the LaTeX paper from `PAPER_PLAN.md`
 
 This file gives everything needed to write the paper without re-deriving it from the code: where each dataset lives, how to rebuild each figure, where each number in the plan comes from, and the method parameters.
 
+## v2 (read this first; 2026-10-31)
+
+After the first draft review the protocol changed and every experiment is rerun (`PAPER_PLAN.md` §5):
+
+- **Fitness:** forward displacement in m, unclipped, no penalties (`--fitness displacement`; `sim.EvalProfile.fitness`). v1 runs replay with their own fitness: `replay.py` builds the profile from `run_config.json` via `sim.profile_for` (no `fitness` key = v1, normalised).
+- **Outer EA:** (20+20), plus-selection, no retraining of parents (`evolve.py` defaults; `--repeat-evals` is v1 only).
+- **No retests:** dropped because the sim is deterministic on one machine. `--retests N` (`sim.retest_controller`) still exists in `evolve.py` and `train_fixed_body.py` but defaults to 0 and the cluster scripts don't pass it.
+- **Cluster:** `_common.sh` now defaults to `FINAL_ROOT=/scratch/$USER/ariel_paper_v2` and carries `V2_EVOLVE_ARGS` / `V2_TRAIN_ARGS`. New `e0_dann_grid.sh`; `e0_dann_budget.sh` (10 seeds; `V1=1` reproduces v1), `e1_coordination_ablation.sh` (3 brains × 20 seeds), `e2_fixed_body_curves.sh` (80 bodies per set, `leg_matched` for E5). All take `DRY_RUN=1` to print the decoded task.
+- **Figures:** `paper/make_figures.sh` uses v1 data by default and the v2 layout with `V2=<root>`. New: `fig1_grid_budget.png` (analyse_e0, DANN), `fig_e1_curves_{genome,controller}.png` (analyse_e1), `fig8_phase_shift_relative.png` plus body-level tests (analyse_phase_shift), merged `fig_locked.png` and `fig_locked_seeds.png` (paper_figures). Dropped from the paper: the bang\_bang gait grid (`--gait-grid` still draws it), `fig_e1_scores`, the E1 gap bars.
+- **Paper style:** no "zoo" (say "default hinge"), no underscores in names ("bang-bang", "free-frequency bang-bang", "drift bang-bang", "DANN"; `runs.BRAIN_LABEL`), no bold, no run-in paragraph headings.
+
+Sections 1–4 below describe the v1 data, which the draft still shows until the v2 runs are in.
+
 ## 0. Read first
 
 - **`PAPER_PLAN.md` is the authority** for the story, section structure (R1–R6), figure list and numbers. Revised Oct 31 to a body-advantage thesis.
@@ -38,7 +51,7 @@ Suggested output root for every command: `OUT=__data__/ariel_paper/paper`.
 
 | plan figure | file | command |
 | --- | --- | --- |
-| 1a. Grid gap heatmap | `fig1a_grid_gap.png` | `analyse_e0.py --grid-root __data__/ariel_actuator_grid --budget-roots __data__/ariel_symmetry_pressure_sweep_dann __data__/ariel_dann_budget/sb40 __data__/ariel_dann_budget/sb80 --out $OUT/e0` |
+| 1a. Grid gap heatmap | `fig1a_grid_gap.png` | `analyse_e0.py --grid-roots __data__/ariel_actuator_grid --budget-roots __data__/ariel_symmetry_pressure_sweep_dann __data__/ariel_dann_budget/sb40 __data__/ariel_dann_budget/sb80 --out $OUT/e0` |
 | 1b. DANN gap vs budget | `fig1b_budget_gap.png` | same command |
 | 2. E2 learning curves (tree vs sym only) | `fig5_learning_curves.png` | `analyse_e2.py --roots __data__/ariel_paper/e2/random --out $OUT/e2` |
 | 3a. Body counts by genome | `fig2_bodies.png` | same command (module, hinge, limb counts) |
@@ -51,15 +64,9 @@ Suggested output root for every command: `OUT=__data__/ariel_paper/paper`.
 
 All scripts run in seconds to a few minutes locally, except `analyse_matched.py` and `analyse_bodies.py`, which simulate each body's 3 s settle (~10–30 s with all CPUs).
 
-### Missing figures (no script yet)
+### Figures added for the draft (`paper_figures.py`)
 
-| plan figure | what to plot | data |
-| --- | --- | --- |
-| 2. Learning curves, four body sets | Best score so far vs evaluations (log x), mean ± SEM over bodies (seed mean per body first), tree / sym / tied / shape-matched, one panel per brain (bang\_bang, DANN). Inset or second row: sym / tree ratio vs evals | `analyse_e2.load_trainings([random, tied, shape_matched roots])` returns per-training curves; body set = `genome_type`, except `body_source == "shape_matched"` |
-| 3b. Shape measures by genome | Distributions (strip or box) of height, front–back contact spread (`contact_len`), leg hinges (`n_leg`), yaw-axis leg hinges (`n_leg_yaw`), lateral-axis hinges (`n_pitch`), for tree / sym / tied / shape-matched | `body_features.csv` (random tree and sym) and `matched_bodies.csv` (all four sets; shape measures only) |
-| 4b. Gait vs actuator | Gait-class shares across kp × kv (per armature), sym vs tree, bang\_bang, with the score gap overlaid | `__data__/ariel_actuator_grid/rowing_grid/individuals.csv` (check its columns; numbers in `SYMMETRY_ADVANTAGE.md`) |
-| 5a. Locked vs unlocked | Final score of E2 random bodies: tree, sym unlocked, sym locked, per brain (bang\_bang, drift, DANN) | see section 3, "Locked vs unlocked symmetric bodies" |
-| 6 (absolute). E1 scores | Mean score per arm (brain × genome) beside the paired gaps, to show free frequency's collapse | `$OUT/e1/e1_runs.csv` (`score` by `brain`, `genome`) |
+The figures that had no script, and every "computed inline" number of section 3, come from `paper_figures.py` (`fig_curves_sets`, `fig_shape_measures`, `fig_locked`, `fig_locked_seeds`, and `fig_gait_grid` with `--gait-grid`; numbers in `inline_numbers.txt`). `paper/make_figures.sh` runs every script above and copies the figures into the LaTeX draft in `paper/`.
 
 Figure style: use `runs.style(ax)` and the colours in `runs.GENOME_COLOR` (tree orange, symmetric blue, tied green; shape-matched tree as faded orange, as in `analyse_matched.py`), `runs.BRAIN_LABEL` for brain names.
 

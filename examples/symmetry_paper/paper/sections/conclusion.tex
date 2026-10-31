@@ -1,0 +1,10 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+\todo{Draft written for the first-round results; revise after the v2 runs.}
+
+Symmetric robots win because of the bodies they make likely, not because of what their controllers learn. On fixed random bodies, symmetric ones score higher from the first controller evaluations under every controller that shares a clock across hinges; learning shrinks the relative lead but does not create it. About half of the lead comes from shape: mirroring tends to make low, sprawled bodies with floor contacts spread front to back and legs that sweep horizontally. Most of it is shared by bodies that duplicate modules without mirroring them, which reach similar scores with a different shape and more legs.
+
+Symmetric bodies do move differently. They alternate mirrored limbs and lock the two sides in phase, which unconstrained bodies almost never do. Their gaits depend on timing, as every gait does, but perturbing the left--right timing, either its lag or its lock, costs no more than perturbing any other timing. The lock therefore accompanies good gaits on symmetric bodies rather than explaining them.
+
+The symmetry advantage is largely a duplication-and-shape advantage present before learning. Comparisons of morphological encodings should account for the body statistics an encoding changes, such as duplicated modules and resting shape, before crediting the regularity itself.

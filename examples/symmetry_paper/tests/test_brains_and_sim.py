@@ -1,7 +1,7 @@
 """Brains, the hinge actuator and the episode loop."""
 
 import random
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import mujoco
 import numpy as np
@@ -17,6 +17,9 @@ from sim import (
     HingeActuator,
     build_world,
     create_individual,
+    profile_for,
+    retest_controller,
+    retest_summary,
     run_skill_episode,
     translate_score,
     zoo_spec,
@@ -165,3 +168,37 @@ def test_episode_is_deterministic():
     a = run_skill_episode(model, data, brain)
     mujoco.mj_resetData(model, data)
     assert run_skill_episode(model, data, brain) == a
+
+
+# ── v2 fitness and retests ────────────────────────────────────────────────────
+
+
+def test_displacement_fitness_is_unclipped_metres():
+    genome = body("tree")
+    model, data = build_world(genome)
+    brain = make_brain_for_model("bang_bang", model, data, np.full(4 + 5 * model.nu, 0.5, dtype=np.float32))
+    fit_d, info_d = run_skill_episode(model, data, brain, replace(PROFILE, fitness="displacement"))
+    assert fit_d == -info_d["raw_score"]
+    assert info_d["score"] == info_d["raw_score"]
+    fit_n, info_n = run_skill_episode(model, data, brain, replace(PROFILE, fitness="normalised"))
+    assert info_n["raw_score"] == info_d["raw_score"]
+    assert info_n["score"] == translate_score(info_n["raw_score"], PROFILE.loco_duration)
+
+
+def test_profile_for_v1_and_v2_configs():
+    assert profile_for({}).fitness == "normalised"
+    assert profile_for({"fitness": "displacement"}).fitness == "displacement"
+
+
+def test_retest_controller_returns_n_scores():
+    genome = body("tree")
+    model, data = build_world(genome)
+    w = np.full(4 + 5 * model.nu, 0.5, dtype=np.float32)
+    prof = replace(PROFILE, fitness="displacement")
+    fits = retest_controller(genome, w, "bang_bang", 3, 3, 0, profile=prof)
+    assert len(fits) == 3 and all(np.isfinite(fits))
+    brain = make_brain_for_model("bang_bang", model, data, w)
+    fit, _ = run_skill_episode(model, data, brain, prof)
+    assert fits[0] == pytest.approx(fit, abs=1e-6)
+    summ = retest_summary(fits)
+    assert summ["retest_mean"] == pytest.approx(-np.mean(fits))

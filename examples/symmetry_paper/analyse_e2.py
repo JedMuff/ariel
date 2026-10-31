@@ -65,6 +65,9 @@ def load_trainings(roots: list[Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
             half = c.loc[c["score"] >= 0.5 * final, "evals"]
             row = {k: cfg[k] for k in ("body_id", "body_source", "genome_type", "brain", "seed",
                                        "n_modules", "n_hinges", "n_limbs")}
+            fin = json.loads((d / "final.json").read_text())
+            row.update({"fitness_mode": cfg.get("fitness", "normalised"),
+                        "final_retest": fin.get("retest_mean", math.nan), "retest_sd": fin.get("retest_sd", math.nan)})
             row.update({"stopped_early": stopped, "final": final, "auc": float(c["score"].mean()),
                         "evals_to_half": int(half.iloc[0]) if final > 0 and len(half) else math.nan})
             for n in CHECKPOINTS:

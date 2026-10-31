@@ -2,10 +2,18 @@
 #
 # Environment overrides:
 #   REPO        checkout of the symmetry-paper branch (default below)
-#   FINAL_ROOT  where results go (default /scratch/$USER/ariel_paper)
+#   FINAL_ROOT  where results go (default /scratch/$USER/ariel_paper_v2; the v1
+#               runs, normalised fitness and (10+20) with --repeat-evals, are in
+#               /scratch/$USER/ariel_paper)
+#
+# Paper v2 protocol: fitness is forward displacement in m (unclipped, no
+# penalties), outer EA (20+20) without re-evaluation; V2_EVOLVE_ARGS /
+# V2_TRAIN_ARGS carry it.
 
 REPO=${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}
-FINAL_ROOT=${FINAL_ROOT:-/scratch/$USER/ariel_paper}
+FINAL_ROOT=${FINAL_ROOT:-/scratch/$USER/ariel_paper_v2}
+V2_EVOLVE_ARGS=(--budget 30 --pop 20 --lam 20 --fitness displacement --max-modules 25 --max-depth 25)
+V2_TRAIN_ARGS=(--fitness displacement)
 SCRIPTS_DIR=$REPO/examples/symmetry_paper
 
 setup_env() {

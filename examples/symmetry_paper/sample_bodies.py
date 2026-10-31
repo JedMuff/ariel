@@ -114,8 +114,8 @@ def _pool(genome_type: str, pool: int, max_modules: int, max_depth: int, seed: i
     return out
 
 
-def _like_symmetric(like: Path) -> list[dict]:
-    return [b for b in map(json.loads, like.read_text().splitlines()) if b["genome_type"] == "tree_symmetric"]
+def _like_symmetric(like: Path, genome_type: str = "tree_symmetric") -> list[dict]:
+    return [b for b in map(json.loads, like.read_text().splitlines()) if b["genome_type"] == genome_type]
 
 
 def sample_tied(like: Path, pool: int, max_modules: int, max_depth: int, seed: int) -> list[dict]:
@@ -141,18 +141,23 @@ def _measure(genome: dict) -> dict:
 
 
 def sample_shape_matched(like: Path, pool: int, max_modules: int, max_depth: int, seed: int,
-                         workers: int) -> list[dict]:
-    """Tree bodies matched one-to-one to the symmetric bodies in like on hinge
-    count (exactly) and SHAPE_MEASURES (standardised Euclidean distance)."""
-    sym = _like_symmetric(like)
+                         workers: int, measures: tuple[str, ...] = SHAPE_MEASURES,
+                         target_genome: str = "tree_symmetric", body_source: str = "shape_matched",
+                         id_prefix: str = "match_tree") -> list[dict]:
+    """Tree bodies matched one-to-one to the target_genome bodies in like on
+    hinge count (exactly) and measures (standardised Euclidean distance).
+    Defaults: the E2 shape-matched control. E5: target_genome tree_tied,
+    measures ("n_leg",), body_source leg_matched."""
+    SHAPE = measures
+    sym = _like_symmetric(like, target_genome)
     cands = _pool("tree", pool, max_modules, max_depth, seed)
     with Pool(workers) as p:
         sym_m = p.map(_measure, [b["genome"] for b in sym])
         cand_m = p.map(_measure, [b["genome"] for b in cands])
     keep = [i for i, m in enumerate(cand_m) if m]
     cands, cand_m = [cands[i] for i in keep], [cand_m[i] for i in keep]
-    S = np.array([[m[k] for k in SHAPE_MEASURES] for m in sym_m], dtype=float)
-    C = np.array([[m[k] for k in SHAPE_MEASURES] for m in cand_m], dtype=float)
+    S = np.array([[m[k] for k in SHAPE] for m in sym_m], dtype=float)
+    C = np.array([[m[k] for k in SHAPE] for m in cand_m], dtype=float)
     sd = np.vstack([S, C]).std(axis=0)
     sd[sd == 0] = 1.0
     out = []
@@ -164,10 +169,10 @@ def sample_shape_matched(like: Path, pool: int, max_modules: int, max_depth: int
         dist = np.linalg.norm((S[si][:, None] - C[ci][None]) / sd, axis=-1)
         for a, c in zip(*linear_sum_assignment(dist)):
             b = cands[ci[c]]
-            out.append({"body_id": f"match_tree_{sym[si[a]]['body_id'].rsplit('_', 1)[1]}", "body_source": "shape_matched",
+            out.append({"body_id": f"{id_prefix}_{sym[si[a]]['body_id'].rsplit('_', 1)[1]}", "body_source": body_source,
                         **b, "matched_to": sym[si[a]]["body_id"], "match_dist": float(dist[a, c]),
-                        **{f"shape_{k}": cand_m[ci[c]][k] for k in SHAPE_MEASURES},
-                        **{f"target_{k}": sym_m[si[a]][k] for k in SHAPE_MEASURES}})
+                        **{f"shape_{k}": cand_m[ci[c]][k] for k in SHAPE},
+                        **{f"target_{k}": sym_m[si[a]][k] for k in SHAPE}})
     return sorted(out, key=lambda b: b["body_id"])
 
 
@@ -195,6 +200,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--runs-root", type=Path, help="evolved: E1 output root")
     parser.add_argument("--like", type=Path, help="tied, shape_matched: bodies file whose symmetric bodies to match")
+    parser.add_argument("--measures", nargs="+", default=list(SHAPE_MEASURES),
+                        help="shape_matched: measures to match on (E5: n_leg)")
+    parser.add_argument("--target-genome", default="tree_symmetric",
+                        help="shape_matched: genome of the --like bodies to match (E5: tree_tied)")
+    parser.add_argument("--body-source", default="shape_matched", help="shape_matched: body_source label (E5: leg_matched)")
+    parser.add_argument("--id-prefix", default="match_tree", help="shape_matched: body_id prefix (E5: legmatch_tree)")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="shape_matched: measuring processes")
     parser.add_argument("-o", "--out", type=Path, required=True)
     args = parser.parse_args()
@@ -206,7 +217,8 @@ def main() -> None:
     elif args.source == "tied":
         bodies = sample_tied(args.like, args.pool, args.max_modules, args.max_depth, args.seed)
     elif args.source == "shape_matched":
-        bodies = sample_shape_matched(args.like, args.pool, args.max_modules, args.max_depth, args.seed, args.workers)
+        bodies = sample_shape_matched(args.like, args.pool, args.max_modules, args.max_depth, args.seed, args.workers,
+                                      tuple(args.measures), args.target_genome, args.body_source, args.id_prefix)
         d = [b["match_dist"] for b in bodies]
         print(f"match distance (standardised): median {np.median(d):.2f}, max {max(d):.2f}")
     else:

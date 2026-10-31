@@ -1,0 +1,71 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{multirow}
+\usepackage[table]{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+\usepackage[capitalise]{cleveref}
+
+\graphicspath{{figures/}}
+
+% ── Draft notes ──────────────────────────────────────────────────────────────
+% \drafttrue shows the highlighted notes; \draftfalse hides all of them.
+%   \stat{..}    where a significance test / CI belongs, and what it should be
+%   \caveat{..}  a claim the current data do not (fully) support, or a wording risk
+%   \todo{..}    something still to do (experiment, figure, text)
+\newif\ifdraft
+\drafttrue
+\definecolor{statbg}{RGB}{214,232,255}
+\definecolor{caveatbg}{RGB}{255,222,214}
+\definecolor{todobg}{RGB}{255,243,191}
+\newcommand{\draftnote}[3]{\ifdraft{\par\noindent\setlength{\fboxsep}{1.5pt}\colorbox{#1}{\parbox{\dimexpr\linewidth-2\fboxsep}{\sffamily\footnotesize #2: #3}}}\fi}
+\newcommand{\stat}[1]{\draftnote{statbg}{STAT}{#1}}
+\newcommand{\caveat}[1]{\draftnote{caveatbg}{CHECK}{#1}}
+\newcommand{\todo}[1]{\draftnote{todobg}{TODO}{#1}}
+\newcommand{\pending}[1]{\ifdraft{\color{orange!70!black}#1}\else#1\fi}  % numbers that will change with more runs
+
+% ── Notation ─────────────────────────────────────────────────────────────────
+% Plain names, no underscores or special fonts (paper style). Use "\bb\ " before a space.
+\newcommand{\tree}{tree}
+\newcommand{\sym}{symmetric}
+\newcommand{\tied}{tied}
+\newcommand{\bb}{bang-bang}
+\newcommand{\bbfree}{free-frequency bang-bang}
+\newcommand{\bbdrift}{drift bang-bang}
+\newcommand{\dann}{DANN}
+
+\title{Why Symmetric Robots Win: Module Duplication, Body Shape and the Symmetry Advantage in Body--Brain Evolution}
+\author{Jed Muff \and TODO co-authors}
+\date{Draft, \today}
+
+\begin{document}
+\maketitle
+
+\input{sections/draft_notes}
+
+\input{sections/abstract}
+\input{sections/introduction}
+\input{sections/related_work}
+\input{sections/methods}
+\input{sections/results}
+\input{sections/discussion}
+\input{sections/conclusion}
+
+% Uncomment once the text cites something (BibTeX errors on an empty citation list).
+% \bibliographystyle{plainnat}
+% \bibliography{references}
+
+\appendix
+\input{sections/appendix}
+
+\end{document}

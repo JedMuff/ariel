@@ -1,0 +1,205 @@
+\section{Results}
+\label{sec:results}
+
+\caveat{Every number in this section is from the first round of runs (normalised score in $[0, 2]$ minus penalties; outer EA (10+20) with parents retrained every generation; 40 bodies per set; 3--10 seeds per arm). The figures are drawn from the same runs. The v2 runs (displacement in metres, (20+20) without retraining, 80 bodies per set, 10--20 seeds) will replace all of them, and the units change to metres. Numbers in \pending{orange} are the ones most likely to move.}
+
+% ════════════════════════════════════════════════════════════════════════════
+\subsection{Symmetric bodies win in evolution, given enough learning (R1)}
+\label{sec:r1}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{r1_grid_budget.png}
+  \caption{The symmetric advantage in evolution with \dann. (a) Paired symmetric $-$ tree difference in last-generation best score for each hinge setting (gain $k_p$ by damping $k_v$, default armature). Each cell gives the mean gap, the mean symmetric and tree scores, and the number of seeds in which the symmetric run was ahead; the outlined cell is the default hinge. Blue: symmetric better; orange: tree better. (b) The same gap at the default hinge against the number of controller evaluations per body; grey lines are individual seeds, blue the mean with a 95\% bootstrap CI, and the fractions the seeds in which the symmetric run was ahead.}
+  \label{fig:r1}
+\end{figure}
+
+We first ask when symmetric bodies outperform unconstrained ones in body--brain evolution. With \dann, the answer depends on how much each controller is trained (\cref{fig:r1}b). At 200 evaluations per body there is no difference between the genomes (\pending{$-0.03$}), at 800 symmetric runs lead by \pending{$+0.22$}, and at 1{,}600 by \pending{$+0.37$} (95\% CI \pending{$[+0.23, +0.50]$}), with the symmetric run ahead in all five seeds.
+\stat{With $n = 5$ the smallest attainable two-sided Wilcoxon $p$ is $0.0625$, so 5/5 cannot reach $p < 0.05$; v2 has ten seeds per budget. The claim made is a trend with budget, so also test gap $\sim$ log(budget), bootstrapping over seeds.}
+
+The hinge grid asks whether this depends on the actuator. \Cref{fig:r1}a is drawn from the first round of runs at 200 evaluations per body, where \dann\ showed no pooled gap ($+0.02$, CI $[-0.06, +0.09]$, $p = 0.31$; symmetric ahead in 12 of 18 cells); with \bb\ at the same budget the symmetric genome was ahead in 17 of 18 cells (pooled $+0.14$, $[+0.07, +0.21]$, $p < 0.001$). The v2 grid repeats it with \dann\ at 1{,}600 evaluations per body, where the default hinge shows a clear gap, to test whether that gap holds across hinge settings.
+\todo{Replace panel (a) and this paragraph with the v2 grid (\dann, 1{,}600 evaluations, five seeds per cell).}
+\stat{Report the pooled paired gap over (cell, seed) pairs and a sign test over cell means. Test whether the gap varies with $k_p$ or $k_v$ (gap $\sim k_p + k_v$, runs as units); with five seeds per cell, phrase the result as ``robust to hinge settings on average'' unless an effect is clear.}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{r1_e1_curves_genome.png}
+  \caption{Evolution at the default hinge with the \bb\ controller (E1), by genome. (a) Best score in the population after each generation, mean $\pm$ SEM over seeds. (b) Paired difference to tree runs of the same seed, with a 95\% bootstrap CI.}
+  \label{fig:e1-genome}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{r1_e1_curves_controller.png}
+  \caption{Evolution at the default hinge by controller (E1; \dann\ at 200 evaluations per body from E0). (a) Best score in the population after each generation for symmetric (solid) and tree (dashed) runs, mean $\pm$ SEM over seeds. (b) Paired symmetric $-$ tree difference per generation, with a 95\% bootstrap CI.}
+  \label{fig:e1-controller}
+\end{figure}
+
+E1 follows evolution generation by generation for three genomes and four controllers at the default hinge. \Cref{fig:e1-genome} compares the genomes under \bb. Tied runs pull ahead of tree runs after about five generations and end \pending{$+0.20$} ahead; symmetric runs stay ahead of tree runs throughout, by \pending{$+0.06$} in the first generation and \pending{$+0.09$} in the last, but with CIs that include zero at ten seeds. \Cref{fig:e1-controller} compares the controllers. With \bbdrift\ the symmetric lead grows from \pending{$+0.04$} to \pending{$+0.18$}; with \bbfree\ every genome scores far lower and there is no gap; with \dann\ at 200 evaluations the symmetric runs start \pending{$+0.13$} ahead and end \pending{$0.15$} behind. \Cref{tab:e1} gives the last-generation scores and paired gaps.
+
+\caveat{In the first-round E1 data the symmetric lead over generations does not shrink under \bb\ or \bbdrift; it grows. It shrinks under \dann\ at 200 evaluations (five seeds). The ``lead shrinks with training'' finding is clear for controller training on fixed bodies (\cref{sec:r2}), so keep the two kinds of training apart in the text: ``learning'' for the inner loop, ``evolution'' for generations. Check again with the v2 E1 (20 seeds): if the bang-bang lead still grows over generations, the honest summary is that symmetric bodies start ahead in controller learning and evolution keeps (or widens) that lead.}
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{E1: evolution at the default hinge, ten seeds per arm (first round). Left: mean last-generation best score. Right: paired gaps, with bootstrap 95\% CI, Wilcoxon $p$ and the number of seeds in which the first genome is ahead.}
+  \label{tab:e1}
+  \resizebox{\linewidth}{!}{\begin{tabular}{lccc@{\hskip 1.2em}lcc}
+    \toprule
+    controller & \tree & \sym & \tied & comparison & gap [95\% CI] & $p$ (wins) \\
+    \midrule
+    \multirow{3}{*}{\bb}     & \multirow{3}{*}{0.98} & \multirow{3}{*}{1.06} & \multirow{3}{*}{1.11} & symmetric $-$ tree  & \pending{$+0.08$ $[-0.14, +0.31]$} & 0.70 (5) \\
+                             &  &  &  & tied $-$ tree & \pending{$+0.13$ $[+0.01, +0.24]$} & 0.06 (8) \\
+                             &  &  &  & symmetric $-$ tied  & $-0.06$ $[-0.22, +0.14]$ & 0.43 (4) \\
+    \midrule
+    \multirow{3}{*}{\bbdrift} & \multirow{3}{*}{0.82} & \multirow{3}{*}{0.97} & \multirow{3}{*}{0.97} & symmetric $-$ tree  & \pending{$+0.15$ $[+0.02, +0.27]$} & 0.08 (6) \\
+                             &  &  &  & tied $-$ tree & \pending{$+0.14$ $[+0.05, +0.24]$} & 0.01 (8) \\
+                             &  &  &  & symmetric $-$ tied  & $+0.00$ $[-0.09, +0.10]$ & 0.92 (5) \\
+    \midrule
+    \multirow{3}{*}{\bbfree} & \multirow{3}{*}{0.37} & \multirow{3}{*}{0.37} & \multirow{3}{*}{0.36} & symmetric $-$ tree  & $+0.01$ $[-0.08, +0.11]$ & 0.77 (4) \\
+                             &  &  &  & tied $-$ tree & $-0.01$ $[-0.05, +0.04]$ & 0.63 (4) \\
+                             &  &  &  & symmetric $-$ tied  & $+0.01$ $[-0.04, +0.07]$ & 0.92 (5) \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\caveat{The \dann\ puzzle: no gap in evolution at 200 evaluations, but a gap on fixed bodies at 200 evaluations ($+0.07$, \cref{sec:r2}). In the first round, parents were retrained every generation, which adds selection noise. v2 drops the retraining; check whether the puzzle survives before explaining it.}
+
+% ════════════════════════════════════════════════════════════════════════════
+\subsection{Symmetric bodies start ahead, and the relative lead shrinks with learning (R2)}
+\label{sec:r2}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\linewidth]{r2_curves_sets.png}
+  \caption{Learning curves on fixed random bodies. Best score so far against controller evaluations, 40 bodies per set and three training seeds per body (seed mean per body, then mean $\pm$ SEM over bodies). Top: score. Middle: difference to the mean of tree bodies at the same number of evaluations (band: bootstrap 95\% CI of symmetric $-$ tree). Bottom: mean score of each set divided by the mean score of tree bodies at the same number of evaluations, so 1 means no advantage and 1.5 means 50\% higher; it starts at 50 evaluations, before which tree scores are too close to zero for a ratio to be meaningful. All sets are matched on hinge count. Shape-matched tree bodies (dashed) are tree bodies selected to match each symmetric body's resting shape (\cref{sec:r3}).}
+  \label{fig:curves}
+\end{figure}
+
+Evolution mixes two effects: which bodies are made, and how well their controllers are trained. To separate them, we train controllers on fixed, hinge-count-matched random bodies (\cref{fig:curves}). Symmetric bodies are ahead from the first CMA-ES generation, when every controller is still a random sample around the same fixed starting mean: after 20 evaluations they score \pending{$0.074$} against \pending{$0.031$} for tree bodies under \bb, and \pending{$0.045$} against \pending{$0.012$} under \dann. Since nothing has been learned at that point, the advantage is present before learning.
+
+Learning then raises every body set, and the relative lead shrinks. We measure it by the ratio to tree, the mean score of symmetric bodies divided by the mean score of tree bodies after the same number of evaluations (\cref{fig:curves}, bottom row). Under \bb\ symmetric bodies score \pending{1.55} times as much as tree bodies after 200 evaluations and \pending{1.41} times after 1{,}600; under \dann\ the ratio falls from \pending{1.84} to \pending{1.34} after 5{,}000. In absolute terms the gap grows over the first few hundred evaluations and then levels off (\pending{$+0.10$} at 200 and \pending{$+0.15$} at 1{,}600 under \bb; middle row), so tree bodies gain more than symmetric ones in proportion to where they started, but do not close the gap. The lead persists to the end of training (\cref{tab:e2}): \pending{$+0.15$} under \bb\ after 1{,}600 evaluations, \pending{$+0.12$} under \bbdrift, and \pending{$+0.13$} under \dann\ after 5{,}000. Under \bbfree\ both genomes collapse to scores of 0.14--0.16 and the gap vanishes (\cref{sec:r6}).
+
+\caveat{``Shrinks'' is true of the ratio, not of the absolute gap, and part of the falling ratio is arithmetic: tree scores start near zero. Say both every time. ``Learning does not create the lead'' is the safe summary. Symmetric bodies also reach half their final score sooner (\bb\ 35 evaluations earlier, $p = 0.40$; \dann\ 138, $p = 0.049$), which argues against ``tree bodies learn faster''.}
+\stat{Test ``present before learning'': symmetric $-$ tree at 20 evaluations, bootstrap CI over bodies and Mann--Whitney (and the same for tied and shape-matched). Test the shrinking lead: fit log(score) $\sim$ genome $\times$ log(evaluations) with body as a random effect, from 50 evaluations on. A negative interaction is a shrinking ratio. Also report the difference-in-differences of the absolute gap, $[\text{sym}(1600) - \text{sym}(50)] - [\text{tree}(1600) - \text{tree}(50)]$, bootstrapped over bodies.}
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{E2: symmetric $-$ tree on 40 + 40 fixed random bodies (seed mean per body; unpaired difference of body means with bootstrap 95\% CI over bodies, Mann--Whitney $p$). Ratio to tree: mean symmetric score divided by mean tree score after 200, 800 and 1{,}600 evaluations.}
+  \label{tab:e2}
+  \begin{tabular}{lccc}
+    \toprule
+    controller & gap, final [95\% CI] & $p$ & ratio to tree at 200 / 800 / 1600 \\
+    \midrule
+    \bb      & \pending{$+0.15$ $[+0.01, +0.29]$} & \pending{0.12} & 1.55 / 1.45 / 1.41 \\
+    \bbdrift & \pending{$+0.12$ $[+0.01, +0.24]$} & \pending{0.10} & 1.54 / 1.43 / 1.40 \\
+    \dann\ (5{,}000 evaluations) & \pending{$+0.13$ $[-0.02, +0.29]$} & \pending{0.27} & 1.84 / 1.50 / 1.39 \\
+    \bbfree  & $+0.02$ $[-0.03, +0.07]$ & 0.72 & --- (both $\approx 0.15$) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\caveat{This is the paper's central effect, and it is borderline with 40 bodies per genome: the bootstrap CIs for \bb\ and \bbdrift\ just exclude 0, the rank tests do not reach 0.05, and the \dann\ CI includes 0. The direction is consistent across three controllers and with evolution, which helps. v2 doubles the bodies; with the observed SD, check that 80 per genome gives 80\% power at $\Delta = 0.12$ (in the new units).}
+\stat{Score distributions are skewed (many bodies near 0, a few far ahead), so the bootstrap of the mean and Mann--Whitney can disagree, as here. Report both, or a permutation test on the mean difference, and a rank-based effect size such as $P(\text{sym} > \text{tree})$.}
+
+% ════════════════════════════════════════════════════════════════════════════
+\subsection{The advantage is in the bodies: shape and duplication (R3)}
+\label{sec:r3}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.9\linewidth]{r3_shape_measures.png}
+  \caption{Resting shape of the four body sets (40 bodies each, measured after the \SI{3}{s} settle). Boxes: quartiles; dots: bodies. All sets have the hinge counts of the symmetric bodies.}
+  \label{fig:shape}
+\end{figure}
+
+If symmetric bodies are ahead before learning, the advantage must lie in the bodies. At equal hinge count, random symmetric bodies are flatter than tree bodies (height 0.14 vs \SI{0.22}{m}), spread their floor contacts further front to back (0.16 vs \SI{0.13}{m}), have more yaw-axis leg hinges (2.3 vs 1.5) and far fewer lateral-axis hinges (0.45 vs 1.6) (\cref{fig:shape}). They also have fewer modules (18.6 vs 26, since random tree bodies almost always reach the module cap) and less mass (2.6 vs \SI{3.0}{kg}). Within each genome, the number of leg hinges predicts a body's final score ($\rho = 0.58$ under \bb\ in both genomes; under \dann\ 0.71 for tree and 0.55 for symmetric). Front--back contact spread predicts score among symmetric bodies ($\rho = 0.60$, \dann\ 0.62) but hardly among tree bodies (0.14, 0.19), and height predicts it in neither ($|\rho| \leq 0.23$). The symmetric genome also forces midline hinges to $0^\circ$ (56\% of its hinges against 23\% in tree bodies), which gives it fewer diagonal hinge axes (35\% vs 53\%), but the diagonal share does not predict score among tree bodies ($\rho = 0.03$).
+
+\caveat{The correlational evidence that shape causes the advantage is weak: contact spread predicts score only in symmetric bodies, and height, the most visible difference, predicts it in neither. The matching experiment below is the real evidence. There are about 100 correlations here ($\sim$25 measures, two genomes, two controllers), so report them as exploratory, with an FDR correction if any are highlighted. Mass differs between genomes and correlates with score among tree bodies ($\rho = 0.58$); add it to the shape-adjusted regression or explain why it is not a confound.}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.62\linewidth]{r3_matched.png}
+  \caption{Final score per body set (mean $\pm$ SEM over 40 bodies, seed mean per body). Shape-matched tree bodies: one per symmetric body, same hinge count, closest resting shape.}
+  \label{fig:matched}
+\end{figure}
+
+Tree bodies selected to match each symmetric body on hinge count and six shape measures score between the two genomes (\cref{fig:matched}, \cref{tab:controls}), closing \pending{49\%} of the gap under \bb\ and \pending{38\%} under \dann. The remaining symmetric $-$ shape-matched gap (\pending{$+0.075$} and \pending{$+0.082$}) is not significant (paired Wilcoxon $p = 0.34$ and $0.41$), and adjusting for the remaining shape mismatch by regression leaves it unchanged ($+0.074$, CI $[-0.02, +0.19]$). The same holds after 200 evaluations (39\% and 37\% closed). Across all 80 random tree and symmetric bodies, adjusting the raw gap for the six shape measures shrinks it from \pending{$+0.12$} to \pending{$+0.03$} under \bb\ and from \pending{$+0.11$} to \pending{$+0.04$} under \dann.
+
+Random tied bodies, which duplicate modules without mirroring them, score \pending{$0.459$} under \bb\ and \pending{$0.507$} under \dann, closing \pending{65\%} and \pending{83\%} of the gap; symmetric $-$ tied is \pending{$+0.05$} ($p = 0.63$) and \pending{$+0.02$} ($p = 0.75$). Tied bodies do not get there through a symmetric shape. They are nearly as tall as shape-matched tree bodies, keep the lateral-axis hinges of tree bodies and have no more yaw-axis leg hinges (\cref{fig:shape}). They do have more leg hinges (4.0 vs 3.45), and adjusting for leg hinges reduces the tied $-$ tree difference from $+0.10$ to $+0.06$ under \bb\ and from $+0.11$ to $+0.07$ under \dann. E5 tests this directly by matching tree bodies to tied bodies on leg hinges.
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{E2 controls. Mean final score per body set (40 bodies each, three seeds per body) and the share of the symmetric $-$ tree gap each control set closes, $(\bar s_X - \bar s_{\text{tree}}) / (\bar s_{\text{sym}} - \bar s_{\text{tree}})$.}
+  \label{tab:controls}
+  \resizebox{\linewidth}{!}{\begin{tabular}{lcccc@{\hskip 1.2em}cc}
+    \toprule
+    & \multicolumn{4}{c}{mean final score} & \multicolumn{2}{c}{gap closed} \\
+    \cmidrule(lr){2-5}\cmidrule(lr){6-7}
+    controller & \tree & tree, shape-matched & \tied & \sym & shape-matched & \tied \\
+    \midrule
+    \bb  & 0.363 & 0.434 & 0.459 & 0.510 & \pending{49\%} & \pending{65\%} \\
+    \dann & 0.396 & 0.447 & 0.507 & 0.529 & \pending{38\%} & \pending{83\%} \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\caveat{``Closes half'' and ``closes most'' are ratios of two noisy differences; with the symmetric $-$ tree CI at $[+0.01, +0.29]$, the share closed has a CI of roughly 0--100\% or more. Do not report the shares without CIs. The direct tests of the claims are: shape-matched $-$ tree $> 0$ (shape alone helps tree bodies); tied $-$ tree $> 0$ (duplication helps); and symmetric $-$ tied $\approx 0$ (mirroring adds little). Test the last for equivalence with a margin set in advance, since ``not significant'' at $n = 40$ is not evidence of no difference.}
+\stat{Bootstrap CIs over bodies for the gap-closed shares (resample bodies within each set, recompute the ratio). Unpaired tests for shape-matched $-$ tree and tied $-$ tree (bootstrap and Mann--Whitney). TOST for symmetric $-$ tied, margin e.g.\ half the symmetric $-$ tree gap.}
+
+% ════════════════════════════════════════════════════════════════════════════
+\subsection{Symmetric bodies move differently (R4)}
+\label{sec:r4}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.85\linewidth]{r4_gait_classes.png}
+  \caption{Gait classes in E1. Share of last-generation episodes per gait class, by genome and controller (200 evaluations per body).}
+  \label{fig:gait-classes}
+\end{figure}
+
+Symmetric bodies not only score higher; they also move differently. In E1, \pending{62\%} of last-generation symmetric bodies under \bb\ use an alternating gait, in which mirrored limbs move half a cycle apart, against 2\% of tree bodies and 14\% of tied bodies. Most tree bodies (83\%) are unpaired: too few of their moving modules have a near-mirror partner for a left--right relation to be defined (\cref{fig:gait-classes}).
+
+Symmetric gaits are also phase-locked: their left and right limbs keep the same lag from cycle to cycle (\cref{sec:measures}). We call a trained controller locked when locked pairs carry at least half of its stroke, and unlocked otherwise; a symmetric unlocked training is a symmetric body whose final gait has no steady left--right lag. Eight of ten symmetric \bb\ champions in E1 are locked, against none of ten tree champions and one of ten tied champions (\cref{fig:locked}b). On fixed random bodies, symmetric controllers alternate from the first 50 evaluations (35\% of episodes under \bb, tree 7\%), and the locked share rises slowly with training, from 0.35 to 0.48, while tree bodies stay near 0.09 (\cref{fig:phase-training} in the appendix).
+
+Tied bodies reach symmetric scores in evolution (\cref{tab:e1}) while rarely alternating or locking: half of their episodes are unpaired and 29\% mixed. Alternation is therefore not the only route to a high score.
+
+\caveat{Because pairs are found by mirror-matching the rest pose, tree bodies have few pairs by construction, so ``tree bodies rarely alternate'' is partly ``tree bodies rarely have mirror pairs''. Report the share of stroke carried by pairs per genome, and say that the comparison concerns bodies that have pairs.}
+
+% ════════════════════════════════════════════════════════════════════════════
+\subsection{Gaits depend on their timing, but not specially on the left--right lock (R5)}
+\label{sec:r5}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{r5_locked.png}
+  \caption{Phase locking and score. (a) Final score of trainings on fixed random bodies (mean $\pm$ SEM over trainings, $n$ in the bars): tree bodies, and symmetric bodies split by whether the trained gait is locked (locked pairs carry at least half the stroke) or unlocked. (b) Share of E1 champions (best body of the last generation) that are locked, by controller and genome.}
+  \label{fig:locked}
+\end{figure}
+
+Is the left--right lock why symmetric bodies do well? The association is strong. At the end of training on fixed random bodies, symmetric trainings that end unlocked score like tree trainings, and the locked ones carry the gap (\cref{fig:locked}a): under \bb\ unlocked symmetric \pending{0.40}, tree \pending{0.39}, locked symmetric \pending{0.65}; under \bbdrift\ 0.37, 0.34 and 0.55; under \dann\ 0.49, 0.42 and 0.57. Most symmetric bodies lock in all three training seeds or in none (26 of 40 under \bb, 25 under \bbdrift, 24 under \dann; \cref{fig:locked-seeds} in the appendix), and no resting-shape measure separates always-locked from never-locked bodies (all $p > 0.1$, exploratory). Within bodies that lock in some seeds but not in others, the locked seeds score higher: \pending{$+0.05$} under \bb\ (14 bodies, $p = 0.19$), \pending{$+0.05$} under \bbdrift\ ($p = 0.07$) and \pending{$+0.10$} under \dann\ (16 bodies, $p = 0.01$). On the same body, then, the controller that locks tends to be the better one.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{r5_phase_shift_relative.png}
+  \caption{Phase-shift replay on fixed random bodies (final controllers). Score change as a share of each controller's unperturbed score, when the left-side hinges are phase-shifted (top; a constant offset in cycles, so the left--right lag changes but stays fixed) or detuned (bottom; run at $1 + D$ times the shared frequency, so the lag drifts and the lock breaks). Solid: left side; dashed: the same number of randomly chosen lateral hinges (mean of three draws). Groups as in \cref{fig:locked}. Mean $\pm$ SEM over controllers with an unperturbed score of at least 0.05. \Cref{fig:phase-shift-abs} in the appendix shows the absolute changes.}
+  \label{fig:phase-shift}
+\end{figure}
+
+A correlation cannot say whether the gait depends on the lock, so we intervene on it. The phase-shift replay (\cref{sec:phase-shift}) takes each trained controller and perturbs the timing of its left-side hinges in one of two ways. A phase shift delays the left side by a fixed fraction of a cycle; the left and right limbs then keep a constant lag, just a different one, so a locked gait stays locked (locked share $0.91 \to 0.59$ at half a cycle, similar to the random control, 0.61). Detuning makes the left side run slightly faster than the right, so the lag between them drifts continuously and the lock breaks (locked share $0.91 \to 0.22$ at $D = 0.15$; random control 0.44). As a control, the same perturbation is applied to the same number of randomly chosen lateral hinges. Shifting any $k$ of $n$ hinges disrupts the timing of exactly $k(n-k)$ hinge pairs, so both perturbations disrupt equally many relations: the side perturbation disrupts exactly the left--right ones, the random perturbation a mix. If the gait depends on its left--right timing more than on its other timings, the side perturbation should cost more.
+
+Every gait depends heavily on its timing (\cref{fig:phase-shift}). Shifting any group of hinges by a twentieth of a cycle costs about a fifth to a third of the score, and half a cycle costs 70--90\%, in every group and under every controller with a shared clock. But for locked symmetric gaits the side perturbation costs no more than the random one. Averaged per body, side $-$ random lies between \pending{$-0.01$} and \pending{$+0.06$} for every shift and detuning under \bb\ (all $p \geq 0.43$, 17 bodies) and is likewise not significant under \bbdrift\ and \dann. Detuning by 15\%, which breaks the lock, costs locked symmetric gaits \pending{66\%} of their score when applied to the left side and \pending{77\%} when applied to random hinges.
+
+Symmetric gaits lose more absolute score than tree gaits under the same perturbation (\cref{fig:phase-shift-abs}). This is because they score more to begin with, not because they are more fragile. As a share of the unperturbed score, locked symmetric gaits lose the same as tree gaits or less (\bb, shift of 0.05 cycles: \pending{18--23\%} vs \pending{30--31\%}; detuning by 0.15: \pending{66--77\%} vs \pending{76--77\%}; \cref{fig:phase-shift}). Symmetric gaits therefore depend on coordinated timing, as every gait here does, but not specially on the timing between their two sides, and not on the lock itself. Locking accompanies good gaits on symmetric bodies, but the trained gaits do not depend on it.
+
+\caveat{Your reading of the earlier absolute figure (symmetric bodies more sensitive to a phase shift) is right in absolute terms: they lose more metres. Relative to what they have, they lose the same or less, and the left--right perturbation is not worse than a random one. Make sure the text and figures keep ``depends on timing'' (true for every body) separate from ``depends on the left--right lock'' (not supported). Re-check with v2: the relative comparison of locked symmetric vs tree is significant only at the smallest perturbations under \bb\ (Mann--Whitney $p = 0.001$--$0.10$).}
+\caveat{Scope: the intervention shows that trained gaits are not more sensitive to left--right timing than to other timing. It does not show that the lock played no part in finding those gaits (for instance by smoothing the fitness landscape early in learning). State that the claim is about the trained gait, not about learning. A test of the learning role would train symmetric bodies with the left side's phase constrained away from lock.}
+\stat{Body-level side $-$ random is now computed (bodies as the unit, \texttt{phase\_shift\_bodies.csv}). Add an equivalence test: the claim is ``no larger than'', so state a margin (e.g.\ 0.05 in the old units or 10\% of the baseline) and show the CI lies within it.}
+
+% ════════════════════════════════════════════════════════════════════════════
+\subsection{The advantage needs a shared clock, not a particular controller (R6)}
+\label{sec:r6}
+
+The head start on fixed bodies appears under \bb, \bbdrift\ and \dann\ (\cref{tab:e2}), so it does not depend on an open-loop controller or on a controller with explicit per-hinge phase parameters. Giving every hinge its own frequency (\bbfree) removes the gap only by collapsing every body: in evolution all three genomes score 0.36--0.37 against 0.82--1.11 with a shared frequency (\cref{tab:e1}, \cref{fig:e1-controller}), and on fixed bodies 0.14--0.16 against 0.31--0.51. The evolved per-hinge frequencies stay spread out (coefficient of variation 0.10--0.19), so hinges drift in and out of phase over an episode. \bbdrift, which adds as many parameters but keeps the frequencies within 10\% of a shared one, keeps both the scores and the gap. What free frequency removes is therefore a shared clock rather than a small search space. Every body needs a shared clock to move well, and given one, symmetric bodies still start ahead.

@@ -6,8 +6,8 @@ Code for the experiments in `PAPER_PLAN.md`. It is the part of the `symmetry-pre
 
 | file | what it does |
 | --- | --- |
-| `evolve.py` | body–brain evolution: (μ+λ) over bodies, inner CMA-ES over each body's controller (E0, E1) |
-| `sim.py` | world, zoo modules and hinge actuator, episode and fitness, inner CMA-ES, body operators |
+| `evolve.py` | body–brain evolution: (20+20) over bodies, inner CMA-ES over each body's controller (E0, E1); `--fitness displacement` (v2, default) or `normalised` (v1) |
+| `sim.py` | world, default ("zoo") modules and hinge actuator, episode and fitness (`EvalProfile.fitness`, `profile_for`), inner CMA-ES, `retest_controller`, body operators |
 | `brains.py` | `bang_bang`, `bang_bang_free` (one frequency per hinge), `dann` (`dann_pos_hinge_h16`) |
 | `genomes.py` | `tree`, `tree_symmetric`, `tree_tied` |
 | `sample_bodies.py`, `train_fixed_body.py` | E2: hinge-matched random or evolved bodies; one brain trained on one fixed body, with per-generation curve and checkpoints |
@@ -17,13 +17,16 @@ Code for the experiments in `PAPER_PLAN.md`. It is the part of the `symmetry-pre
 | `analyse_e0.py` … `analyse_e3.py` | tables and figures per experiment |
 | `analyse_bodies.py` | R2: rest-pose body measures (size, height, contact spread, hinge axes, leg hinges) of the E2 bodies against training score and phase locking |
 | `analyse_matched.py` | E2 controls: random symmetric bodies against shape-matched tree bodies and random tied bodies (`sample_bodies.py tied` / `shape_matched`) |
+| `paper_figures.py`, `paper/` | paper figures without a per-experiment script, inline numbers; LaTeX draft (`paper/make_figures.sh` rebuilds everything) |
 | `tests/` | `pytest examples/symmetry_paper/tests` |
 
-Score is the best forward score of a run's last generation, in [0, 2] minus penalties. Runs pair by seed (42 + rep in every cell).
+Score is the best forward score of a run's last generation: in v2 runs forward displacement in metres; in v1 runs the normalised score in [0, 2] minus penalties. Runs pair by seed (42 + rep in every cell).
 
 **Phase quality** (new, `gait.phase_quality`): each left–right pair's trajectories are cut into one-period windows, and the cross-spectrum lag is taken per window. Phase quality is 1 − the circular variance of those lags: 1 means the same lag every cycle, near 0 means drifting. Per episode it is the stroke-weighted mean over pairs; `phase_locked_frac` is the stroke share of pairs with quality ≥ 0.9.
 
 ## Running on the cluster
+
+**v2 (paper protocol, 2026-10-31):** see `PAPER_PLAN.md` §5 for the full submit list and `PAPER_HANDOFF.md` "v2". The scripts below now default to the v2 protocol and to `FINAL_ROOT=/scratch/$USER/ariel_paper_v2`; `e0_dann_grid.sh` is the v2 hinge grid. Set `FINAL_ROOT=/scratch/$USER/ariel_paper` (and `V1=1` for the budget series) to reproduce v1. The table below shows the original v1 array sizes.
 
 Use a separate checkout of this branch, so jobs still running from the investigation branch's checkout are not disturbed:
 

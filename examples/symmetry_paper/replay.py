@@ -52,7 +52,7 @@ from ariel.utils.morphological_descriptor import MorphologicalMeasures
 import gait
 import runs
 from brains import SETTLE_DURATION, make_brain_for_model
-from sim import PROFILE, build_world, joint_count, robot_bodies, run_skill_episode, zoo_spec_fn
+from sim import PROFILE, build_world, joint_count, profile_for, robot_bodies, run_skill_episode, zoo_spec_fn
 
 RECORD_EVERY_N = 10     # physics steps between recorded poses: 50 Hz
 FIT_TOL = 1e-6          # replayed vs stored fitness, for the DANN tie search
@@ -124,7 +124,8 @@ def replay_episode(genome: dict, weights: np.ndarray, brain_kind: str, cfg: dict
             pos.append(d.xpos[bodies].copy())
             quat.append(d.xquat[bodies].copy())
 
-    fitness, info = run_skill_episode(model, data, brain, PROFILE, recorder=record, on_settle_step=record)
+    # The run's own fitness (v1 runs: normalised; v2: displacement).
+    fitness, info = run_skill_episode(model, data, brain, profile_for(cfg), recorder=record, on_settle_step=record)
     t32 = np.asarray(t, dtype=np.float32)
     keep = t32 >= SETTLE_DURATION
     P = np.asarray(pos, dtype=np.float16)[keep].astype(np.float64)

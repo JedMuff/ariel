@@ -1,0 +1,23 @@
+\ifdraft
+\begin{center}
+\fcolorbox{gray}{gray!5}{\begin{minipage}{0.95\linewidth}
+\sffamily\small
+Draft notes (hidden by \texttt{\textbackslash draftfalse} in \texttt{main.tex}).
+Highlighted boxes: \colorbox{statbg}{STAT} where a test or CI goes and which one; \colorbox{caveatbg}{CHECK} a claim the current data do not fully support; \colorbox{todobg}{TODO} work left. Numbers in \pending{orange} are the most likely to change.
+
+\medskip
+State of the numbers. The text describes the v2 protocol: fitness is forward displacement in metres (unclipped, no penalties); the outer EA is (20+20) without retraining parents; E0 is \dann\ only, with the grid at 1{,}600 evaluations; there are 80 bodies per set and 10--20 seeds per arm. Every number and figure is still from the first round (normalised score in $[0, 2]$ minus penalties, (10+20) with retraining, 40 bodies per set). Rebuild with \texttt{V2=<root> bash make\_figures.sh} once the v2 runs are in, then update the numbers from the logs.
+
+\medskip
+Most important things to check once the v2 numbers are in:
+\begin{enumerate}\setlength\itemsep{1pt}
+\item The central fixed-body effect was borderline with 40 bodies (\bb\ $+0.15$, CI $[+0.01, +0.29]$, Mann--Whitney $p = 0.12$; \dann\ CI includes 0). It carries R2 and R3.
+\item ``The lead shrinks with training'' holds for the ratio during controller learning on fixed bodies. In the first-round E1 runs the bang-bang lead over generations grew rather than shrank (\cref{sec:r1}). Keep learning and evolution apart in the wording.
+\item On bodies that lock in some seeds but not others, the locked seeds score higher (\dann\ $+0.10$, $p = 0.01$). The ``lock accompanies good gaits'' argument rests on the phase-shift intervention, which holds at body level.
+\item Symmetric gaits lose more absolute score to timing perturbations than tree gaits, but the same or less relative to their baseline (\cref{sec:r5}).
+\item Units of analysis: the locked/unlocked comparison still pools body $\times$ seed; use body-level means or a mixed model.
+\end{enumerate}
+\end{minipage}}
+\end{center}
+\clearpage
+\fi

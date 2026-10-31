@@ -17,8 +17,19 @@ Writes to --out (default <root>/analysis):
   phase_shift_ckpts.csv     one row per checkpoint: group, baseline, score per condition
   phase_shift_summary.csv   per brain x group: mean score per condition, side - random
                             (mean, bootstrap 95% CI, Wilcoxon p, n)
+  phase_shift_bodies.csv    side - random per body (seed mean; bodies as the unit)
+  phase_shift_relative.csv  relative score change (change / baseline) per brain x group
+                            x condition, and locked symmetric vs tree (Mann-Whitney)
   fig8_phase_shift.png      score change vs perturbation size, side (solid) vs random
                             (dashed); one column per brain, a row for shift and detune
+  fig8_phase_shift_relative.png  the same as a share of each checkpoint's baseline
+                            score (checkpoints with baseline >= REL_MIN_BASELINE), with
+                            the tree and unlocked symmetric groups for reference
+
+Perturbations (phase_shift.py): a phase shift adds a constant offset of D
+cycles to the selected hinges' clock, so their lag to the other hinges changes
+but stays constant (a lock stays a lock); detuning runs the selected hinges at
+(1 + D) times the shared frequency, so their lag drifts and any lock breaks.
 
 Usage:
     python analyse_phase_shift.py --roots /scratch/$USER/ariel_paper/e3/phase_shift_e2_random [...]
@@ -36,13 +47,14 @@ mpl.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from scipy.stats import wilcoxon  # noqa: E402
+from scipy.stats import mannwhitneyu, wilcoxon  # noqa: E402
 
 import runs  # noqa: E402
 from phase_shift import DETUNES, SHIFTS  # noqa: E402
 
 LOCKED_MIN = 0.5
-KINDS = [("shift", SHIFTS, "left-side phase shift (cycles)"), ("detune", DETUNES, "left-side detuning (frequency x 1 + D)")]
+REL_MIN_BASELINE = 0.05  # relative changes only for checkpoints whose baseline score is at least this
+KINDS = [("shift", SHIFTS, "left-side phase shift (cycles)"), ("detune", DETUNES, "left-side detuning D (frequency × (1 + D))")]
 SIDE_VS_RAND = [(f"side_{k}_{m}", f"rand_{k}_{m}") for k, mags, _ in KINDS for m in mags]
 PERTURBED = [c for pair in SIDE_VS_RAND for c in pair]
 GROUPS = ["tree", "tree_tied", "symmetric unlocked", "symmetric locked"]
@@ -62,7 +74,43 @@ def load(roots: list[Path]) -> pd.DataFrame:
     locked = out["phase_locked_frac"] >= LOCKED_MIN
     out["group"] = np.where(out["genome"] != "tree_symmetric", out["genome"],
                             np.where(locked, "symmetric locked", "symmetric unlocked"))
-    return out.reset_index()
+    out = out.reset_index()
+    # Fixed-body runs are named <body_id>__<brain>__s<seed>; evolution runs are their own body.
+    out["body"] = out["run"].str.split("__").str[0]
+    return out
+
+
+def body_level(df: pd.DataFrame) -> pd.DataFrame:
+    """side - random averaged per body (over its seeds), tested over bodies."""
+    rng = np.random.default_rng(1)
+    rows = []
+    for (brain, group), g in df.groupby(["brain", "group"]):
+        for side, rand in SIDE_VS_RAND:
+            if side in g and rand in g:
+                d = (g[side] - g[rand]).groupby(g["body"]).mean().to_numpy()
+                rows.append({"brain": brain, "group": group, "condition": side.removeprefix("side_"),
+                             **mean_ci_p(d, rng)})
+    return pd.DataFrame(rows)
+
+
+def relative(df: pd.DataFrame) -> pd.DataFrame:
+    """Mean relative change per brain x group x condition, and locked symmetric vs
+    tree relative change (Mann-Whitney over checkpoints)."""
+    d = df[df["baseline"] >= REL_MIN_BASELINE]
+    rows = []
+    for brain, b in d.groupby("brain"):
+        for c in PERTURBED:
+            if c not in b:
+                continue
+            rel = (b[c] - b["baseline"]) / b["baseline"]
+            row = {"brain": brain, "condition": c}
+            for group in GROUPS:
+                r = rel[b["group"] == group].dropna()
+                row |= {f"{group}_mean": r.mean(), f"{group}_n": len(r)}
+            lk, tr = rel[b["group"] == "symmetric locked"].dropna(), rel[b["group"] == "tree"].dropna()
+            row["locked_vs_tree_p"] = float(mannwhitneyu(lk, tr).pvalue) if len(lk) > 1 and len(tr) > 1 else math.nan
+            rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def mean_ci_p(d: np.ndarray, rng: np.random.Generator) -> dict:
@@ -89,7 +137,9 @@ def summary(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def figure(df: pd.DataFrame, path: Path) -> None:
+def figure(df: pd.DataFrame, path: Path, rel: bool = False) -> None:
+    if rel:
+        df = df[df["baseline"] >= REL_MIN_BASELINE]
     brains = [b for b in runs.BRAIN_LABEL if b in set(df["brain"])]
     groups = [g for g in GROUPS if g in set(df["group"])]
     fig, axes = plt.subplots(len(KINDS), len(brains), figsize=(4.4 * len(brains), 3.4 * len(KINDS)),
@@ -104,7 +154,7 @@ def figure(df: pd.DataFrame, path: Path) -> None:
                     continue
                 color, alpha = GROUP_STYLE[group]
                 for subset, ls in (("side", "-"), ("rand", "--")):
-                    change = [(g[f"{subset}_{kind}_{m}"] - g["baseline"]) for m in mags]
+                    change = [(g[f"{subset}_{kind}_{m}"] - g["baseline"]) / (g["baseline"] if rel else 1) for m in mags]
                     ax.errorbar(x, [c.mean() for c in change], yerr=[c.sem() for c in change], color=color,
                                 alpha=alpha, linestyle=ls, linewidth=2, marker="o", markersize=4, capsize=2,
                                 label=f"{group} (n={len(g)})" if subset == "side" else None)
@@ -114,7 +164,8 @@ def figure(df: pd.DataFrame, path: Path) -> None:
             if row == 0:
                 ax.set_title(runs.BRAIN_LABEL[brain], fontsize=10, color=runs.INK)
             runs.style(ax)
-        axes[row][0].set_ylabel("score change (± SEM)", fontsize=9, color=runs.INK_2)
+        axes[row][0].set_ylabel("change / baseline score (± SEM)" if rel else "score change (± SEM)",
+                                fontsize=9, color=runs.INK_2)
     axes[0][0].legend(fontsize=7, frameon=False, labelcolor=runs.INK_2, title="solid: side, dashed: random",
                       title_fontsize=7)
     fig.tight_layout()
@@ -149,6 +200,18 @@ def main() -> None:
             rows.append(row)
         print(pd.DataFrame(rows).to_string(index=False))
     figure(df, out / "fig8_phase_shift.png")
+    figure(df, out / "fig8_phase_shift_relative.png", rel=True)
+    bl = body_level(df)
+    bl.to_csv(out / "phase_shift_bodies.csv", index=False)
+    rl = relative(df)
+    rl.to_csv(out / "phase_shift_relative.csv", index=False)
+    with pd.option_context("display.width", 250):
+        print("\nside - random per body (bodies as the unit): mean [95% CI] p n")
+        print(bl.assign(txt=[f"{r.mean:+.2f} [{r.ci_lo:+.2f}, {r.ci_hi:+.2f}] p={r.p:.2g} n={r.n}" for r in bl.itertuples()])
+              .pivot_table(index=["brain", "group"], columns="condition", values="txt", aggfunc="first").to_string())
+        print(f"\nrelative change (baseline >= {REL_MIN_BASELINE}); locked symmetric vs tree, Mann-Whitney p:")
+        cols = ["brain", "condition"] + [f"{g}_mean" for g in GROUPS if f"{g}_mean" in rl] + ["locked_vs_tree_p"]
+        print(rl[cols].round(3).to_string(index=False))
     print(f"-> {out}")
 
 

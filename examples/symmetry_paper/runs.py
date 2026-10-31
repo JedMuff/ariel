@@ -5,8 +5,10 @@ An evolution run (evolve.py, or the investigation's gecko_skill_tasks.py, so
 the E0 data collected before this branch loads too) is a directory holding
 __data__/{evolve,gecko_skill_tasks}/forward/ with run_config.json,
 run_data.jsonl and checkpoints/genGGG_bodyII/. Its score is the best forward
-score of its last generation (-fitness: the normalised score in [0, 2] minus
-penalties), steadier than the best ever under --repeat-evals.
+score of its last generation (-fitness). In v2 runs (run_config "fitness":
+"displacement") that is the mean of the best controller's retests, in metres;
+in v1 runs, the normalised score in [0, 2] minus penalties, which is steadier
+than the best ever under --repeat-evals.
 
 Paired statistics pair runs by seed (every cell uses seeds 42 + rep).
 """
@@ -28,8 +30,10 @@ from sim import ZOO_HINGE, HingeActuator
 
 DATA_SUBDIRS = ("evolve", "gecko_skill_tasks")
 GENOME_LABEL = {"tree": "tree", "tree_symmetric": "symmetric", "tree_tied": "tied"}
-BRAIN_LABEL = {"bang_bang": "bang_bang", "bang_bang_free": "bang_bang (free frequency)",
-               "bang_bang_drift": "bang_bang (shared + drift)", "dann": "DANN"}
+# Figure labels: no underscores (paper style).
+BRAIN_LABEL = {"bang_bang": "bang-bang", "bang_bang_free": "free-frequency bang-bang",
+               "bang_bang_drift": "drift bang-bang", "dann": "DANN"}
+BRAIN_SHORT = {"bang_bang": "bang-bang", "bang_bang_free": "free", "bang_bang_drift": "drift", "dann": "DANN"}
 N_BOOT = 10_000
 _CKPT_RE = re.compile(r"^gen(\d+)_body(\d+)$")
 
@@ -37,6 +41,8 @@ _CKPT_RE = re.compile(r"^gen(\d+)_body(\d+)$")
 # (light surface); identity is always also given by a legend or label.
 GENOME_COLOR = {"tree": "#eb6834", "tree_symmetric": "#2a78d6", "tree_tied": "#1baf7a"}
 INK, INK_2, GRID = "#1f1f1d", "#6b6a63", "#e4e3de"
+# Controllers (E1 controller comparison); genome is then shown by line style.
+BRAIN_COLOR = {"bang_bang": "#2a78d6", "bang_bang_drift": "#1baf7a", "bang_bang_free": "#9a958a", "dann": "#c4501f"}
 
 
 def style(ax) -> None:  # noqa: ANN001
@@ -121,8 +127,32 @@ def run_row(run_dir: Path) -> Optional[dict]:
         "seed": int(cfg["seed"]), "skill_budget": int(cfg["skill_budget"]),
         "evals_per_body": int(cfg["skill_budget"]) * 20,
         "hinge": act.label, "kp": act.kp, "kv": act.kv, "armature": act.armature, "limited": act.limited,
-        "last_gen": last, "score": -min(by_gen[last]), "path": str(run_dir),
+        "last_gen": last, "score": -min(by_gen[last]), "fitness_mode": cfg.get("fitness", "normalised"),
+        "pop": int(cfg.get("pop", 10)), "path": str(run_dir),
     }
+
+
+def curve_by_gen(run_dir: Path) -> pd.DataFrame:
+    """Best score per outer generation (-min fitness of the bodies evaluated
+    in it; v2: retest means) and the best so far, one row per generation."""
+    by_gen = fitness_by_gen(run_dir)
+    if not by_gen:
+        return pd.DataFrame(columns=["gen", "best", "best_so_far"])
+    gens = sorted(by_gen)
+    best = [-min(by_gen[g]) for g in gens]
+    return pd.DataFrame({"gen": gens, "best": best, "best_so_far": np.maximum.accumulate(best)})
+
+
+def unit_suffix(df: pd.DataFrame) -> str:
+    """" (m)" for v2 runs (displacement), "" for v1 (normalised score)."""
+    modes = set(df["fitness_mode"]) if "fitness_mode" in df else {"normalised"}
+    return " (m)" if modes == {"displacement"} else ("" if modes == {"normalised"} else " (mixed units!)")
+
+
+def score_label(df: pd.DataFrame, what: str = "score") -> str:
+    """Axis label for a score column: metres for v2 runs, the normalised score for v1."""
+    modes = set(df["fitness_mode"]) if "fitness_mode" in df else {"normalised"}
+    return f"{what} (m)" if modes == {"displacement"} else (what if modes == {"normalised"} else f"{what} (mixed units!)")
 
 
 def load_runs(*roots: Path, pattern: str = "*") -> pd.DataFrame:

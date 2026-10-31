@@ -23,8 +23,8 @@ import random
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Literal, Optional
 
 import cma
 import mujoco
@@ -467,9 +467,20 @@ class EvalProfile:
     height_threshold: float = 0.5        # core height at spawn above this is penalised
     cma_sigma: float = 0.5
     cma_popsize: int = 20
+    # "displacement" (paper v2): fitness is the forward displacement in metres,
+    # unclipped (negative backwards), with no penalties. "normalised" (v1 runs):
+    # translate_score in [0, 2] minus the height and jerk penalties.
+    fitness: Literal["displacement", "normalised"] = "normalised"
 
 
 PROFILE = EvalProfile()
+FITNESS_MODES = ("displacement", "normalised")
+
+
+def profile_for(cfg: dict, **overrides: Any) -> EvalProfile:
+    """The EvalProfile a run used, from its run_config.json: a run without a
+    "fitness" key is a v1 run (normalised fitness)."""
+    return replace(PROFILE, fitness=cfg.get("fitness", "normalised"), **overrides)
 
 TRANSLATE_REF_SPEED = 0.5        # m/s; a normalised translate skill scores TRANSLATE_MAX at this mean speed
 TRANSLATE_MAX       = 2.0        # normalised translate score cap
@@ -496,9 +507,12 @@ def run_skill_episode(
 ) -> tuple[float, dict[str, Any]]:
     """(fitness, info) of one forward episode of a brain whose params are set.
 
-    Fitness is minimised: -(normalised score - height penalty - jerk penalty).
-    info holds raw_score (displacement along FORWARD_AXIS, m), score, and the
-    two penalties. recorder(data) is called after every post-settle physics
+    Fitness is minimised. Under profile.fitness == "normalised" it is
+    -(normalised score - height penalty - jerk penalty); under "displacement"
+    it is -(displacement along FORWARD_AXIS in m), unclipped and without
+    penalties. info holds raw_score (displacement, m), score (the maximised
+    quantity: normalised score or displacement), and the two penalties
+    (reported in both modes, applied only in "normalised"). recorder(data) is called after every post-settle physics
     step and on_settle_step(data) after every settle step (replay.py's
     recording); neither may change data.
     """
@@ -542,6 +556,9 @@ def run_skill_episode(
 
     height_penalty = initial_height if initial_height > profile.height_threshold else 0.0
     raw = float(np.dot(np.array([data.qpos[0], data.qpos[1]]) - xy0, FORWARD_AXIS))
+    if profile.fitness == "displacement":
+        info = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty, "score": raw}
+        return -raw, info
     score = translate_score(raw, profile.loco_duration)
     info = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty, "score": score}
     return -(score - height_penalty - jerk_penalty), info
@@ -638,3 +655,45 @@ def train_skill_for_body(
             gen += 1
 
     return best_w, learning_curve, time.perf_counter() - t_start, best_info
+
+
+def retest_controller(
+    genome_dict: dict,
+    weights: np.ndarray,
+    brain_kind: str,
+    n: int,
+    workers: int,
+    seed: int,
+    to_spec_fn=zoo_spec,
+    profile: EvalProfile = PROFILE,
+) -> list[float]:
+    """Fitnesses (minimised, as run_skill_episode) of n fresh episodes of one
+    trained controller, each in a new worker process as in training.
+
+    The simulation is deterministic within a process, but outcomes differ
+    slightly between machines and builds; the retest mean is what the paper
+    reports, and the spread across retests is recorded with it.
+    """
+    if n <= 0:
+        return []
+    w = np.asarray(weights, dtype=np.float32).tolist()
+    fits: list[float] = []
+    # max_tasks_per_child=1: every retest runs in a fresh process.
+    with ProcessPoolExecutor(
+        max_workers=max(1, min(n, workers)),
+        initializer=_skill_worker_init,
+        initargs=(seed, genome_dict, to_spec_fn, brain_kind, profile),
+        max_tasks_per_child=1,
+    ) as pool:
+        for f, _ in pool.map(_skill_worker_eval, [w] * n):
+            fits.append(float(f))
+    return fits
+
+
+def retest_summary(fits: list[float]) -> dict[str, Any]:
+    """retest_controller fitnesses as scores (maximised): all, mean, sd."""
+    scores = [-f for f in fits]
+    if not scores:
+        return {}
+    return {"retest_scores": scores, "retest_mean": float(np.mean(scores)),
+            "retest_sd": float(np.std(scores, ddof=1)) if len(scores) > 1 else 0.0}

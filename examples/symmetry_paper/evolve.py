@@ -1,29 +1,35 @@
 """
 Body-brain evolution on forward locomotion (E0, E1).
 
-Outer loop:  (mu + lambda) evolution strategy over bodies (--genome-type
+Outer loop:  (mu + lambda) = (20 + 20) evolution over bodies (--genome-type
              tree / tree_symmetric / tree_tied, see genomes.py) using the
              ariel.ec engine, tournament parent selection.
 Inner loop:  CMA-ES over each body's controller (--brain, see brains.py) for
              --skill-budget generations of popsize 20 (sim.train_skill_for_body).
-             Body fitness = the forward skill's best fitness (minimised:
-             -(normalised score - penalties), see sim.run_skill_episode).
+             Body fitness = the best fitness CMA-ES found. (--retests N > 0
+             retests the best controller N times in fresh processes and uses
+             the mean instead; off by default, unused by the paper runs: the
+             simulation is deterministic on one machine.)
+Fitness:     --fitness displacement (paper v2, default): forward displacement
+             in m over 15 s, unclipped, no penalties. --fitness normalised
+             (v1 runs): clip(d / 3.75 m, 0, 2) minus height and jerk penalties.
 
-With --repeat-evals, surviving parents are retrained every generation, so a
-body's fitness is not a lucky draw it keeps forever.
+With --repeat-evals (v1 runs only), surviving parents are retrained every
+generation.
 
 Writes to ./__data__/evolve/forward/:
   run_config.json   the CLI arguments, eval profile and hinge actuator
   run_data.jsonl    one record per evaluated body: gen, ind_id, parent_ids,
-                    fitness, per_skill {fwd: {fitness, learning_curve,
-                    eval_time_s, raw_score, height_penalty, jerk_penalty,
-                    score}}, yz_symmetry, tied_frac, genome_hash, eval_time_s
+                    fitness, per_skill {fwd: {fitness, train_best,
+                    learning_curve, eval_time_s, raw_score, height_penalty,
+                    jerk_penalty, score, retest_scores, retest_mean,
+                    retest_sd}}, yz_symmetry, tied_frac, genome_hash, eval_time_s
   timing.jsonl      wall time per generation
   checkpoints/genGGG_bodyII/  best_genome.json, fwd_weights.npy, meta.json
 
 Usage:
     python evolve.py --genome-type tree_symmetric --brain bang_bang --seed 42 \\
-        --budget 30 --pop 10 --lam 20 --repeat-evals --brain-workers 20
+        --budget 30 --pop 20 --lam 20 --brain-workers 20
 """
 
 import os
@@ -53,7 +59,18 @@ from ariel.ec.genotypes.tree.tying import tied_fraction
 
 import genomes
 from brains import BRAIN_KINDS
-from sim import PROFILE, ZOO_HINGE, HingeActuator, genome_hash, train_skill_for_body, use_zoo_modules_globally, zoo_spec_fn
+from sim import (
+    FITNESS_MODES,
+    PROFILE,
+    ZOO_HINGE,
+    HingeActuator,
+    genome_hash,
+    retest_controller,
+    retest_summary,
+    train_skill_for_body,
+    use_zoo_modules_globally,
+    zoo_spec_fn,
+)
 
 install()
 
@@ -67,7 +84,7 @@ parser.add_argument("--tie-prob",      type=float, default=genomes.DEFAULT_TIE_P
                     help="tree_tied: chance a placed module gets a twin")
 parser.add_argument("--brain",         choices=BRAIN_KINDS, default="bang_bang")
 parser.add_argument("--budget",        type=int,   default=30, help="outer generations")
-parser.add_argument("--pop",           type=int,   default=10, help="mu")
+parser.add_argument("--pop",           type=int,   default=20, help="mu")
 parser.add_argument("--lam",           type=int,   default=20, help="lambda")
 parser.add_argument("--skill-budget",  type=int,   default=PROFILE.skill_budget,
                     help="inner CMA-ES generations per body (x popsize 20 evaluations)")
@@ -75,7 +92,11 @@ parser.add_argument("--brain-workers", type=int,   default=20, help="parallel ep
 parser.add_argument("--max-modules",   type=int,   default=25)
 parser.add_argument("--max-depth",     type=int,   default=25)
 parser.add_argument("--seed",          type=int,   default=42)
-parser.add_argument("--repeat-evals",  action="store_true", help="retrain surviving parents every generation")
+parser.add_argument("--repeat-evals",  action="store_true", help="retrain surviving parents every generation (v1)")
+parser.add_argument("--fitness",       choices=FITNESS_MODES, default="displacement",
+                    help="displacement (m, unclipped, no penalties) or normalised (v1)")
+parser.add_argument("--retests",       type=int,   default=0,
+                    help="fresh-process retests of each body's best controller; fitness = -mean (0: training best)")
 parser.add_argument("--hinge-kp",      type=float, default=None, help="hinge gain (default: zoo hinge)")
 parser.add_argument("--hinge-kv",      type=float, default=None, help="hinge damping (default: zoo hinge)")
 parser.add_argument("--hinge-armature", type=float, default=None, help="hinge armature (default: zoo hinge)")
@@ -91,7 +112,8 @@ BUDGET         = args.budget
 MU             = args.pop
 LAM            = args.lam
 SKILL_BUDGET   = args.skill_budget
-PROFILE_RUN    = replace(PROFILE, skill_budget=SKILL_BUDGET)
+PROFILE_RUN    = replace(PROFILE, skill_budget=SKILL_BUDGET, fitness=args.fitness)
+RETESTS        = max(0, args.retests)
 BRAIN_WORKERS  = max(1, args.brain_workers)
 NUM_MODULES    = args.max_modules
 MAX_DEPTH      = args.max_depth
@@ -126,14 +148,20 @@ use_zoo_modules_globally()  # the genome operators' collision checks use the zoo
 
 def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
     w, learning_curve, eval_time, best_info = train_skill_for_body(
-        genome_dict, SKILL_BUDGET, BRAIN_WORKERS, seed, to_spec_fn=TO_SPEC, brain_kind=BRAIN, profile=PROFILE,
+        genome_dict, SKILL_BUDGET, BRAIN_WORKERS, seed, to_spec_fn=TO_SPEC, brain_kind=BRAIN, profile=PROFILE_RUN,
     )
-    fitness = float(min(learning_curve)) if learning_curve else float("inf")
-    console.log(f"    fwd: best_fitness={fitness:.4f}")
+    train_best = float(min(learning_curve)) if learning_curve else float("inf")
+    retest: dict[str, Any] = {}
+    if RETESTS and np.isfinite(train_best):
+        retest = retest_summary(retest_controller(genome_dict, w, BRAIN, RETESTS, BRAIN_WORKERS, seed,
+                                                  to_spec_fn=TO_SPEC, profile=PROFILE_RUN))
+    fitness = -retest["retest_mean"] if retest else train_best
+    console.log(f"    fwd: train_best={train_best:.4f}  fitness={fitness:.4f}"
+                + (f"  retest_sd={retest['retest_sd']:.4f}" if retest else ""))
     return {
         "fitness":     fitness,
-        "per_skill":   {"fwd": {"fitness": fitness, "learning_curve": learning_curve, "eval_time_s": eval_time,
-                                **best_info}},
+        "per_skill":   {"fwd": {"fitness": fitness, "train_best": train_best, "learning_curve": learning_curve,
+                                "eval_time_s": eval_time, **best_info, **retest}},
         "weights":     {"fwd": w},
         "eval_time_s": eval_time,
     }
@@ -216,7 +244,7 @@ class BodyBrainEvolution:
 
             self._write_jsonl(ind)
             self._save_checkpoint(f"gen{self.outer_gen:03d}_body{idx:02d}", dict(ind.genotype["morph"]),
-                                  res["weights"], best_fit)
+                                  res["weights"], best_fit, res["per_skill"]["fwd"])
             self.best_seen_fitness = min(self.best_seen_fitness, best_fit)
 
         finite = [r["fitness"] for r in results if np.isfinite(r["fitness"])]
@@ -274,7 +302,7 @@ class BodyBrainEvolution:
             fh.write(json.dumps(record) + "\n")
 
     def _save_checkpoint(self, tag: str, genotype: dict, weights: dict[str, Optional[np.ndarray]],
-                         fitness: float) -> None:
+                         fitness: float, fwd: Optional[dict[str, Any]] = None) -> None:
         if not np.isfinite(fitness):
             return
         sub = CHECKPOINTS / tag
@@ -291,6 +319,8 @@ class BodyBrainEvolution:
                 "num_modules": genomes.module_count(genotype),
                 "task":        TASK,
                 "genome_type": GENOME_TYPE,
+                **{k: (fwd or {})[k] for k in ("train_best", "retest_scores", "retest_mean", "retest_sd")
+                   if k in (fwd or {})},
             }, fh, indent=2)
 
     # -- main -----------------------------------------------------------------
@@ -331,7 +361,7 @@ def main() -> None:
     console.log(
         f"genome_type={GENOME_TYPE}  brain={BRAIN}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
         f"skill_budget={SKILL_BUDGET}  hinge={HINGE_ACTUATOR.label}  brain_workers={BRAIN_WORKERS}  "
-        f"repeat_evals={REPEAT_EVALS}  seed={BASE_SEED}"
+        f"repeat_evals={REPEAT_EVALS}  fitness={args.fitness}  retests={RETESTS}  seed={BASE_SEED}"
     )
 
     start = time.time()

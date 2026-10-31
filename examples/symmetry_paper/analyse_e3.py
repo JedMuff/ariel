@@ -78,7 +78,8 @@ def evolution(df: pd.DataFrame, out: Path) -> None:
     for c in labels:
         ax.bar(x, shares[c], bottom=bottom, width=0.7, color=CLASS_SHADE[c], edgecolor="white", linewidth=2, label=c)
         bottom += shares[c].to_numpy()
-    ax.set_xticks(x, [f"{runs.GENOME_LABEL.get(r.genome, r.genome)}\n{r.brain}\n{r.skill_budget * 20} ev"
+    short = runs.BRAIN_SHORT
+    ax.set_xticks(x, [f"{runs.GENOME_LABEL.get(r.genome, r.genome)}\n{short.get(r.brain, r.brain)}\n{r.skill_budget * 20} ev"
                       for r in shares.itertuples()], fontsize=7)
     ax.set_ylim(0, 1)
     ax.yaxis.set_major_formatter(mpl.ticker.PercentFormatter(1.0, decimals=0))

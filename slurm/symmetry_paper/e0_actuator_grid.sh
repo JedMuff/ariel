@@ -6,6 +6,10 @@
 # slurm/run_actuator_grid.sh (results in __data__/ariel_actuator_grid);
 # only rerun it to regenerate that data from this branch.
 #
+# v1 protocol (normalised fitness, (10+20) with --repeat-evals): set
+# FINAL_ROOT=/scratch/$USER/ariel_paper to write next to the other v1 runs.
+# The paper's v2 grid is e0_dann_grid.sh.
+#
 # Index decoding: cell fastest, then genome, then brain, rep slowest.
 # Array size = 18 x 2 x 2 x N_REPS (216 for 3 reps). Seeds 42 + rep.
 #

@@ -1,6 +1,6 @@
 # Why symmetric robots win: module duplication, body shape and the symmetry advantage in body–brain evolution
 
-Oct 31, 2026 · @Jed
+Oct 31, 2026 · @Jed · revised for the v2 protocol after the first draft review
 
 ## 1. Summary
 
@@ -14,17 +14,21 @@ Revised after E1, E2 (random bodies and controls), E3 and the phase-shift replay
 
 **Thesis.** The symmetry advantage is mostly a body advantage, present before learning. Duplicating modules, of which mirroring is one kind, makes bodies with more usable legs and better resting shapes, and these start ahead under a fixed inner budget. Mirroring itself adds little beyond duplication.
 
-**Task.** Forward locomotion (`dsocial_zoo` profile, zoo modules and hinge, 15 s episodes, 20 Hz).
+**Task.** Forward locomotion (default modules and hinge, 15 s episodes, 20 Hz control). The paper never says "zoo": the hinge is "the default hinge", fitted to the physical servo.
+
+**v2 protocol (after the draft review, 2026-10-31).** Fitness = forward displacement in metres, unclipped, no penalties. Outer EA (20+20), plus-selection, no retraining of parents. No retests (deterministic sim; decided 2026-10-31). E0 is DANN only, with the hinge grid at the largest budget. All first-round numbers below are in the old normalised units and will be replaced.
+
+**Headline findings to carry:** symmetric bodies start ahead before learning; the relative lead shrinks with controller learning (ratio to tree 1.55 → 1.41) without closing; all gaits depend on timing, but not specially on the left–right lock.
 
 ## 2. Paper structure
 
 | results section | question | finding so far | evidence | status |
 | --- | --- | --- | --- | --- |
-| R1. The advantage and its conditions | When do symmetric bodies win in evolution? | Bang\_bang: across hinge settings (pooled), but noisy per cell. DANN: no gap at 200 evals, grows with budget | Hinge grid, DANN budget series, E1 | done |
-| R2. A head start, not faster learning | Do symmetric bodies learn faster or start better? | Ahead from the first 20 evals; sym/tree ratio shrinks with budget | E2 random learning curves | done |
+| R1. The advantage and its conditions | When do symmetric bodies win in evolution? | DANN: no gap at 200 evals, grows with budget; v2 grid at 1,600 evals tests the hinge dependence. E1 curves: genome and controller comparison | DANN budget series and grid, E1 curves | v2 pending |
+| R2. A head start; the relative lead shrinks with learning | Do symmetric bodies learn faster or start better? | Ahead from the first 20 evals; sym/tree ratio shrinks with budget (absolute gap levels off) | E2 random learning curves | v2 pending |
 | R3. The advantage is in the bodies | What about the bodies carries it? | Shape-matched tree bodies close ~half the gap; tied bodies close 65–85% with a different shape and more leg hinges | Body measures, E2 controls | done, underpowered (E4) |
 | R4. Different behaviour | Do symmetric bodies move differently? | They alternate and phase-lock, tree bodies almost never; the actuator decides which gait | Grid gait labels, E3 on E1 and E2 | done, pending hand-check |
-| R5. The gait is a marker, not the mechanism | Does the lock cause the gap? | Unlocked symmetric bodies score like tree; but breaking left–right timing costs no more than breaking any other | E3 along training, phase-shift replay | done |
+| R5. Gaits depend on timing, not specially on the lock | Does the lock cause the gap? | Unlocked symmetric bodies score like tree; all gaits lose 20–35% to a 0.05-cycle shift; left–right perturbation costs no more than random (body level); relative to baseline, locked symmetric lose the same or less than tree | E3 along training, phase-shift replay | v2 pending |
 | R6. Controllers | Does the advantage need a particular controller? | Present under bang\_bang, drift and DANN on fixed bodies; free frequency collapses every body | E1, E2 | done |
 
 The discussion places the result in the morphology–control literature: the advantage of a regular encoding is first a property of the bodies it makes likely, and only second of what a controller can learn on them. Comparisons of encodings should control for the body statistics an encoding changes (here, module duplication and shape) before crediting the regularity itself.
@@ -38,19 +42,22 @@ The discussion places the result in the morphology–control literature: the adv
 
 ## 3. Common setup
 
-- **Simulator and task:** `dsocial_zoo`, zoo hinge (kp 1.36, kv 0.356, armature 0.081, joint limit), `forward`. Score is `clip(d / 3.75 m, 0, 2)` over 15 s.
-- **Evolution (E0, E1):** outer (μ+λ) = (10+20) for 30 generations, `--repeat-evals`, max 25 modules, inner CMA-ES popsize 20. Seeds 42+rep; runs pair by seed. Score is the last-generation best.
-- **Fixed bodies (E2):** hinge-matched random bodies from each genome's initial distribution, trained without the outer loop, 3 training seeds per body; bang\_bang variants to 1,600 evals, DANN to 5,000. Gaps are unpaired across bodies (bootstrap CI, Mann-Whitney), except shape-matched pairs.
-- **Brains:** `bang_bang` (one shared frequency) and `dann` (`dann_pos_hinge_h16`). Two bang\_bang variants: `bang_bang_free` (a frequency per hinge) and `bang_bang_drift` (shared frequency plus small per-hinge offsets; the control for free's larger search).
-- **Body measures** (`analyse_bodies.py`, after the 3 s settle): hinge and module counts; height, length, width; leg hinges (hinges whose distal part touches the floor); front–back and lateral spread of floor contacts; hinge axis classes (pitch, roll, yaw, diagonal).
-- **Behaviour measures** (`replay.py`, `gait.py`): gait class, left–right phase relation, phase quality, phase-locked share.
+- **Simulator and task:** default modules, default hinge (kp 1.36, kv 0.356, armature 0.081, joint limit; fitted to the physical servo), `forward`, 15 s, physics at 500 Hz (2 ms steps), control at 20 Hz.
+- **Fitness (v2):** forward displacement in m, unclipped, no penalties (`--fitness displacement`). v1: `clip(d / 3.75 m, 0, 2)` minus height and jerk penalties.
+- **Evolution (E0, E1, v2):** outer (μ+λ) = (20+20), plus-selection, tournament parents, 30 generations, no retraining; inner CMA-ES popsize 20; max 25 modules. Fitness = best CMA-ES fitness (no retests). Seeds 42 + rep; runs pair by seed. Score = last-generation best.
+- **Fixed bodies (E2):** hinge-matched random bodies, 80 per genome (one draw, `--n 80 --pool 800`), trained without the outer loop, 3 seeds per body; bang\_bang family 1,600 evals, DANN 5,000. Gaps unpaired across bodies (bootstrap CI, Mann-Whitney), except matched pairs.
+- **Brains:** `bang_bang` (one shared frequency) and `dann`; variants `bang_bang_free` and `bang_bang_drift`. In the paper: "bang-bang", "free-frequency bang-bang", "drift bang-bang", "DANN" (no underscores anywhere in text or figures).
+- **Body measures** (`analyse_bodies.py`): as before.
+- **Behaviour measures** (`replay.py`, `gait.py`): gait class, left–right phase relation, phase quality, locked share (locked = locked pairs carry ≥ 50% of the stroke).
 
-## 4. Results so far
+## 4. Results so far (first round, v1 units)
 
 ### R1. The advantage and its conditions
 
+- **E1 curves (v1):** over generations the bang\_bang sym − tree lead grows (+0.06 → +0.09), drift +0.04 → +0.18, tied − tree −0.10 → +0.20; DANN at 200 evals (n = 5) +0.13 → −0.15. So "the lead shrinks" is a learning (inner loop) result, not an evolution one; recheck with v2.
+
 - **Hinge grid** (18 cells × 3 seeds): bang\_bang sym − tree +0.14 pooled (17/18 cells, p < 0.001); DANN +0.02 (p = 0.31).
-- **E1 at the zoo hinge** (10 seeds): bang\_bang +0.08 (p = 0.70); seeds 42–44 reproduce the grid cell exactly, so the cell's +0.17 was three favourable seeds. Drift +0.15 (p = 0.08). Per-cell gaps need more than 10 seeds; the pooled grid carries R1.
+- **E1 at the default hinge** (10 seeds): bang\_bang +0.08 (p = 0.70); seeds 42–44 reproduce the grid cell exactly, so the cell's +0.17 was three favourable seeds. Drift +0.15 (p = 0.08). Per-cell gaps need more than 10 seeds; the pooled grid carries R1.
 - **DANN budget series** (n = 5): −0.02 / +0.22 / +0.37 at 200 / 800 / 1600 evals; symmetric wins 5/5 at 1600.
 - **Tied in evolution (E1):** tied − tree +0.13 (bang\_bang, p = 0.06), +0.14 (drift, p = 0.01); symmetric − tied ≈ 0.
 
@@ -91,6 +98,8 @@ E2 controls (40 bodies per set, bang\_bang and DANN × 3 seeds):
 
 ### R5. The gait is a marker, not the mechanism
 
+- **Body-level and relative (added 2026-10-31):** side − random per body within −0.01…+0.06 for locked sym under bang\_bang (all p ≥ 0.43, 17 bodies). Every group loses ~20–35% to a 0.05-cycle shift and 70–90% to half a cycle. Locked sym lose more absolute score than tree but the same or less relative to baseline (bang\_bang 0.05 shift: 18–23% vs 30–31%).
+
 - **Correlation:** at the end of E2 training, unlocked symmetric bodies score like tree bodies (bang\_bang 0.40 vs 0.39; DANN 0.49 vs 0.42), and locked ones carry the gap (0.65, 0.57).
 - **Intervention (phase-shift replay):** shifting or detuning the left side of a trained gait costs locked symmetric bodies no more than perturbing the same number of random lateral hinges, at every size (side − random within ±0.05, n.s., n = 53 locked bang\_bang bodies). Detuning by 15% unlocks the sides (locked share 0.92 → 0.23) yet keeps as much score as the random control. Every group loses the same share of its score to any timing change.
 - **Locking is a body property:** most symmetric bodies lock in all three training seeds or in none, but no resting-shape measure predicts which (all p > 0.1), and a body's locked share barely tracks its score (ρ = +0.26 bang\_bang, −0.02 DANN).
@@ -100,70 +109,53 @@ E2 controls (40 bodies per set, bang\_bang and DANN × 3 seeds):
 - The head start appears under bang\_bang, drift and DANN on fixed bodies.
 - Free frequency removes the gap only by collapsing every body (scores 0.14–0.16 against 0.31–0.51); per-hinge frequencies stay spread out (CV 0.10–0.19). Drift, which keeps the search tractable, keeps the gap. Free frequency is reported as a negative result: it confounds coordination with search difficulty.
 
-## 5. Remaining experiments
+## 5. v2 experiments (all to run)
 
-### E4. Power up the body controls (R3)
+Everything is rerun under the v2 protocol into `FINAL_ROOT=/scratch/$USER/ariel_paper_v2` (the `_common.sh` default). E4 (more bodies) is folded into E2.
 
-Doubles the random sets, so the shape and duplication results are not resting on 40 bodies.
+| experiment | submit | design | runs | ≈ CPU-h |
+| --- | --- | --- | --- | --- |
+| E0 budget | `sbatch slurm/symmetry_paper/e0_dann_budget.sh` | DANN, tree / sym, 200 / 800 / 1,600 evals, 10 seeds | 60 | 3,800 |
+| E0 grid | `sbatch slurm/symmetry_paper/e0_dann_grid.sh` | DANN at 1,600 evals, kp {1, 1.36, 2.5} × kv {0.356, 1, 2}, default armature, 5 seeds; default cell = budget sb80 seeds 42–46 | 80 | 9,300 |
+| E1 | `sbatch slurm/symmetry_paper/e1_coordination_ablation.sh` | bang\_bang, drift, free × tree / sym / tied, 200 evals, 20 seeds; DANN arm = budget sb10 | 180 | 2,200 |
+| E2 random | `sample_bodies.py random --n 80 --pool 800`, then `BODY_SET=random sbatch --array=0-639 …e2_fixed_body_curves.sh` | 80 + 80 bodies × 4 brains × 3 seeds | 640 tasks | 650 |
+| E2 controls | `sample_bodies.py tied` / `shape_matched --pool 24000`, then `BODY_SET=… BRAINS="bang_bang dann" sbatch --array=0-159 …` | 80 tied, 80 shape-matched × 2 brains × 3 seeds | 320 tasks | 360 |
+| E5 | `sample_bodies.py shape_matched --like bodies_tied.jsonl --target-genome tree_tied --measures n_leg --body-source leg_matched --id-prefix legmatch_tree`, then as above with `BODY_SET=leg_matched` | 80 tree bodies matched to tied on hinges + leg hinges | 160 tasks | 180 |
+| E3 + phase shift | as before on the v2 roots | replays | — | small |
 
-- **Bodies:** a second random draw (`sample_bodies.py random --seed 1`), then tied and shape-matched sets against its symmetric bodies: 40 more per set, 160 bodies.
-- **Training:** bang\_bang and DANN × 3 seeds, as the E2 controls: 960 trainings, **~355 CPU-h**.
-- **Readout:** `analyse_matched.py` on both draws pooled: gap closed by shape matching, symmetric − tied, with CIs half as wide.
+Total ≈ 16.5k CPU-h, mostly the DANN grid. Order: smoke test, E1 + E2 together, E0 budget, E0 grid. Rebuild everything with `V2=$FINAL_ROOT bash examples/symmetry_paper/paper/make_figures.sh` (after copying the roots locally).
 
-### E5. Which part of duplication? (R3)
+**Retests dropped (2026-10-31):** the sim is deterministic on one machine, so same-node retests are identical. Optional: replay a sample of final controllers on a second machine and report the spread.
 
-Tied bodies have more leg hinges; does leg count explain their lead?
-
-- **Bodies:** tree bodies matched to the tied bodies on hinge count and leg hinges (the `shape_matched` machinery with a different measure list), 40 bodies.
-- **Training:** bang\_bang and DANN × 3 seeds: 240 trainings, **~90 CPU-h**.
-- **Readout:** tied − leg-matched tree. Near zero: duplication works by adding usable legs. Still large: duplication helps in other ways (e.g. repeated limb geometry), which the body measures should then look for.
-
-### E2b. Evolved bodies (R3, optional)
-
-- **Bodies:** best final body of every E1 bang\_bang and drift run, tree, symmetric and tied (60).
-- **Training:** bang\_bang and DANN × 3 seeds: 360 trainings, **~130 CPU-h**.
-- **Readout:** is the gap among evolved bodies larger than among random ones (evolution finding something beyond the starting statistics), and do evolved tied and symmetric bodies converge on the same shapes?
-
-### Analysis only
-
-- **Detector hand-check** (R4): ~20 zoo-module bang\_bang and DANN episodes per gait label; watch the `static` videos.
-- **R2 figure:** E2 curves for all four body sets (tree, symmetric, tied, shape-matched).
-- **DANN evolution puzzle** (R1): compare outer-loop selection noise under `--repeat-evals` at 200 vs 1,600 evals per body, from the existing runs' repeated evaluations.
+E2b (evolved bodies) stays optional.
 
 ## 6. Cost and order
 
-| experiment | trainings | compute | new code |
-| --- | --- | --- | --- |
-| E4 power-up | 960 | ~355 CPU-h | none |
-| E5 leg-matched tree | 240 | ~90 CPU-h | `--measures` option for `sample_bodies.py shape_matched` (small) |
-| E2b evolved bodies | 360 | ~130 CPU-h | none |
-| **total** | **1,560** | **~575 CPU-h** | |
-
-Costs from the E2 controls' wall times (bang\_bang 29 s, DANN 104 s per training at 20 CPUs).
-
-**Order:** E4 and E5 together (both decide R3, the core of the paper); E2b if R3 holds; the detector hand-check alongside.
+See §5. Costs from the first round's wall times (bang\_bang 29 s, DANN 104 s per fixed-body training at 20 CPUs; ≈ 0.4 CPU-s per evaluation). A DANN evolution run at 1,600 evals is ≈ 620 bodies × 1,600 evals ≈ 6 h on 20 CPUs (scripts allow 24 h).
 
 ## 7. Planned figures
 
-1. **R1 the advantage in evolution:** hinge-grid heatmap of sym − tree, bang\_bang vs DANN; DANN gap vs inner budget.
-2. **R2 head start:** E2 learning curves, tree vs symmetric (and tied, shape-matched), one panel per brain; inset sym/tree ratio vs evals.
-3. **R3 bodies:** shape measures by genome (height, contact spread, leg hinges, axis classes), with example bodies; final score per body set (`fig9_matched.png`), the main figure.
-4. **R4 behaviour:** gait-class shares by genome × brain, with example phase-lag traces; gait vs actuator across the grid.
-5. **R5 gait as marker:** score of locked vs unlocked symmetric bodies against tree; phase-shift replay, side vs random by perturbation size (`fig8_phase_shift.png`).
-6. **R6 controllers:** E1 paired gaps under bang\_bang, drift and free frequency, with absolute scores to show free frequency's collapse.
+1. **R1, Figure 1:** (a) DANN kp × kv heatmap of sym − tree at 1,600 evals, default cell outlined, cell text gap / means / seeds ahead; (b) gap vs inner budget with paired seed lines (`analyse_e0.py` → `fig1_grid_budget.png`).
+2. **R1, E1 curves:** Plot 1 genomes under bang-bang with paired gaps per generation; Plot 2 controllers, tree dashed / sym solid, with sym − tree per generation (`analyse_e1.py`).
+3. **R2:** E2 learning curves for four body sets; rows score, gap to tree, ratio to tree (defined: mean ÷ mean of tree at equal evals, from 50 evals).
+4. **R3:** shape measures by set; final score per body set.
+5. **R4:** gait-class shares by genome × controller. (Gait vs hinge grid dropped; appendix only if the DANN grid shows something.)
+6. **R5:** merged locking figure: (a) tree / sym unlocked / sym locked score on E2, (b) locked share of E1 champions; phase-shift replay as change ÷ baseline (absolute version in the appendix).
 
 ## 8. Findings at a glance
+
+All from the first round (v1); every row is "v1 trend, v2 pending".
 
 | section | finding | evidence | confidence |
 | --- | --- | --- | --- |
 | R1 | Sym > tree under bang\_bang across hinge settings | grid pooled 17/18, p < 0.001; single cell n.s. at n = 10 | **moderate–high** |
 | R1 | DANN gap absent at 200 evals in evolution, grows with budget | −0.02 / +0.22 / +0.37, n = 5 | **moderate** |
-| R2 | Symmetric bodies start ahead; no faster learning | E2 ratio 1.55 → 1.41 | **high** |
+| R2 | Symmetric bodies start ahead; the relative lead shrinks with learning | E2 ratio 1.55 → 1.41 | **high** (v1) |
 | R3 | Shape accounts for about half the gap | shape matching closes 40–50% | **moderate** (n = 40) |
 | R3 | Duplication without mirroring gets most of the advantage | tied closes 65–85%; sym − tied n.s.; E1 tied ≈ sym | **moderate** (n = 40) |
 | R3 | Extra leg hinges explain part of duplication's effect | a third of tied − tree | **uncertain** (E5) |
 | R4 | Symmetric bodies alternate and lock; tree bodies do not | grid, E1, E2 | **moderate–high** (pending hand-check) |
-| R5 | Lock is a marker, not the mechanism | phase-shift replay: side ≈ random | **moderate–high** |
+| R5 | Gaits depend on timing, not specially on the left–right lock | phase-shift replay: side ≈ random at body level; relative loss sym ≤ tree | **moderate–high** (v1) |
 | R6 | Advantage needs a tractable controller search, not shared frequency | drift keeps it, free collapses all | **moderate** |
 
 ## 9. Risks, scope and draft conclusion
@@ -172,7 +164,7 @@ Costs from the E2 controls' wall times (bang\_bang 29 s, DANN 104 s per training
 
 - **E4 shrinks the controls' effects** (shape or tied no longer close a clear share of the gap): R3 becomes "symmetric bodies start ahead, partly through shape" with duplication as a suggestive result.
 - **Symmetric − tied grows with more bodies:** mirroring adds something beyond duplication; then the gait results (R4) are the candidates for what, and the phase-shift result limits it to something other than left–right timing.
-- **Detector does not hold on zoo modules:** report `mirror_sync` and phase-lag distributions directly.
+- **Detector does not hold on the current modules:** report `mirror_sync` and phase-lag distributions directly.
 - **The DANN evolution puzzle stays open:** report it as a limit; the fixed-body results do not depend on it.
 
 ### Out of scope (future work)

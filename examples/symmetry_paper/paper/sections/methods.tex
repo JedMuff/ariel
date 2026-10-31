@@ -1,0 +1,117 @@
+\section{Methods}
+\label{sec:methods}
+
+\subsection{Robots and simulation}
+\label{sec:robots}
+
+Robots are built from three module types: a core (half-extent \SI{0.075}{m}, mass \SI{1.363}{kg}), passive bricks (half-extent \SI{0.0375}{m}, \SI{0.055}{kg}) and actuated hinges (stator \SI{0.065}{kg}, rotor \SI{0.040}{kg}). Each hinge is a position servo with joint limits of $\pm 90^\circ$. Unless stated otherwise we use the default hinge, with gain $k_p = 1.36$, damping $k_v = 0.356$ and armature $0.081$. These values were obtained by fitting the simulated servo to measurements of the physical hinge module, so that the simulated hinge follows a commanded target with the speed and overshoot of the real one.
+\todo{Add the source and procedure of the hinge fit (which measurements, which loss, who did it), or cite it.}
+\todo{Add a figure with example bodies of each genome (rest pose, top and side views).}
+
+We simulate with MuJoCo on a flat floor. The physics advances in steps of \SI{2}{ms}, that is 500 steps per simulated second (\SI{500}{Hz}); the controller is queried every 25 physics steps (\SI{20}{Hz}) and its command is held in between. A body spawns unrotated with its core at \SI{0.1}{m} and settles for \SI{3}{s} with zero control before each episode.
+
+\subsection{Body genomes}
+\label{sec:genomes}
+
+All bodies are encoded by a tree genome in which each node is a module, together with the face of its parent it attaches to and a rotation about that face (multiples of $45^\circ$). Bodies are limited to 25 modules and tree depth 25, and must have at least four hinges. We compare three genomes that differ only in how trees are generated and varied.
+
+The tree genome is unconstrained. The symmetric genome is mirror-symmetric about the vertical plane through the core that contains the forward axis: every subtree attached to one side is mirrored on the other with mirrored rotations, and modules on the midline are forced to rotation $0^\circ$.
+
+The tied genome is a control for module duplication without mirroring. When a module is placed, it receives with probability $p$ a twin, an identical copy attached at a random free site rather than at the mirror position. The expected share of modules that belong to a tied pair is then $2p/(1+p)$, and we set $p = 0.47$ so that this share is 64\%, the share of mirrored modules in random symmetric bodies. Tied and symmetric bodies therefore duplicate modules to the same extent and differ in whether the copy is mirrored and placed symmetrically. We use a probability rather than tying every module because symmetric bodies are not fully mirrored either (midline modules have no partner, and their share varies from body to body); a probability gives tied bodies a comparable spread of duplication instead of a single extreme.
+\caveat{State what the tied genome does not control: tied bodies are not matched to symmetric bodies on shape (they are taller and have more lateral-axis hinges, \cref{fig:shape}). ``Tied closes most of the gap'' therefore means that duplication without mirroring, and without a symmetric shape, works about as well. This is what makes the duplication argument; say it explicitly.}
+
+Each genome has its own random initialisation, subtree crossover (probability 0.6) and mutation operators, which preserve the genome's constraint (mirroring or tying). Invalid offspring are re-mutated up to 50 times.
+
+\subsection{Task and fitness}
+\label{sec:task}
+
+The task is forward locomotion. An episode lasts \SI{15}{s} after the settle. The controller's hinge targets are smoothed by an exponential filter ($\alpha = 0.854$) and clipped to $\pm 90^\circ$. The fitness is the displacement $d$ of the core along the forward axis over the episode, in metres, without clipping, normalisation or penalties; a body that moves backwards has negative fitness. Both learning loops maximise $d$, and every score in this paper is a displacement in metres.
+\caveat{All numbers in this draft are still from the first round of runs, which used a normalised and clipped score, $s = \operatorname{clip}(d / \SI{3.75}{m}, 0, 2)$, minus a spawn-height and a jerk penalty, so $s = 1$ corresponds to \SI{0.25}{m/s}. They are in those units, not metres, until the v2 runs replace them. Clipping at 0 made every backward-moving candidate score exactly 0, which gave CMA-ES flat generations and early stops (5--11\% of trainings); the unclipped displacement removes that.}
+
+\subsection{Controllers}
+\label{sec:brains}
+
+We use two controllers, an open-loop bang-bang controller and a decentralised neural network (\dann), and two variants of the first.
+
+The \bb\ controller drives each hinge with a square wave between $-90^\circ$ and $+90^\circ$. All hinges share one frequency (\SIrange{0.2}{2}{Hz}; four genes set its start and end value and a slow wobble), and each hinge has its own duty cycle (four genes) and phase (one gene), so a body with $n$ hinges has $4 + 5n$ parameters. We use it because it is the simplest controller that can produce a coordinated gait, and because it isolates the quantities we want to vary. It has no sensors and no hidden state, so whatever a body achieves with it comes from the body and the timing of its hinges. Coordination is explicit, with one shared clock and one phase per hinge, so a variant can change one aspect of coordination and leave the rest intact. The search space is small and grows linearly and predictably with the number of hinges, so differences in learning between bodies of the same size are not differences in search-space size. Full-amplitude switching also makes the outcome depend on the body more than on fine control.
+
+The first variant, \bbfree, gives every hinge its own frequency ($9n$ parameters), which removes the shared clock. The second, \bbdrift, keeps the shared frequency and adds per-hinge offsets scaled by $0.1$ ($4 + 9n$ parameters). It has the size of \bbfree's search space but a nearly shared clock, and so separates the loss of the shared clock from the growth of the search space.
+
+\dann\ is the contrasting case: closed-loop, learned rather than structured, and with a parameter count that does not depend on the body. One multilayer perceptron (42 inputs, 16 hidden ReLU units, one $\tanh$ output; 705 parameters) is shared by every hinge and outputs that hinge's target. Each hinge's input is its own angle, velocity and module type; the same for its nearest hinge in each of six directions (zeros if none); a sine clock (period 25 control steps); the core orientation; and the hinge's rest position.
+
+\subsection{Learning and evolution}
+\label{sec:learning}
+
+Each body's controller is learned by CMA-ES ($\sigma_0 = 0.5$, population 20) from a fixed starting mean (0.5 for the \bb\ family, 0 for \dann). In evolution the inner loop runs for 10 generations (200 evaluations per body) unless stated otherwise.
+
+The outer loop is a $(\mu + \lambda)$ evolutionary algorithm with $\mu = \lambda = 20$, tournament parent selection (size 4) and plus-selection of survivors, run for 30 generations. A body is trained once, when it is created, and keeps that fitness; parents are not retrained.
+
+A body's fitness is the best displacement CMA-ES found for it. The simulation is deterministic, so replaying that controller on the same machine gives the same score, and a single evaluation suffices.
+\caveat{Small floating-point differences between machines can change episode outcomes. Every run executes on one node, so selection within a run is unaffected, but scores replayed on another machine may differ slightly. Consider replaying a sample of final controllers on a second machine and reporting the spread in a sentence.}
+
+To separate the bodies from evolution, we also train controllers on fixed bodies with the inner loop alone: the \bb\ family for 1{,}600 evaluations and \dann\ for 5{,}000, with three training seeds per body and checkpoints at 50, 200, 800, 1{,}600 and 5{,}000 evaluations.
+
+\subsection{Experiments}
+\label{sec:experiments}
+
+\Cref{tab:experiments} summarises the experiments.
+
+In E0 we evolve bodies with \dann\ for tree and symmetric genomes at 200, 800 and 1{,}600 inner evaluations per body at the default hinge (ten seeds each), and over a grid of hinge settings at the largest budget. The grid varies the gain over $k_p \in \{1, 1.36, 2.5\}$ and the damping over $k_v \in \{0.356, 1, 2\}$ at the default armature (five seeds per cell). The values bracket the default from a softer to a stiffer servo, and from the fitted damping to a strongly over-damped hinge whose motion is slow and smooth. The armature is kept at its fitted value because in the first round of runs, removing it changed the mean symmetric $-$ tree gap by less than 0.05 (\dann\ $+0.02$ vs $+0.01$; \bb\ $+0.16$ vs $+0.12$, normalised units). The question is whether the symmetric advantage depends on how the hinge responds.
+\todo{Confirm the reasoning for the grid values (softer/stiffer than the fitted servo; damping up to strongly over-damped), or give the actual reason (e.g.\ the range of servos available).}
+
+In E1 we evolve bodies at the default hinge with the three \bb\ controllers and the tree, symmetric and tied genomes (20 seeds per arm); the \dann\ arm at 200 evaluations per body is the smallest budget of E0.
+
+In E2 we train controllers on fixed random bodies. We draw 80 tree and 80 symmetric bodies from each genome's initial distribution, matched on hinge count (each genome sampled 800 times, then paired by hinge count), and train each with all four controllers. Two control sets are trained with \bb\ and \dann. The first has 80 random tied bodies with the hinge counts of the symmetric bodies. The second has 80 shape-matched tree bodies: from 24{,}000 random tree bodies, one per symmetric body with the same hinge count and the closest resting shape on six standardised measures (leg hinges, yaw-axis leg hinges, front--back contact spread, leg reach, height, lateral-axis hinges; \cref{sec:measures}), assigned by the Hungarian algorithm within each hinge count. A third control set (E5) has 80 tree bodies matched in the same way to the tied bodies on hinge count and number of leg hinges.
+
+In E3 we replay the last-generation bodies of every E1 run and every E2 checkpoint, record gait and phase measures (\cref{sec:measures}), and perturb trained controllers in a phase-shift replay (\cref{sec:phase-shift}).
+
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Experiments. Evaluations are controller evaluations per body (inner CMA-ES). Compute in CPU hours, estimated from the first round of runs.}
+  \label{tab:experiments}
+  \resizebox{\linewidth}{!}{\begin{tabular}{llllrr}
+    \toprule
+    experiment & bodies & controllers & evaluations & seeds & CPU-h \\
+    \midrule
+    E0 budget & evolved, tree and symmetric & \dann & 200, 800, 1{,}600 & 10 & 3{,}800 \\
+    E0 grid & evolved, tree and symmetric, 9 hinge settings & \dann & 1{,}600 & 5 & 9{,}300 \\
+    E1 & evolved, tree, symmetric and tied & \bb, \bbdrift, \bbfree & 200 & 20 & 2{,}200 \\
+    E2 & 80 random tree, 80 random symmetric & all four & 1{,}600 (\dann\ 5{,}000) & 3 per body & 650 \\
+    E2 controls & 80 tied, 80 shape-matched tree & \bb, \dann & as E2 & 3 per body & 360 \\
+    E5 & 80 tree matched to tied on leg hinges & \bb, \dann & as E2 & 3 per body & 180 \\
+    E3 & replays of E1 and E2 & as trained & --- & --- & small \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\subsection{Body and behaviour measures}
+\label{sec:measures}
+
+We measure the resting shape after the \SI{3}{s} settle. Length, width and height are the extent of the module positions along the forward, lateral and vertical axes. Floor contacts are summarised by their spread (standard deviation) along the forward axis, which we call contact spread, and along the lateral axis. Each hinge is classed by the dominant world direction of its rotation axis: lateral (pitch, the limb swings fore and aft), forward (roll) or vertical (yaw, the limb sweeps horizontally), or diagonal if no component reaches 0.9. A leg hinge is a hinge whose distal part touches the floor, and leg reach is the mean distance from a leg hinge to its distal floor contacts.
+
+Replays record poses at \SI{50}{Hz} and skip the first \SI{2}{s}. The body's sagittal plane is the vertical plane through the core, within $45^\circ$ of the heading, that best mirrors the rest pose; modules within \SI{0.02}{m} of it are midline. Left and right modules are paired by Hungarian matching of rest positions (mirror image within \SI{0.03}{m} or 25\% of the distance to the core). The same procedure is applied to every genome, so tree and tied bodies are paired wherever they happen to be near-mirrored.
+
+For each pair, the phase lag between the two trajectories, in cycles, is taken from their cross-spectrum; a lag below 0.25 is rowing (both sides together) and a lag of 0.40 or more is alternating. An episode is static if no module moves (RMS stroke above 2\% of body size and \SI{3}{mm}), and unpaired if paired modules carry under 25\% of the stroke. It is aperiodic if over half of the stroke is aperiodic, and rowing or alternating if that share of the stroke exceeds 0.25 and exceeds the other; otherwise it is mixed.
+\todo{The detector was validated on the earlier module set; hand-check $\sim$20 episodes per label with the current modules and watch the static videos before reporting gait shares as final.}
+
+To measure phase locking, each pair's trajectories are cut into one-period windows and the lag is computed in each window. Phase quality is one minus the circular variance of those lags (at least three windows), so 1 means the same lag in every cycle. A pair is locked when its phase quality is at least 0.9, and an episode's locked share is the share of its stroke carried by locked pairs. We call a trained controller phase-locked, or simply locked, when its episode has a locked share of at least 0.5, and unlocked otherwise. A symmetric unlocked training is thus a training on a symmetric body whose final gait does not hold a steady lag between its left and right limbs.
+
+\subsection{Phase-shift replay}
+\label{sec:phase-shift}
+
+To test whether a trained gait depends on the timing between its left and right sides, we replay each trained controller with the timing of its left-side hinges perturbed, and compare with perturbing the same number of hinges chosen at random among the lateral (non-midline) hinges.
+
+There are two kinds of perturbation. A phase shift adds a constant offset of 0.05, 0.1, 0.25 or 0.5 cycles to the clock of the selected hinges. Their lag to the other hinges changes, but stays constant through the episode, so a locked pair remains locked at a different lag; a phase shift therefore tests whether the gait needs its particular lag. Detuning runs the selected hinges at $1 + D$ times the shared frequency, with $D = 0.02$ or $0.15$. Their lag to the other hinges then drifts by $D$ cycles per cycle, so after $1/D$ cycles it has passed through every value and no lock survives; detuning therefore tests whether the gait needs a lock at all. For \bb\ controllers the perturbation acts on the hinges' square waves; for \dann\ it acts on the selected hinges' clock input.
+
+The random control uses three draws, never exactly one whole side. Shifting any $k$ of $n$ hinges changes the relative timing of exactly $k(n-k)$ hinge pairs, whichever $k$ are chosen. The side and random perturbations therefore disrupt equally many pairwise relations and differ only in which relations they disrupt: the side perturbation disrupts every left--right relation and keeps the timing within each side, while the random perturbation disrupts a mix. If the trained gait depends more on left--right timing than on the average timing between hinges, the side perturbation should cost more. We report the score change from the unperturbed replay, both in metres and as a share of the unperturbed score.
+\caveat{The counting argument holds exactly for the open-loop \bb\ family. For \dann\ the perturbation acts through one input and the closed loop can partly compensate; say so.}
+
+\subsection{Statistics}
+\label{sec:stats}
+
+Evolution runs are paired by seed (each arm uses seeds $42 + i$). We report the mean paired difference, a percentile bootstrap 95\% CI over pairs (10{,}000 resamples) and a Wilcoxon signed-rank test. On fixed bodies, seeds are averaged per body first, so the unit is the body. Genomes are compared by the difference of body means, with a bootstrap CI over bodies and a Mann--Whitney $U$ test; shape-matched pairs are also compared by a Wilcoxon test on the matched pairs. Correlations are Spearman, and body-measure analyses are exploratory ($\sim$25 measures per body).
+
+\stat{Declare one primary comparison per research question (e.g.\ R2: symmetric $-$ tree final score on E2 bodies under \bb; R3: symmetric $-$ shape-matched and tied $-$ tree) and treat the rest as secondary, or apply a Holm correction within each table. At present each table reports 3--12 tests uncorrected.}
+\stat{For the grid (R1), besides the pooled Wilcoxon over (cell, seed) pairs, report a test that respects the cell structure: a sign test over cell means, or a mixed model with the cell as a random effect.}
+\stat{For checkpoint-level analyses (locked vs unlocked, phase shift), seeds of the same body are not independent. Aggregate to body level (done for the phase shift, \cref{sec:r5}) or use a linear mixed model (score $\sim$ group + (1 | body)).}
