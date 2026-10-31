@@ -40,7 +40,7 @@ import math
 import re
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import mujoco
 import numpy as np
@@ -102,13 +102,18 @@ def list_runs(roots: list[Path]) -> list[Path]:
 
 
 def replay_episode(genome: dict, weights: np.ndarray, brain_kind: str, cfg: dict,
-                   tie_choice: Optional[tuple[int, ...]] = None) -> tuple[float, dict, np.ndarray, np.ndarray, float]:
+                   tie_choice: Optional[tuple[int, ...]] = None,
+                   perturb: Optional[Callable] = None) -> tuple[float, dict, np.ndarray, np.ndarray, float]:
     """(fitness, info, P (T, B, 3), Q (T, B, 4), dt) of one replayed episode:
-    post-settle poses of the bodies with geoms, core first."""
+    post-settle poses of the bodies with geoms, core first. perturb(brain,
+    model, data) -> brain changes the controller before the episode
+    (phase_shift.py)."""
     to_spec = zoo_spec_fn(runs.hinge_actuator(cfg))
     model, data = build_world(genome, to_spec)
     brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32), tie_choice,
                                  duration=PROFILE.loco_duration)
+    if perturb is not None:
+        brain = perturb(brain, model, data)
     bodies = robot_bodies(model)
     t, pos, quat = [], [], []
     step = itertools.count()
