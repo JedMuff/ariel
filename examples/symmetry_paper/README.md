@@ -15,6 +15,7 @@ Code for the experiments in `PAPER_PLAN.md`. It is the part of the `symmetry-pre
 | `runs.py` | run discovery, last-generation score, paired statistics, figure style |
 | `phase_shift.py`, `analyse_phase_shift.py` | E3 causal check: replay trained controllers with the left side's timing shifted or detuned, against the same number of random lateral hinges |
 | `analyse_e0.py` … `analyse_e3.py` | tables and figures per experiment |
+| `analyse_bodies.py` | R2: rest-pose body measures (size, height, contact spread, hinge axes, leg hinges) of the E2 bodies against training score and phase locking |
 | `tests/` | `pytest examples/symmetry_paper/tests` |
 
 Score is the best forward score of a run's last generation, in [0, 2] minus penalties. Runs pair by seed (42 + rep in every cell).
