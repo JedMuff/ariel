@@ -7,10 +7,10 @@
 # Usage:
 #   sbatch examples/d_social_learning/run_scratch_zoo.sh
 #
-# Each morphology gets the learning budget of the run it came from, or set
-# SCRATCH_GENS to give all of them the same one. Each value has its own output
-# directory. Check --time and --eval-timeout before raising it a lot:
-#   sbatch --export=ALL,SCRATCH_GENS=100 --time=04:00:00 examples/d_social_learning/run_scratch_zoo.sh
+# Every morphology learns for SCRATCH_GENS = 100 inner generations (2000 evals at
+# population 20), whatever budget it evolved under. Each value of SCRATCH_GENS has
+# its own output directory. To use another, check --time and --eval-timeout first:
+#   sbatch --export=ALL,SCRATCH_GENS=200 --time=04:00:00 examples/d_social_learning/run_scratch_zoo.sh
 #
 # 20 reps x 2 budgets x 8 schemes x 3 x-values = 960 indices, of which 720 have a
 # run: ig20 has no x = 0 runs, and ig10's x = 0 runs stop at rep 9. The other
@@ -55,7 +55,7 @@ X_IDX=$(( REM % 3 ))
 SCHEME="${SCHEMES[$SCHEME_IDX]}"
 X="${X_DIRS[$X_IDX]}"
 BUDGET="${BUDGETS[$BUDGET_IDX]}"
-SCRATCH_GENS=${SCRATCH_GENS:-$BUDGET}
+SCRATCH_GENS=${SCRATCH_GENS:-100}
 
 DATA_DIR=__data__/social/ariel_zoo_fe10/ig${BUDGET}
 OUT_DIR=__data__/scratch_learning/ariel_zoo_fe10/ig${BUDGET}/sg${SCRATCH_GENS}
