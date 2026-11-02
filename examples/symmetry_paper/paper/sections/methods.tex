@@ -63,7 +63,7 @@ In E1 we evolve bodies at the default hinge with the three \bb\ controllers and 
 
 In E2 we train controllers on fixed random bodies. We draw 80 tree and 80 symmetric bodies from each genome's initial distribution, matched on hinge count (each genome sampled 800 times, then paired by hinge count), and train each with all four controllers. Two control sets are trained with \bb\ and \dann. The first has 80 random tied bodies with the hinge counts of the symmetric bodies. The second has 80 shape-matched tree bodies: from 24{,}000 random tree bodies, one per symmetric body with the same hinge count and the closest resting shape on six standardised measures (leg hinges, yaw-axis leg hinges, front--back contact spread, leg reach, height, lateral-axis hinges; \cref{sec:measures}), assigned by the Hungarian algorithm within each hinge count. A third control set (E5) has 80 tree bodies matched in the same way to the tied bodies on hinge count and number of leg hinges.
 
-In E3 we replay the last-generation bodies of every E1 run and every E2 checkpoint, record gait and phase measures (\cref{sec:measures}), and perturb trained controllers in a phase-shift replay (\cref{sec:phase-shift}).
+In E3 we replay the final population of every E1 run and every E2 checkpoint, record gait and phase measures (\cref{sec:measures}), and perturb trained controllers in a phase-shift replay (\cref{sec:phase-shift}).
 
 \begin{table}[t]
   \centering

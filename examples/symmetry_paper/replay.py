@@ -75,16 +75,17 @@ def is_fixed_body_run(run_dir: Path) -> bool:
 
 
 def select_checkpoints(run_dir: Path, gens: str) -> list[Path]:
-    """Evolution run: the checkpoints of the chosen generations (last, all or
-    a comma list). Fixed-body run (train_fixed_body.py): all its checkpoints."""
+    """Evolution run: the final population (last), or the checkpoints of the
+    chosen generations (all or a comma list). Fixed-body run
+    (train_fixed_body.py): all its checkpoints."""
     if is_fixed_body_run(run_dir):
         return sorted(c for c in (run_dir / "checkpoints").iterdir() if _EVALS_CKPT_RE.match(c.name))
+    if gens == "last":
+        return runs.final_checkpoints(run_dir)
     by_gen = runs.checkpoints_by_gen(run_dir)
     if not by_gen:
         return []
-    if gens == "last":
-        chosen = [max(by_gen)]
-    elif gens == "all":
+    if gens == "all":
         chosen = sorted(by_gen)
     else:
         chosen = [int(g) for g in gens.split(",") if int(g) in by_gen]
@@ -235,7 +236,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", type=Path, nargs="+", help="run directories to replay")
     parser.add_argument("--list-runs", type=Path, nargs="+", help="print the run dirs under these roots and exit")
-    parser.add_argument("--gens", default="last", help="evolution runs: last, all or a comma list")
+    parser.add_argument("--gens", default="last", help="evolution runs: last (the final population), all or a comma list")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("-o", "--out-dir", type=Path, required=False, help="results go to <out-dir>/<run name>/")
     args = parser.parse_args()

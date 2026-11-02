@@ -7,7 +7,7 @@ Bodies for the fixed-body learning curves (E2).
                  genome is binned by hinge count and the n are taken from the bins
                  both genomes fill, in proportion to the smaller count, so the
                  genomes' hinge-count distributions are identical.
-  evolved        the best last-generation body of every tree and tree_symmetric run
+  evolved        the best final-population body of every tree and tree_symmetric run
                  under --runs-root (E1), with that run's brain, seed and score.
   tied           tree_tied bodies with the hinge counts of the symmetric bodies in
                  --like (one per symmetric body, from a pool of --pool).

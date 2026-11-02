@@ -10,7 +10,7 @@
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{r1_grid_budget.png}
-  \caption{The symmetric advantage in evolution with \dann. (a) Paired symmetric $-$ tree difference in last-generation best score for each hinge setting (gain $k_p$ by damping $k_v$, default armature). Each cell gives the mean gap, the mean symmetric and tree scores, and the number of seeds in which the symmetric run was ahead; the outlined cell is the default hinge. Blue: symmetric better; orange: tree better. (b) The same gap at the default hinge against the number of controller evaluations per body; grey lines are individual seeds, blue the mean with a 95\% bootstrap CI, and the fractions the seeds in which the symmetric run was ahead.}
+  \caption{The symmetric advantage in evolution with \dann. (a) Paired symmetric $-$ tree difference in the best score of the final population for each hinge setting (gain $k_p$ by damping $k_v$, default armature). Each cell gives the mean gap, the mean symmetric and tree scores, and the number of seeds in which the symmetric run was ahead; the outlined cell is the default hinge. Blue: symmetric better; orange: tree better. (b) The same gap at the default hinge against the number of controller evaluations per body; grey lines are individual seeds, blue the mean with a 95\% bootstrap CI, and the fractions the seeds in which the symmetric run was ahead.}
   \label{fig:r1}
 \end{figure}
 
@@ -35,14 +35,14 @@ The hinge grid asks whether this depends on the actuator. \Cref{fig:r1}a is draw
   \label{fig:e1-controller}
 \end{figure}
 
-E1 follows evolution generation by generation for three genomes and four controllers at the default hinge. \Cref{fig:e1-genome} compares the genomes under \bb. Tied runs pull ahead of tree runs after about five generations and end \pending{$+0.20$} ahead; symmetric runs stay ahead of tree runs throughout, by \pending{$+0.06$} in the first generation and \pending{$+0.09$} in the last, but with CIs that include zero at ten seeds. \Cref{fig:e1-controller} compares the controllers. With \bbdrift\ the symmetric lead grows from \pending{$+0.04$} to \pending{$+0.18$}; with \bbfree\ every genome scores far lower and there is no gap; with \dann\ at 200 evaluations the symmetric runs start \pending{$+0.13$} ahead and end \pending{$0.15$} behind. \Cref{tab:e1} gives the last-generation scores and paired gaps.
+E1 follows evolution generation by generation for three genomes and four controllers at the default hinge. \Cref{fig:e1-genome} compares the genomes under \bb. Tied runs pull ahead of tree runs after about five generations and end \pending{$+0.20$} ahead; symmetric runs stay ahead of tree runs throughout, by \pending{$+0.06$} in the first generation and \pending{$+0.09$} in the last, but with CIs that include zero at ten seeds. \Cref{fig:e1-controller} compares the controllers. With \bbdrift\ the symmetric lead grows from \pending{$+0.04$} to \pending{$+0.18$}; with \bbfree\ every genome scores far lower and there is no gap; with \dann\ at 200 evaluations the symmetric runs start \pending{$+0.13$} ahead and end \pending{$0.15$} behind. \Cref{tab:e1} gives the final scores and paired gaps.
 
 \caveat{In the first-round E1 data the symmetric lead over generations does not shrink under \bb\ or \bbdrift; it grows. It shrinks under \dann\ at 200 evaluations (five seeds). The ``lead shrinks with training'' finding is clear for controller training on fixed bodies (\cref{sec:r2}), so keep the two kinds of training apart in the text: ``learning'' for the inner loop, ``evolution'' for generations. Check again with the v2 E1 (20 seeds): if the bang-bang lead still grows over generations, the honest summary is that symmetric bodies start ahead in controller learning and evolution keeps (or widens) that lead.}
 
 \begin{table}[t]
   \centering
   \small
-  \caption{E1: evolution at the default hinge, ten seeds per arm (first round). Left: mean last-generation best score. Right: paired gaps, with bootstrap 95\% CI, Wilcoxon $p$ and the number of seeds in which the first genome is ahead.}
+  \caption{E1: evolution at the default hinge, ten seeds per arm (first round). Left: mean best score of the final population. Right: paired gaps, with bootstrap 95\% CI, Wilcoxon $p$ and the number of seeds in which the first genome is ahead.}
   \label{tab:e1}
   \resizebox{\linewidth}{!}{\begin{tabular}{lccc@{\hskip 1.2em}lcc}
     \toprule
@@ -156,11 +156,11 @@ Random tied bodies, which duplicate modules without mirroring them, score \pendi
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.85\linewidth]{r4_gait_classes.png}
-  \caption{Gait classes in E1. Share of last-generation episodes per gait class, by genome and controller (200 evaluations per body).}
+  \caption{Gait classes in E1. Share of final-population bodies per gait class, by genome and controller (200 evaluations per body).}
   \label{fig:gait-classes}
 \end{figure}
 
-Symmetric bodies not only score higher; they also move differently. In E1, \pending{62\%} of last-generation symmetric bodies under \bb\ use an alternating gait, in which mirrored limbs move half a cycle apart, against 2\% of tree bodies and 14\% of tied bodies. Most tree bodies (83\%) are unpaired: too few of their moving modules have a near-mirror partner for a left--right relation to be defined (\cref{fig:gait-classes}).
+Symmetric bodies not only score higher; they also move differently. In E1, \pending{62\%} of final-population symmetric bodies under \bb\ use an alternating gait, in which mirrored limbs move half a cycle apart, against 2\% of tree bodies and 14\% of tied bodies. Most tree bodies (83\%) are unpaired: too few of their moving modules have a near-mirror partner for a left--right relation to be defined (\cref{fig:gait-classes}).
 
 Symmetric gaits are also phase-locked: their left and right limbs keep the same lag from cycle to cycle (\cref{sec:measures}). We call a trained controller locked when locked pairs carry at least half of its stroke, and unlocked otherwise; a symmetric unlocked training is a symmetric body whose final gait has no steady left--right lag. Eight of ten symmetric \bb\ champions in E1 are locked, against none of ten tree champions and one of ten tied champions (\cref{fig:locked}b). On fixed random bodies, symmetric controllers alternate from the first 50 evaluations (35\% of episodes under \bb, tree 7\%), and the locked share rises slowly with training, from 0.35 to 0.48, while tree bodies stay near 0.09 (\cref{fig:phase-training} in the appendix).
 
@@ -175,7 +175,7 @@ Tied bodies reach symmetric scores in evolution (\cref{tab:e1}) while rarely alt
 \begin{figure}[t]
   \centering
   \includegraphics[width=\linewidth]{r5_locked.png}
-  \caption{Phase locking and score. (a) Final score of trainings on fixed random bodies (mean $\pm$ SEM over trainings, $n$ in the bars): tree bodies, and symmetric bodies split by whether the trained gait is locked (locked pairs carry at least half the stroke) or unlocked. (b) Share of E1 champions (best body of the last generation) that are locked, by controller and genome.}
+  \caption{Phase locking and score. (a) Final score of trainings on fixed random bodies (mean $\pm$ SEM over trainings, $n$ in the bars): tree bodies, and symmetric bodies split by whether the trained gait is locked (locked pairs carry at least half the stroke) or unlocked. (b) Share of E1 champions (best body of the final population) that are locked, by controller and genome.}
   \label{fig:locked}
 \end{figure}
 

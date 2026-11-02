@@ -8,8 +8,8 @@ E0: the symmetric advantage and its conditions (R1), paper v2: DANN only.
   budget series   DANN runs at 200 / 800 / 1600 evaluations per body at the
                   default hinge (e0_dann_budget.sh): paired gap per budget
 
-Score = the best forward score of a run's last generation (runs.run_row; v2:
-the retest mean, in metres). v1 data (normalised score, both brains, 18 cells)
+Score = the best forward score of a run's final population (runs.run_row; v2:
+in metres). v1 data (normalised score, both brains, 18 cells)
 still loads; --brains picks the brains to show.
 
 Writes to --out (default <first grid root>/analysis):

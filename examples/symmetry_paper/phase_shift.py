@@ -30,7 +30,7 @@ same fraction of its period, or runs (1 + D) faster; the rest of the MLP's
 inputs are unchanged, so a closed-loop controller can pull the sides back.
 
 Checkpoints: a fixed-body training's last checkpoint (--ckpts all: every one),
-an evolution run's best last-generation checkpoint.
+an evolution run's champion (the best of its final population, runs.py).
 
 Writes <out-dir>/<run name>/phase_shift.csv, one row per checkpoint and
 condition: condition, draw, n_perturbed, hinges_left / _right / _midline,
@@ -188,7 +188,7 @@ class _NoSubset(Exception):  # noqa: N818
 
 def select_checkpoints(run_dir: Path, which: str) -> list[Path]:
     """Fixed-body training: the last checkpoint (or all); evolution run: the
-    best last-generation checkpoint."""
+    champion (best of the final population)."""
     if is_fixed_body_run(run_dir):
         ckpts = sorted(c for c in (run_dir / "checkpoints").iterdir() if _EVALS_CKPT_RE.match(c.name))
         return ckpts if which == "all" else ckpts[-1:]

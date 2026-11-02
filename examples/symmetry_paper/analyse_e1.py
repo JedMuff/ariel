@@ -16,7 +16,7 @@ CMA-ES on every genome). With --behaviour (replay.py output for these runs,
 --gens last), the gait class and phase locking of every run's champion.
 
 Fitness curves: the population's best score after each outer generation
-(plus-selection keeps it, so it never falls; v2: retest means).
+(plus-selection keeps it, so it never falls).
 
 Writes to --out (default <first root>/analysis):
   e1_runs.csv, e1_gaps.csv, e1_champions.csv, e1_curves.csv, e1_gap_by_gen.csv
@@ -64,7 +64,7 @@ def frequency_spread(run_dir: Path, brain_kind: str) -> float:
 
 
 def champions(behaviour: Path) -> pd.DataFrame:
-    """The best (lowest stored fitness) last-generation episode of every replayed run."""
+    """The best (lowest stored fitness) replayed episode of every run: its champion."""
     eps = pd.concat([pd.read_csv(p) for p in sorted(behaviour.glob("*/episodes.csv"))], ignore_index=True)
     best = eps.loc[eps.groupby("run")["stored_fitness"].idxmin()].copy()
     best["phase_locked"] = best["phase_locked_frac"] >= LOCKED_MIN

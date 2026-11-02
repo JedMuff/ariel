@@ -44,7 +44,7 @@ The discussion places the result in the morphology–control literature: the adv
 
 - **Simulator and task:** default modules, default hinge (kp 1.36, kv 0.356, armature 0.081, joint limit; fitted to the physical servo), `forward`, 15 s, physics at 500 Hz (2 ms steps), control at 20 Hz.
 - **Fitness (v2):** forward displacement in m, unclipped, no penalties (`--fitness displacement`). v1: `clip(d / 3.75 m, 0, 2)` minus height and jerk penalties.
-- **Evolution (E0, E1, v2):** outer (μ+λ) = (20+20), plus-selection, tournament parents, 30 generations, no retraining; inner CMA-ES popsize 20; max 25 modules. Fitness = best CMA-ES fitness (no retests). Seeds 42 + rep; runs pair by seed. Score = last-generation best.
+- **Evolution (E0, E1, v2):** outer (μ+λ) = (20+20), plus-selection, tournament parents, 30 generations, no retraining; inner CMA-ES popsize 20; max 25 modules. Fitness = best CMA-ES fitness (no retests). Seeds 42 + rep; runs pair by seed. Score = best of the final population (the best 20 bodies of all generations, since each generation logs only its new offspring).
 - **Fixed bodies (E2):** hinge-matched random bodies, 80 per genome (one draw, `--n 80 --pool 800`), trained without the outer loop, 3 seeds per body; bang\_bang family 1,600 evals, DANN 5,000. Gaps unpaired across bodies (bootstrap CI, Mann-Whitney), except matched pairs.
 - **Brains:** `bang_bang` (one shared frequency) and `dann`; variants `bang_bang_free` and `bang_bang_drift`. In the paper: "bang-bang", "free-frequency bang-bang", "drift bang-bang", "DANN" (no underscores anywhere in text or figures).
 - **Body measures** (`analyse_bodies.py`): as before.

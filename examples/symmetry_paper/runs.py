@@ -4,11 +4,19 @@ Run discovery and statistics shared by the analysis scripts.
 An evolution run (evolve.py, or the investigation's gecko_skill_tasks.py, so
 the E0 data collected before this branch loads too) is a directory holding
 __data__/{evolve,gecko_skill_tasks}/forward/ with run_config.json,
-run_data.jsonl and checkpoints/genGGG_bodyII/. Its score is the best forward
-score of its last generation (-fitness). In v2 runs (run_config "fitness":
-"displacement") that is the mean of the best controller's retests, in metres;
-in v1 runs, the normalised score in [0, 2] minus penalties, which is steadier
-than the best ever under --repeat-evals.
+run_data.jsonl and checkpoints/genGGG_bodyII/.
+
+Which bodies make up a run's final population depends on the protocol. With
+--repeat-evals (v1) surviving parents are retrained and logged again, so it is
+the last generation, and the score is the best of that generation (steadier
+than the best ever, since retraining changes scores). Without it (v2) each
+generation logs only its new offspring and parents keep their scores, so the
+final population is the best MU bodies of all generations and the score is the
+best of those; the last generation alone usually misses the champion.
+
+Scores are -fitness: in v2 runs (run_config "fitness": "displacement") forward
+displacement in metres; in v1 runs, the normalised score in [0, 2] minus
+penalties.
 
 Paired statistics pair runs by seed (every cell uses seeds 42 + rep).
 """
@@ -104,14 +112,35 @@ def checkpoints_by_gen(run_dir: Path) -> dict[int, list[Path]]:
     return by_gen
 
 
-def best_checkpoint(run_dir: Path, gen: Optional[int] = None) -> Optional[Path]:
-    """The lowest-fitness checkpoint of generation gen (default: the last)."""
+def reevaluates_parents(cfg: dict) -> bool:
+    """Whether surviving parents are retrained and logged again each generation
+    (--repeat-evals). Runs predating the option's logging count as yes."""
+    return cfg.get("repeat_evals") is not False
+
+
+def _rated(ckpts: list[Path]) -> list[tuple[float, Path]]:
+    """(fitness, checkpoint), best first."""
+    rated = [(json.loads((c / "meta.json").read_text()).get("fitness", math.inf), c) for c in ckpts]
+    return sorted(rated, key=lambda x: (x[0], str(x[1])))
+
+
+def final_checkpoints(run_dir: Path) -> list[Path]:
+    """The checkpoints of the run's final population (see the module docstring)."""
     by_gen = checkpoints_by_gen(run_dir)
     if not by_gen:
-        return None
-    ckpts = by_gen.get(max(by_gen) if gen is None else gen, [])
-    rated = [(json.loads((c / "meta.json").read_text()).get("fitness", math.inf), c) for c in ckpts]
-    return min(rated, key=lambda x: x[0])[1] if rated else None
+        return []
+    cfg = run_config(run_dir)
+    if reevaluates_parents(cfg):
+        return by_gen[max(by_gen)]
+    rated = _rated([c for ckpts in by_gen.values() for c in ckpts])
+    return [c for _, c in rated[:int(cfg["pop"])]]
+
+
+def best_checkpoint(run_dir: Path, gen: Optional[int] = None) -> Optional[Path]:
+    """The lowest-fitness checkpoint of generation gen (default: of the final population)."""
+    ckpts = final_checkpoints(run_dir) if gen is None else checkpoints_by_gen(run_dir).get(gen, [])
+    rated = _rated(ckpts)
+    return rated[0][1] if rated else None
 
 
 def run_row(run_dir: Path) -> Optional[dict]:
@@ -121,20 +150,21 @@ def run_row(run_dir: Path) -> Optional[dict]:
     if not cfg or not by_gen:
         return None
     last = max(by_gen)
+    scored = by_gen[last] if reevaluates_parents(cfg) else [f for fits in by_gen.values() for f in fits]
     act = hinge_actuator(cfg)
     return {
         "run": run_dir.name, "brain": cfg.get("brain", "ann"), "genome": cfg["genome_type"],
         "seed": int(cfg["seed"]), "skill_budget": int(cfg["skill_budget"]),
         "evals_per_body": int(cfg["skill_budget"]) * 20,
         "hinge": act.label, "kp": act.kp, "kv": act.kv, "armature": act.armature, "limited": act.limited,
-        "last_gen": last, "score": -min(by_gen[last]), "fitness_mode": cfg.get("fitness", "normalised"),
+        "last_gen": last, "score": -min(scored), "fitness_mode": cfg.get("fitness", "normalised"),
         "pop": int(cfg.get("pop", 10)), "path": str(run_dir),
     }
 
 
 def curve_by_gen(run_dir: Path) -> pd.DataFrame:
     """Best score per outer generation (-min fitness of the bodies evaluated
-    in it; v2: retest means) and the best so far, one row per generation."""
+    in it) and the best so far, one row per generation."""
     by_gen = fitness_by_gen(run_dir)
     if not by_gen:
         return pd.DataFrame(columns=["gen", "best", "best_so_far"])

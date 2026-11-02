@@ -12,7 +12,7 @@ Code for the experiments in `PAPER_PLAN.md`. It is the part of the `symmetry-pre
 | `genomes.py` | `tree`, `tree_symmetric`, `tree_tied` |
 | `sample_bodies.py`, `train_fixed_body.py` | E2: hinge-matched random or evolved bodies; one brain trained on one fixed body, with per-generation curve and checkpoints |
 | `replay.py`, `gait.py`, `gait_species.py` | E3: exact replay, gait class (the validated rowing detector), left–right phase relation and phase quality, gait cycles and species |
-| `runs.py` | run discovery, last-generation score, paired statistics, figure style |
+| `runs.py` | run discovery, final-population score, paired statistics, figure style |
 | `phase_shift.py`, `analyse_phase_shift.py` | E3 causal check: replay trained controllers with the left side's timing shifted or detuned, against the same number of random lateral hinges |
 | `analyse_e0.py` … `analyse_e3.py` | tables and figures per experiment |
 | `analyse_bodies.py` | R2: rest-pose body measures (size, height, contact spread, hinge axes, leg hinges) of the E2 bodies against training score and phase locking |
@@ -20,7 +20,7 @@ Code for the experiments in `PAPER_PLAN.md`. It is the part of the `symmetry-pre
 | `paper_figures.py`, `paper/` | paper figures without a per-experiment script, inline numbers; LaTeX draft (`paper/make_figures.sh` rebuilds everything) |
 | `tests/` | `pytest examples/symmetry_paper/tests` |
 
-Score is the best forward score of a run's last generation: in v2 runs forward displacement in metres; in v1 runs the normalised score in [0, 2] minus penalties. Runs pair by seed (42 + rep in every cell).
+Score is the best forward score of a run's final population: in v2 runs forward displacement in metres, where the final population is the best 20 bodies of all generations; in v1 runs the normalised score in [0, 2] minus penalties, where it is the last generation, since parents were retrained and logged again. Runs pair by seed (42 + rep in every cell).
 
 **Phase quality** (new, `gait.phase_quality`): each left–right pair's trajectories are cut into one-period windows, and the cross-spectrum lag is taken per window. Phase quality is 1 − the circular variance of those lags: 1 means the same lag every cycle, near 0 means drifting. Per episode it is the stroke-weighted mean over pairs; `phase_locked_frac` is the stroke share of pairs with quality ≥ 0.9.
 
