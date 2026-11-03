@@ -13,6 +13,9 @@ than the best ever, since retraining changes scores). Without it (v2) each
 generation logs only its new offspring and parents keep their scores, so the
 final population is the best MU bodies of all generations and the score is the
 best of those; the last generation alone usually misses the champion.
+With --retrain-survivors every survivor is retrained each generation, so the
+final population is the best MU of the last generation and the score is the
+best of those.
 
 Scores are -fitness: in v2 runs (run_config "fitness": "displacement") forward
 displacement in metres; in v1 runs, the normalised score in [0, 2] minus
@@ -113,9 +116,10 @@ def checkpoints_by_gen(run_dir: Path) -> dict[int, list[Path]]:
 
 
 def reevaluates_parents(cfg: dict) -> bool:
-    """Whether surviving parents are retrained and logged again each generation
-    (--repeat-evals). Runs predating the option's logging count as yes."""
-    return cfg.get("repeat_evals") is not False
+    """Whether bodies are retrained and logged again each generation
+    (--repeat-evals or --retrain-survivors). Runs predating the option's logging
+    count as yes."""
+    return bool(cfg.get("retrain_survivors")) or cfg.get("repeat_evals") is not False
 
 
 def _rated(ckpts: list[Path]) -> list[tuple[float, Path]]:
@@ -130,6 +134,8 @@ def final_checkpoints(run_dir: Path) -> list[Path]:
     if not by_gen:
         return []
     cfg = run_config(run_dir)
+    if cfg.get("retrain_survivors"):  # everything alive was just retrained, so the last generation ranks them all
+        return [c for _, c in _rated(by_gen[max(by_gen)])[:int(cfg["pop"])]]
     if reevaluates_parents(cfg):
         return by_gen[max(by_gen)]
     rated = _rated([c for ckpts in by_gen.values() for c in ckpts])
@@ -164,13 +170,16 @@ def run_row(run_dir: Path) -> Optional[dict]:
 
 def curve_by_gen(run_dir: Path) -> pd.DataFrame:
     """Best score per outer generation (-min fitness of the bodies evaluated
-    in it) and the best so far, one row per generation."""
+    in it) and the best so far, one row per generation. With
+    --retrain-survivors a body's old scores no longer count, so best_so_far is
+    the current population's best and can fall."""
     by_gen = fitness_by_gen(run_dir)
     if not by_gen:
         return pd.DataFrame(columns=["gen", "best", "best_so_far"])
     gens = sorted(by_gen)
     best = [-min(by_gen[g]) for g in gens]
-    return pd.DataFrame({"gen": gens, "best": best, "best_so_far": np.maximum.accumulate(best)})
+    so_far = best if run_config(run_dir).get("retrain_survivors") else np.maximum.accumulate(best)
+    return pd.DataFrame({"gen": gens, "best": best, "best_so_far": so_far})
 
 
 def unit_suffix(df: pd.DataFrame) -> str:

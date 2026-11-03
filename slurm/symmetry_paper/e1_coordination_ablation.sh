@@ -2,10 +2,10 @@
 #
 # E1 evolution at the default hinge (R1, R6): brain {bang_bang,
 # bang_bang_drift, bang_bang_free} x genome {tree, tree_symmetric, tree_tied}
-# x N_REPS reps, forward, 200 evaluations per body (skill budget 10). v2
+# x N_REPS reps, forward, 200 evaluations per body (SKILL_BUDGET, default 10). v2
 # protocol (_common.sh): fitness in metres, (20+20) for 30 generations without
-# re-evaluation. E1's DANN arm (tree, symmetric) is
-# the 200-evaluation arm of e0_dann_budget.sh; BRAINS=dann adds tied too.
+# re-evaluation. The DANN runs at each budget, with and without retraining, are
+# submitted by submit_longer_learning.sh.
 #
 # bang_bang_drift is the control for bang_bang_free: shared frequency plus
 # small per-hinge offsets, i.e. free's extra genes without its out-of-step
@@ -15,10 +15,13 @@
 # seed run before the next seed. Array size = 3 x n_brains x N_REPS (180 for
 # the default three brains x 20). Seeds 42 + rep, so runs pair by seed.
 #
+# E1_NAME names the output folder under $FINAL_ROOT (default e1). RETRAIN=1
+# retrains every survivor every generation (about twice the compute). TIME_LIMIT
+# is evolve.py's limit in seconds (default 32400); raise --time with it.
+#
 # Usage:
 #   sbatch slurm/symmetry_paper/e1_coordination_ablation.sh
 #   sbatch --array=0-179%40 slurm/symmetry_paper/e1_coordination_ablation.sh    # throttled
-#   BRAINS=dann sbatch --array=0-59 slurm/symmetry_paper/e1_coordination_ablation.sh   # DANN incl. tied
 # Then:
 #   E3_ROOTS=$FINAL_ROOT/e1 E3_NAME=e1 sbatch --array=0-179 slurm/symmetry_paper/e3_behaviour.sh
 #   python examples/symmetry_paper/analyse_e1.py --root $FINAL_ROOT/e1 $FINAL_ROOT/e0_budget/sb10 \
@@ -40,6 +43,11 @@ GENOME_TYPES=(tree tree_symmetric tree_tied)
 read -r -a BRAINS <<< "${BRAINS:-bang_bang bang_bang_drift bang_bang_free}"
 N_BRAINS=${#BRAINS[@]}
 N_REPS=${N_REPS:-20}
+E1_NAME=${E1_NAME:-e1}
+SKILL_BUDGET=${SKILL_BUDGET:-10}
+TIME_LIMIT=${TIME_LIMIT:-32400}
+RETRAIN_ARGS=()
+if [ -n "${RETRAIN:-}" ]; then RETRAIN_ARGS=(--retrain-survivors); fi
 
 ID=$SLURM_ARRAY_TASK_ID
 GENOME=${GENOME_TYPES[$(( ID % 3 ))]}
@@ -47,12 +55,12 @@ BRAIN=${BRAINS[$(( (ID / 3) % N_BRAINS ))]}
 REP=$(( ID / (3 * N_BRAINS) ))
 if [ "$REP" -ge "$N_REPS" ]; then echo "Index $ID past the ablation; nothing to do"; exit 0; fi
 SEED=$((42 + REP))
-TAG=e1_${BRAIN}_${GENOME}_s${SEED}_${SLURM_ARRAY_JOB_ID}_${ID}
+TAG=e1_${BRAIN}_${GENOME}_sb${SKILL_BUDGET}_s${SEED}_${SLURM_ARRAY_JOB_ID}_${ID}
 
 if [ -n "${DRY_RUN:-}" ]; then echo "$TAG"; exit 0; fi
 setup_env
-banner "Genome / brain: $GENOME / $BRAIN" "Seed:           $SEED" "Final dir:      $FINAL_ROOT/e1/$TAG"
-run_in_tmp "/tmp/$USER/paper_e1_${SLURM_ARRAY_JOB_ID}_$ID" "$FINAL_ROOT/e1/$TAG" \
+banner "Genome / brain: $GENOME / $BRAIN" "Seed:           $SEED" "Final dir:      $FINAL_ROOT/$E1_NAME/$TAG"
+run_in_tmp "/tmp/$USER/paper_e1_${SLURM_ARRAY_JOB_ID}_$ID" "$FINAL_ROOT/$E1_NAME/$TAG" \
     python "$SCRIPTS_DIR/evolve.py" --genome-type "$GENOME" --brain "$BRAIN" --seed "$SEED" \
-        "${V2_EVOLVE_ARGS[@]}" --skill-budget 10 \
-        --brain-workers "$SLURM_CPUS_PER_TASK" --time-limit 32400
+        "${V2_EVOLVE_ARGS[@]}" "${RETRAIN_ARGS[@]}" --skill-budget "$SKILL_BUDGET" \
+        --brain-workers "$SLURM_CPUS_PER_TASK" --time-limit "$TIME_LIMIT"

@@ -47,6 +47,15 @@ def test_with_repeat_evals_the_final_population_is_the_last_generation(tmp_path:
     assert names(replay.select_checkpoints(run_dir, "last")) == ["gen001_body00", "gen001_body01"]
 
 
+def test_with_retrain_survivors_only_the_latest_scores_count(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, repeat_evals=False, pop=1)
+    cfg_path = run_dir / "__data__" / "evolve" / "forward" / "run_config.json"
+    cfg_path.write_text(json.dumps({**json.loads(cfg_path.read_text()), "retrain_survivors": True}))
+    assert names(runs.final_checkpoints(run_dir)) == ["gen001_body01"]
+    assert runs.run_row(run_dir)["score"] == 3.0
+    assert runs.curve_by_gen(run_dir)["best_so_far"].tolist() == [5.0, 3.0]  # may fall
+
+
 def test_an_explicit_generation_is_respected(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, repeat_evals=False)
     assert runs.best_checkpoint(run_dir, gen=1).name == "gen001_body01"

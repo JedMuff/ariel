@@ -24,6 +24,12 @@
 # drift control on the random bodies.
 # Finished seeds are skipped, so a task can be resubmitted.
 #
+# EVAL_SCALE multiplies those budgets and E2_NAME names the output folder under
+# $FINAL_ROOT (defaults 1 and e2; the bodies always come from $FINAL_ROOT/e2).
+# A longer run with the same seeds retraces the shorter one exactly and then
+# continues, which is the only way to extend a training: runs do not save the
+# CMA-ES state. verify_rerun.py checks the retraced part.
+#
 # Index decoding: body fastest, brain slowest.
 # Array size = n_bodies x n_brains (random: 160 x 4 = 640 with
 # BRAINS="bang_bang bang_bang_drift bang_bang_free dann"; tied, shape_matched,
@@ -62,6 +68,8 @@ set -euo pipefail
 source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
 
 BODY_SET=${BODY_SET:?set BODY_SET=random, evolved, tied, shape_matched or leg_matched}
+EVAL_SCALE=${EVAL_SCALE:-1}
+E2_NAME=${E2_NAME:-e2}
 BODIES=$FINAL_ROOT/e2/bodies_${BODY_SET}.jsonl
 [ -f "$BODIES" ] || { echo "No $BODIES: run sample_bodies.py first"; exit 1; }
 N_BODIES=$(wc -l < "$BODIES")
@@ -73,11 +81,12 @@ LINE=$(( ID % N_BODIES ))
 BRAIN_IDX=$(( ID / N_BODIES ))
 if [ "$BRAIN_IDX" -ge "${#BRAINS[@]}" ]; then echo "Index $ID past $N_BODIES bodies x ${#BRAINS[@]} brains; nothing to do"; exit 0; fi
 BRAIN=${BRAINS[$BRAIN_IDX]}
+N_EVALS=$(( ${EVALS[$BRAIN]} * EVAL_SCALE ))
 
-if [ -n "${DRY_RUN:-}" ]; then echo "$BODY_SET line $LINE brain $BRAIN"; exit 0; fi
+if [ -n "${DRY_RUN:-}" ]; then echo "$E2_NAME/$BODY_SET line $LINE brain $BRAIN evals $N_EVALS"; exit 0; fi
 setup_env
-banner "Body set:       $BODY_SET (line $LINE of $N_BODIES)" "Brain:          $BRAIN (${EVALS[$BRAIN]} evaluations)" \
-       "Out root:       $FINAL_ROOT/e2/$BODY_SET"
+banner "Body set:       $BODY_SET (line $LINE of $N_BODIES)" "Brain:          $BRAIN ($N_EVALS evaluations)" \
+       "Out root:       $FINAL_ROOT/$E2_NAME/$BODY_SET"
 srun python "$SCRIPTS_DIR/train_fixed_body.py" --bodies "$BODIES" --line "$LINE" --brain "$BRAIN" \
-    --evals "${EVALS[$BRAIN]}" --seeds 42 43 44 --workers "$SLURM_CPUS_PER_TASK" "${V2_TRAIN_ARGS[@]}" -o "$FINAL_ROOT/e2/$BODY_SET"
+    --evals "$N_EVALS" --seeds 42 43 44 --workers "$SLURM_CPUS_PER_TASK" "${V2_TRAIN_ARGS[@]}" -o "$FINAL_ROOT/$E2_NAME/$BODY_SET"
 echo "Finished: $(date)"

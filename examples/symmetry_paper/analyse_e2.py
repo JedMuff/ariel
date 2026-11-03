@@ -42,7 +42,7 @@ from scipy.stats import mannwhitneyu  # noqa: E402
 
 import runs  # noqa: E402
 
-CHECKPOINTS = (200, 800, 1600, 5000)
+CHECKPOINTS = (200, 800, 1600, 4800, 5000, 15000)
 POPSIZE = 20  # sim.PROFILE.cma_popsize: evaluations per CMA-ES generation
 GENOMES = ("tree", "tree_symmetric")
 METRICS = ["final", "auc", "evals_to_half", *(f"score_at_{n}" for n in CHECKPOINTS)]
@@ -147,9 +147,10 @@ def main() -> None:
             ax.plot(m.index, m, color=color, linewidth=2,
                     label=f"{runs.GENOME_LABEL[genome]} (n={len(body)})")
         ax.set_xscale("log")
-        ax.set_title(f"{runs.BRAIN_LABEL[brain]} — {source} bodies", fontsize=10, color=runs.INK)
+        ax.set_title(runs.BRAIN_LABEL[brain] if len(sources) == 1 else f"{runs.BRAIN_LABEL[brain]}, {source} bodies",
+                     fontsize=10, color=runs.INK)
         if bi == 0:
-            ax.set_ylabel("best score so far", fontsize=9, color=runs.INK_2)
+            ax.set_ylabel("best score so far (m)", fontsize=9, color=runs.INK_2)
         if si == len(sources) - 1:
             ax.set_xlabel("evaluations", fontsize=9, color=runs.INK_2)
         ax.legend(fontsize=8, frameon=False, labelcolor=runs.INK_2)

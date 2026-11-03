@@ -4,8 +4,8 @@ Train one brain on one fixed body and log its learning curve (E2).
 The inner loop of evolve.py (sim.train_skill_for_body: CMA-ES popsize 20,
 sigma 0.5, fixed x0, zoo hinge) run for --evals evaluations, with no outer
 loop, once per training seed. Every generation is logged, and the controller
-is checkpointed at the first generation reaching each of CHECKPOINT_EVALS, in
-the layout replay.py reads, so E3 can measure gait and phase quality along
+is checkpointed at the first generation reaching each of CHECKPOINT_EVALS and
+at the end of training, in the layout replay.py reads, so E3 can measure gait and phase quality along
 training.
 
 Writes, per seed, <out-root>/<body_id>__<brain>__s<seed>/:
@@ -65,7 +65,7 @@ def train(body: dict, brain: str, seed: int, evals: int, workers: int, out: Path
     }, indent=2))
     curve_path = out / "curve.jsonl"
     curve_path.unlink(missing_ok=True)
-    pending = [e for e in CHECKPOINT_EVALS if e <= evals]
+    pending = sorted({e for e in CHECKPOINT_EVALS if e <= evals} | {evals})
     last: dict = {}
     t0 = time.time()
 

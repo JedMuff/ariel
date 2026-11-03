@@ -14,8 +14,9 @@ Fitness:     --fitness displacement (paper v2, default): forward displacement
              in m over 15 s, unclipped, no penalties. --fitness normalised
              (v1 runs): clip(d / 3.75 m, 0, 2) minus height and jerk penalties.
 
-With --repeat-evals (v1 runs only), surviving parents are retrained every
-generation.
+With --repeat-evals (v1 runs only), the parents selected in a generation are
+retrained. With --retrain-survivors, every survivor is retrained every
+generation with a fresh seed, and a body keeps only its latest score.
 
 Writes to ./__data__/evolve/forward/:
   run_config.json   the CLI arguments, eval profile and hinge actuator
@@ -92,7 +93,9 @@ parser.add_argument("--brain-workers", type=int,   default=20, help="parallel ep
 parser.add_argument("--max-modules",   type=int,   default=25)
 parser.add_argument("--max-depth",     type=int,   default=25)
 parser.add_argument("--seed",          type=int,   default=42)
-parser.add_argument("--repeat-evals",  action="store_true", help="retrain surviving parents every generation (v1)")
+parser.add_argument("--repeat-evals",  action="store_true", help="retrain the selected parents every generation (v1)")
+parser.add_argument("--retrain-survivors", action="store_true",
+                    help="retrain every survivor every generation, with a fresh seed; a body keeps only its latest score")
 parser.add_argument("--fitness",       choices=FITNESS_MODES, default="displacement",
                     help="displacement (m, unclipped, no penalties) or normalised (v1)")
 parser.add_argument("--retests",       type=int,   default=0,
@@ -119,6 +122,9 @@ NUM_MODULES    = args.max_modules
 MAX_DEPTH      = args.max_depth
 BASE_SEED      = args.seed
 REPEAT_EVALS   = args.repeat_evals
+RETRAIN_SURVIVORS = args.retrain_survivors
+if REPEAT_EVALS and RETRAIN_SURVIVORS:
+    parser.error("--repeat-evals and --retrain-survivors are exclusive")
 TIME_LIMIT     = args.time_limit
 BRAIN          = args.brain
 _HINGE_ARGS    = {"kp": args.hinge_kp, "kv": args.hinge_kv, "armature": args.hinge_armature,
@@ -210,6 +216,10 @@ class BodyBrainEvolution:
         if REPEAT_EVALS:
             for ind in parents:
                 ind.requires_eval = True
+        if RETRAIN_SURVIVORS:
+            for ind in population:
+                if ind.alive:
+                    ind.requires_eval = True
 
         population.extend(offspring)
         return population

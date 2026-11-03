@@ -3,8 +3,7 @@ E1: evolution at the default hinge by genome and controller (R1, R6).
 
 {bang_bang, bang_bang_drift, bang_bang_free} x {tree, tree_symmetric,
 tree_tied} x 20 seeds (slurm e1_coordination_ablation.sh, v2), plus DANN at
-200 evaluations per body (pass the budget series' sb10 root as a second
---root). bang_bang_drift is the control for bang_bang_free's harder search.
+200 evaluations per body (pass its root, e1_dann/sb10, as a further --root). bang_bang_drift is the control for bang_bang_free's harder search.
 Paired by seed:
   symmetric - tree   the symmetric advantage, with and without a shared frequency
   tied - tree        paired limbs without mirroring
@@ -29,7 +28,7 @@ Writes to --out (default <first root>/analysis):
                                 per controller, and sym - tree per generation
 
 Usage:
-    python analyse_e1.py --root $FINAL_ROOT/e1 $FINAL_ROOT/e0_budget/sb10 [--behaviour $FINAL_ROOT/e3/e1]
+    python analyse_e1.py --root $FINAL_ROOT/e1 $FINAL_ROOT/e1_dann/sb10 [--behaviour $FINAL_ROOT/e3/e1 $FINAL_ROOT/e3/e1_dann_sb10]
 """
 
 from __future__ import annotations
@@ -63,9 +62,9 @@ def frequency_spread(run_dir: Path, brain_kind: str) -> float:
     return float(f.std() / f.mean())
 
 
-def champions(behaviour: Path) -> pd.DataFrame:
+def champions(behaviour: list[Path]) -> pd.DataFrame:
     """The best (lowest stored fitness) replayed episode of every run: its champion."""
-    eps = pd.concat([pd.read_csv(p) for p in sorted(behaviour.glob("*/episodes.csv"))], ignore_index=True)
+    eps = pd.concat([pd.read_csv(p) for root in behaviour for p in sorted(root.glob("*/episodes.csv"))], ignore_index=True)
     best = eps.loc[eps.groupby("run")["stored_fitness"].idxmin()].copy()
     best["phase_locked"] = best["phase_locked_frac"] >= LOCKED_MIN
     return best
@@ -172,8 +171,8 @@ def curves(df: pd.DataFrame, out: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", "--roots", type=Path, nargs="+", required=True,
-                        help="E1 root(s); add the budget series' sb10 root for the DANN arm")
-    parser.add_argument("--behaviour", type=Path, help="replay.py output root for the E1 runs")
+                        help="E1 root(s); add e1_dann/sb10 for the DANN arm")
+    parser.add_argument("--behaviour", type=Path, nargs="+", help="replay.py output root(s) for the E1 runs")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     out = args.out or args.root[0] / "analysis"
