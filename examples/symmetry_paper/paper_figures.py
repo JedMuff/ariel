@@ -7,7 +7,7 @@ under --analysis (default __data__/ariel_paper/paper, the layout of
 paper/make_figures.sh):
   matched/matched_bodies.csv   analyse_matched.py
   bodies/body_features.csv     analyse_bodies.py
-  e0/e0_grid_cells.csv         analyse_e0.py
+  e0/e0_grid_cells.csv         analyse_e0.py (only with --gait-grid)
   e1/e1_champions.csv          analyse_e1.py --behaviour
 
 Figures (to --out):
@@ -54,10 +54,12 @@ from sample_bodies import SHAPE_MEASURES  # noqa: E402
 LOCKED_MIN = 0.5
 MAIN_BRAINS = ("bang_bang", "dann")
 RATIO_MIN_EVALS = 50
-SETS = ["tree", "tree (shape-matched)", "tree_tied", "tree_symmetric"]
-SET_LABEL = {"tree": "tree", "tree (shape-matched)": "tree, shape-matched", "tree_tied": "tied",
+SETS = ["tree", "tree (leg-matched)", "tree (shape-matched)", "tree_tied", "tree_symmetric"]
+SET_LABEL = {"tree": "tree", "tree (leg-matched)": "tree, leg-matched", "tree (shape-matched)": "tree, shape-matched",
+             "tree_tied": "tied",
              "tree_symmetric": "symmetric"}
 SET_STYLE = {"tree": (runs.GENOME_COLOR["tree"], 1.0, "-"),
+             "tree (leg-matched)": (runs.GENOME_COLOR["tree"], 0.5, ":"),
              "tree (shape-matched)": (runs.GENOME_COLOR["tree"], 0.5, "--"),
              "tree_tied": (runs.GENOME_COLOR["tree_tied"], 1.0, "-"),
              "tree_symmetric": (runs.GENOME_COLOR["tree_symmetric"], 1.0, "-")}
@@ -79,7 +81,7 @@ def note(key: str, value: object, text: str) -> None:
 
 
 def body_set(source: str, genome: str) -> str:
-    return "tree (shape-matched)" if source == "shape_matched" else genome
+    return {"shape_matched": "tree (shape-matched)", "leg_matched": "tree (leg-matched)"}.get(source, genome)
 
 
 def boot_ci(x: np.ndarray, rng: np.random.Generator, n: int = 2000) -> tuple[float, float]:
@@ -142,8 +144,8 @@ def fig_curves(e2_roots: list[Path], out: Path, rng: np.random.Generator) -> pd.
             runs.style(ax)
             ax.set_xscale("log")
         axes[2, bi].set_xlabel("evaluations", fontsize=9, color=runs.INK_2)
-    axes[0, 0].set_ylabel("best score so far\n(mean ± SEM over bodies)", fontsize=9, color=runs.INK_2)
-    axes[1, 0].set_ylabel("gap to tree\n(band: sym 95% CI)", fontsize=9, color=runs.INK_2)
+    axes[0, 0].set_ylabel("best score so far (m)\n(mean ± SEM over bodies)", fontsize=9, color=runs.INK_2)
+    axes[1, 0].set_ylabel("gap to tree (m)\n(band: symmetric 95% CI)", fontsize=9, color=runs.INK_2)
     axes[2, 0].set_ylabel("mean ÷ mean of tree\n(1 = no advantage)", fontsize=9, color=runs.INK_2)
     axes[0, 0].legend(fontsize=7, frameon=False, labelcolor=runs.INK_2)
     fig.savefig(out / "fig_curves_sets.png", dpi=200)
@@ -152,7 +154,7 @@ def fig_curves(e2_roots: list[Path], out: Path, rng: np.random.Generator) -> pd.
     # numbers: the gap after the first CMA-ES generation (20 evals, the fixed starting mean) and at checkpoints
     for brain in MAIN_BRAINS:
         pb = per_body[per_body["brain"] == brain]
-        for n in (20, 200, 1600, 5000):
+        for n in (20, 200, 1600, 4800, 5000, 15000):
             at = pb[pb["evals"] == n].groupby("set")["score"].mean()
             if "tree" not in at:
                 continue
@@ -172,7 +174,7 @@ def fig_shapes(matched: pd.DataFrame, out: Path) -> None:
     b = matched.drop_duplicates("body_id")
     cols = [("height", "height (m)"), ("contact_len", "front–back contact spread (m)"), ("n_leg", "leg hinges"),
             ("n_leg_yaw", "yaw-axis leg hinges"), ("n_pitch", "lateral-axis hinges"), ("leg_reach", "leg reach (m)")]
-    fig, axes = plt.subplots(2, 3, figsize=(10, 5.6), constrained_layout=True)
+    fig, axes = plt.subplots(2, 3, figsize=(11, 5.6), constrained_layout=True)
     rng = np.random.default_rng(1)
     for ax, (col, label) in zip(axes.flat, cols):
         runs.style(ax)
@@ -185,7 +187,7 @@ def fig_shapes(matched: pd.DataFrame, out: Path) -> None:
             patch.set_edgecolor(color)
             ax.scatter(i + 1 + rng.uniform(-0.18, 0.18, len(data[i])), data[i], s=6, color=color, alpha=0.7 * alpha + 0.2,
                        linewidth=0)
-        ax.set_xticks(range(1, len(SETS) + 1), [SET_LABEL[s].replace(", ", ",\n") for s in SETS], fontsize=7)
+        ax.set_xticks(range(1, len(SETS) + 1), [SET_LABEL[s].replace(", ", ",\n").replace("-matched", "-\nmatched") for s in SETS], fontsize=7)
         ax.set_title(label, fontsize=9, color=runs.INK)
     fig.savefig(out / "fig_shape_measures.png", dpi=200)
     plt.close(fig)
@@ -353,7 +355,7 @@ def fig_locked(replays: Path, e1_champions: Path, out: Path) -> None:
         cx.set_ylim(0, 1.1)
         cx.set_ylabel("share of champions phase-locked", fontsize=9, color=runs.INK_2)
         cx.legend(fontsize=7, frameon=False, labelcolor=runs.INK_2)
-        cx.set_title("(b) evolution (E1): last-generation champions", fontsize=9, color=runs.INK, loc="left")
+        cx.set_title("(b) evolution: final-population champions", fontsize=9, color=runs.INK, loc="left")
     fig.savefig(out / "fig_locked.png", dpi=200)
     plt.close(fig)
 
@@ -400,40 +402,30 @@ def body_numbers(features: Path, matched: pd.DataFrame, bodies_random: Path, rng
     note("hinge_rotations", tab, "hinge rotation shares: " + json.dumps(tab))
 
 
-def e1_vs_grid(e1_root: Path, grid_root: Path) -> None:
-    e1 = runs.load_runs(e1_root)
-    e1 = e1[(e1["brain"] == "bang_bang") & e1["seed"].between(42, 44)]
-    grid = runs.load_runs(grid_root)
-    z = grid[(grid["brain"] == "bang_bang") & np.isclose(grid["kp"], 1.36051, atol=1e-3)
-             & np.isclose(grid["kv"], 0.35555, atol=1e-3) & np.isclose(grid["armature"], 0.0811705, atol=1e-4)]
-    m = e1.merge(z, on=["genome", "seed"], suffixes=("_e1", "_grid"))
-    same = bool(len(m) and np.allclose(m["score_e1"], m["score_grid"]))
-    note("e1_reproduces_grid", same, f"E1 bang_bang seeds 42-44 equal the grid zoo cell: {same} ({len(m)} runs compared)")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data", type=Path, default=Path("__data__/ariel_paper"))
     parser.add_argument("--analysis", type=Path, default=Path("__data__/ariel_paper/paper"))
     parser.add_argument("--grid-root", type=Path, default=Path("__data__/ariel_actuator_grid"),
-                        help="v1 bang_bang hinge grid (only for --gait-grid and the E1 reproduction check)")
+                        help="v1 bang_bang hinge grid (only for --gait-grid)")
+    parser.add_argument("--e2-name", default="e2", help="folder of the fixed-body trainings under --data")
+    parser.add_argument("--e3-training-name", default="e2_random", help="their replay folder under --data/e3")
     parser.add_argument("--gait-grid", action="store_true", help="also draw the v1 gait-vs-hinge figure (appendix)")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
-    e2 = args.data / "e2"
+    e2 = args.data / "e2"  # the body files
+    trained = args.data / args.e2_name
     matched = pd.read_csv(args.analysis / "matched" / "matched_bodies.csv")
 
-    fig_curves([e2 / "random", e2 / "tied", e2 / "shape_matched"], args.out, rng)
+    fig_curves([trained / "random", trained / "tied", trained / "shape_matched", trained / "leg_matched"], args.out, rng)
     fig_shapes(matched, args.out)
     if args.gait_grid:
         fig_gait_grid(args.grid_root / "rowing_grid" / "individuals.csv", args.analysis / "e0" / "e0_grid_cells.csv",
                       args.out)
-    fig_locked(args.data / "e3" / "e2_random", args.analysis / "e1" / "e1_champions.csv", args.out)
+    fig_locked(args.data / "e3" / args.e3_training_name, args.analysis / "e1" / "e1_champions.csv", args.out)
     body_numbers(args.analysis / "bodies" / "body_features.csv", matched, e2 / "bodies_random.jsonl", rng)
-    if args.grid_root.exists():
-        e1_vs_grid(args.data / "e1", args.grid_root)
 
     (args.out / "inline_numbers.txt").write_text("\n\n".join(LINES) + "\n")
     (args.out / "inline_numbers.json").write_text(json.dumps(NUMBERS, indent=1, default=str))

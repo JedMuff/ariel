@@ -57,6 +57,7 @@ REL_MIN_BASELINE = 0.05  # relative changes only for checkpoints whose baseline 
 KINDS = [("shift", SHIFTS, "left-side phase shift (cycles)"), ("detune", DETUNES, "left-side detuning D (frequency × (1 + D))")]
 SIDE_VS_RAND = [(f"side_{k}_{m}", f"rand_{k}_{m}") for k, mags, _ in KINDS for m in mags]
 PERTURBED = [c for pair in SIDE_VS_RAND for c in pair]
+FIGURE_BRAINS = ("bang_bang", "dann")
 GROUPS = ["tree", "tree_tied", "symmetric unlocked", "symmetric locked"]
 GROUP_STYLE = {"tree": (runs.GENOME_COLOR["tree"], 1.0), "tree_tied": (runs.GENOME_COLOR["tree_tied"], 1.0),
                "symmetric unlocked": (runs.GENOME_COLOR["tree_symmetric"], 0.4),
@@ -140,7 +141,7 @@ def summary(df: pd.DataFrame) -> pd.DataFrame:
 def figure(df: pd.DataFrame, path: Path, rel: bool = False) -> None:
     if rel:
         df = df[df["baseline"] >= REL_MIN_BASELINE]
-    brains = [b for b in runs.BRAIN_LABEL if b in set(df["brain"])]
+    brains = [b for b in FIGURE_BRAINS if b in set(df["brain"])]
     groups = [g for g in GROUPS if g in set(df["group"])]
     fig, axes = plt.subplots(len(KINDS), len(brains), figsize=(4.4 * len(brains), 3.4 * len(KINDS)),
                              squeeze=False, sharey=True)

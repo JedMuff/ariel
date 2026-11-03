@@ -2,6 +2,7 @@
 E2 controls for the symmetric advantage on random bodies (R2, R6):
   shape-matched tree bodies   does body shape, not mirroring, carry the gap?
   random tied bodies          do paired limbs without mirroring get it too?
+  leg-matched tree bodies     does the tied bodies' extra leg count explain their score?
 
 Bodies come from sample_bodies.py (random, tied, shape_matched; all with the
 hinge counts of the random symmetric bodies), trained with
@@ -23,8 +24,8 @@ Writes to --out:
   fig9_matched.png    mean final score per body set (± SEM), one panel per brain
 
 Usage:
-    python analyse_matched.py --roots $FINAL_ROOT/e2/random $FINAL_ROOT/e2/tied $FINAL_ROOT/e2/shape_matched \\
-        --bodies $FINAL_ROOT/e2/bodies_{random,tied,shape_matched}.jsonl --out $FINAL_ROOT/e2/analysis_matched
+    python analyse_matched.py --roots $FINAL_ROOT/e2/{random,tied,shape_matched,leg_matched} \\
+        --bodies $FINAL_ROOT/e2/bodies_{random,tied,shape_matched,leg_matched}.jsonl --out $FINAL_ROOT/e2/analysis_matched
 """
 
 from __future__ import annotations
@@ -49,14 +50,16 @@ from analyse_bodies import body_measures  # noqa: E402
 from analyse_e2 import load_trainings, unpaired_gap  # noqa: E402
 from sample_bodies import SHAPE_MEASURES  # noqa: E402
 
-SETS = ["tree", "tree_symmetric", "tree_tied", "tree (shape-matched)"]
+SETS = ["tree", "tree_symmetric", "tree_tied", "tree (shape-matched)", "tree (leg-matched)"]
 SET_STYLE = {"tree": (runs.GENOME_COLOR["tree"], 1.0), "tree_symmetric": (runs.GENOME_COLOR["tree_symmetric"], 1.0),
-             "tree_tied": (runs.GENOME_COLOR["tree_tied"], 1.0), "tree (shape-matched)": (runs.GENOME_COLOR["tree"], 0.45)}
+             "tree_tied": (runs.GENOME_COLOR["tree_tied"], 1.0), "tree (shape-matched)": (runs.GENOME_COLOR["tree"], 0.45),
+             "tree (leg-matched)": (runs.GENOME_COLOR["tree"], 0.25)}
 METRICS = ["final", "score_at_200"]
 
 
 def body_set(row: pd.Series) -> str:
-    return "tree (shape-matched)" if row["body_source"] == "shape_matched" else row["genome_type"]
+    return {"shape_matched": "tree (shape-matched)", "leg_matched": "tree (leg-matched)"}.get(
+        row["body_source"], row["genome_type"])
 
 
 def pair_key(body_id: str) -> str:
@@ -137,20 +140,24 @@ def main() -> None:
             print(gaps[["brain", "metric", "paired_gap", "paired_p", "n_pairs", "gap_closed", "adj_gap", "adj_ci_lo", "adj_ci_hi"]]
                   .round(3).to_string(index=False))
 
-    brains = [b for b in runs.BRAIN_LABEL if b in set(bodies["brain"])]
-    sets = [s for s in SETS if s in set(bodies["set"])]
-    fig, axes = plt.subplots(1, len(brains), figsize=(3.6 * len(brains), 3.4), squeeze=False, sharey=True)
+    # Only the controllers trained on every body set; order from tree to symmetric.
+    sets = [x for x in ("tree", "tree (leg-matched)", "tree (shape-matched)", "tree_tied", "tree_symmetric")
+            if x in set(bodies["set"])]
+    brains = [b for b in runs.BRAIN_LABEL if b in set(bodies["brain"])
+              and set(sets) <= set(bodies.loc[bodies["brain"] == b, "set"])]
+    labels = {"tree": "tree", "tree (leg-matched)": "tree,\nleg-\nmatched", "tree (shape-matched)": "tree,\nshape-\nmatched",
+              "tree_tied": "tied", "tree_symmetric": "symmetric"}
+    fig, axes = plt.subplots(1, len(brains), figsize=(3.8 * len(brains), 3.4), squeeze=False, sharey=True)
     for ax, brain in zip(axes[0], brains):
         g = bodies[bodies["brain"] == brain]
         for i, s in enumerate(sets):
             v = g.loc[g["set"] == s, "final"]
             color, alpha = SET_STYLE[s]
             ax.bar(i, v.mean(), 0.7, yerr=v.sem(), color=color, alpha=alpha, error_kw={"ecolor": runs.INK_2})
-        ax.set_xticks(range(len(sets)), [s.replace("tree_symmetric", "symmetric").replace("tree_tied", "tied")
-                                         .replace(" (", "\n(") for s in sets], fontsize=8)
+        ax.set_xticks(range(len(sets)), [labels[s] for s in sets], fontsize=8)
         ax.set_title(runs.BRAIN_LABEL[brain], fontsize=10, color=runs.INK)
         runs.style(ax)
-    axes[0][0].set_ylabel("final score per body (± SEM)", fontsize=9, color=runs.INK_2)
+    axes[0][0].set_ylabel("final score per body (m, ± SEM)", fontsize=9, color=runs.INK_2)
     fig.tight_layout()
     fig.savefig(args.out / "fig9_matched.png", dpi=160)
     plt.close(fig)

@@ -2,6 +2,8 @@
 
 Oct 31, 2026 · @Jed · revised for the v2 protocol after the first draft review
 
+> **2026-11-03: the paper now follows a simpler thesis and drops E0; see `paper/`.** Thesis: mirroring is not required for the symmetry advantage. The v2 data contradict the "head start before learning" framing below (no gap at 20 evaluations; the lead builds during learning), and shape-matched bodies now match symmetric ones. This plan is kept as a record of the earlier design.
+
 ## 1. Summary
 
 Revised after E1, E2 (random bodies and controls), E3 and the phase-shift replay. The previous plan (git 8cc276d) argued that symmetry gives a coordinated gait that is cheap for the right controller to learn, and that removing the controller's coordination removes the advantage. The data no longer support that. Most of the advantage is already in the bodies before any learning, it is shared by bodies that duplicate modules without mirroring them, and the left–right phase lock that symmetric bodies show is a marker of good bodies, not the mechanism.
