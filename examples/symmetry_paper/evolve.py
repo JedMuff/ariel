@@ -1,401 +1,251 @@
 """
-Body-brain evolution on forward locomotion (E0, E1).
+Experiment 1: body evolution with controller learning on forward locomotion.
 
-Outer loop:  (mu + lambda) = (20 + 20) evolution over bodies (--genome-type
-             tree / tree_symmetric / tree_tied, see genomes.py) using the
-             ariel.ec engine, tournament parent selection.
-Inner loop:  CMA-ES over each body's controller (--brain, see brains.py) for
-             --skill-budget generations of popsize 20 (sim.train_skill_for_body).
-             Body fitness = the best fitness CMA-ES found. (--retests N > 0
-             retests the best controller N times in fresh processes and uses
-             the mean instead; off by default, unused by the paper runs: the
-             simulation is deterministic on one machine.)
-Fitness:     --fitness displacement (paper v2, default): forward displacement
-             in m over 15 s, unclipped, no penalties. --fitness normalised
-             (v1 runs): clip(d / 3.75 m, 0, 2) minus height and jerk penalties.
+Outer loop  (mu + lambda) = (20 + 20) over bodies of one genome (genomes.py),
+            config.PROTOCOL.generations generations after the initial one.
+            Parents by tournament of 4; each child is crossover (60%) and/or
+            mutation, redrawn until it is a valid body.
+Inner loop  every body's controller (--brain) is trained from scratch with
+            CMA-ES for --evals evaluations (sim.train_controller); a body's
+            score is the best displacement found (m).
+Re-evaluation  every survivor is retrained with a fresh seed each generation,
+            together with the new offspring, and keeps only its latest score.
 
-With --repeat-evals (v1 runs only), the parents selected in a generation are
-retrained. With --retrain-survivors, every survivor is retrained every
-generation with a fresh seed, and a body keeps only its latest score.
+Generation g trains its bodies with seeds seed + 1000 g + i (i = position in
+the generation's training order). The trainings of a generation run
+concurrently on one pool of --workers processes.
 
-Writes to ./__data__/evolve/forward/:
-  run_config.json   the CLI arguments, eval profile and hinge actuator
-  run_data.jsonl    one record per evaluated body: gen, ind_id, parent_ids,
-                    fitness, per_skill {fwd: {fitness, train_best,
-                    learning_curve, eval_time_s, raw_score, height_penalty,
-                    jerk_penalty, score, retest_scores, retest_mean,
-                    retest_sd}}, yz_symmetry, tied_frac, genome_hash, eval_time_s
-  timing.jsonl      wall time per generation
-  checkpoints/genGGG_bodyII/  best_genome.json, fwd_weights.npy, meta.json
+Output (--out DIR):
+  config.json          protocol, arguments, git commit
+  evaluations.jsonl    one line per training: gen, id, parents, op, attempts,
+                       score, train_seed, wall_s, stopped_early, curve
+                       {best, median, sigma per CMA-ES generation}, body
+                       measures (n_modules, n_hinges, symmetry, tied_frac),
+                       genome_hash, and the genome itself the first time a body
+                       is trained (born == gen)
+  generations.jsonl    per generation: the population after selection (ids and
+                       scores, best first), its rejection / fallback counts, wall time
+  weights/genGGG.npz   best controller weights of every training in generation
+                       GGG, keyed by body id
+  state.pkl            the population and RNG states after the last finished
+                       generation: a rerun with the same --out resumes from it
 
 Usage:
-    python evolve.py --genome-type tree_symmetric --brain bang_bang --seed 42 \\
-        --budget 30 --pop 20 --lam 20 --brain-workers 20
+    python evolve.py --genome tree_symmetric --brain dann --evals 200 --seed 42 \\
+        --workers 32 --out runs/e1/tree_symmetric/dann/e200/s42
 """
 
 import os
 
-# One BLAS/OpenMP thread per process, set before numpy loads: otherwise the
-# parent's CMA-ES linear algebra on the DANN's 705-dim covariance spins up an
-# OpenBLAS thread per machine core, which starves the --brain-workers
-# simulation processes (~3.5x slower).
+# One BLAS/OpenMP thread per process, set before numpy loads: the CMA-ES linear
+# algebra of a large controller would otherwise start a thread per core and
+# starve the simulation workers.
 for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_var, "1")
 
 import argparse
-import gc
 import json
+import pickle
 import random
+import subprocess
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
-from rich.console import Console
-from rich.traceback import install
-
-from ariel.ec import EA, EAOperation, EASettings, Individual, Population
-from ariel.ec.genotypes.tree.tying import tied_fraction
 
 import genomes
-from brains import BRAIN_KINDS
-from sim import (
-    EVAL_PROFILES,
-    FITNESS_MODES,
-    MODULE_SETS,
-    PROFILE,
-    ZOO_HINGE,
-    BodyPhysics,
-    HingeActuator,
-    physics_spec_fn,
-    genome_hash,
-    retest_controller,
-    retest_summary,
-    train_skill_for_body,
-    use_physics_globally,
-)
+from config import BRAIN_KINDS, GENOME_TYPES, PROTOCOL, Protocol
+from sim import genome_hash, make_pool, train_controllers
 
-install()
-
-console = Console()
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
-
-parser = argparse.ArgumentParser(description="Body-brain evolution on forward locomotion")
-parser.add_argument("--genome-type",   choices=genomes.GENOME_TYPES, default="tree")
-parser.add_argument("--tie-prob",      type=float, default=genomes.DEFAULT_TIE_PROB,
-                    help="tree_tied: chance a placed module gets a twin")
-parser.add_argument("--brain",         choices=BRAIN_KINDS, default="bang_bang")
-parser.add_argument("--budget",        type=int,   default=30, help="outer generations")
-parser.add_argument("--pop",           type=int,   default=20, help="mu")
-parser.add_argument("--lam",           type=int,   default=20, help="lambda")
-parser.add_argument("--skill-budget",  type=int,   default=PROFILE.skill_budget,
-                    help="inner CMA-ES generations per body (x popsize 20 evaluations)")
-parser.add_argument("--brain-workers", type=int,   default=20, help="parallel episode workers")
-parser.add_argument("--max-modules",   type=int,   default=25)
-parser.add_argument("--max-depth",     type=int,   default=25)
-parser.add_argument("--seed",          type=int,   default=42)
-parser.add_argument("--repeat-evals",  action="store_true", help="retrain the selected parents every generation (v1)")
-parser.add_argument("--retrain-survivors", action="store_true",
-                    help="retrain every survivor every generation, with a fresh seed; a body keeps only its latest score")
-parser.add_argument("--fitness",       choices=FITNESS_MODES, default="displacement",
-                    help="displacement (m, unclipped, no penalties) or normalised (v1)")
-parser.add_argument("--retests",       type=int,   default=0,
-                    help="fresh-process retests of each body's best controller; fitness = -mean (0: training best)")
-parser.add_argument("--hinge-kp",      type=float, default=None, help="hinge gain (default: zoo hinge)")
-parser.add_argument("--hinge-kv",      type=float, default=None, help="hinge damping (default: zoo hinge)")
-parser.add_argument("--hinge-armature", type=float, default=None, help="hinge armature (default: zoo hinge)")
-parser.add_argument("--hinge-limit",   action=argparse.BooleanOptionalAction, default=None,
-                    help="hard +-90 deg hinge joint limit (default: on, as the zoo hinge)")
-parser.add_argument("--module-set",    choices=MODULE_SETS, default="zoo", help="module sizes and masses (default: zoo)")
-parser.add_argument("--core-mass",     type=float, default=None, help="core mass in kg (default: the module set's)")
-parser.add_argument("--profile",       choices=list(EVAL_PROFILES), default="dsocial_zoo",
-                    help="episode, CMA-ES and fitness settings: the paper's or the old sweep's (legacy; ignores --fitness)")
-parser.add_argument("--time-limit",    type=float, default=None,
-                    help="wall-clock seconds; stop after the current generation completes")
-args = parser.parse_args()
-
-TASK           = "forward"
-GENOME_TYPE    = args.genome_type
-BUDGET         = args.budget
-MU             = args.pop
-LAM            = args.lam
-SKILL_BUDGET   = args.skill_budget
-PROFILE_RUN    = (replace(EVAL_PROFILES["legacy"], skill_budget=SKILL_BUDGET) if args.profile == "legacy"
-                  else replace(PROFILE, skill_budget=SKILL_BUDGET, fitness=args.fitness))
-RETESTS        = max(0, args.retests)
-BRAIN_WORKERS  = max(1, args.brain_workers)
-NUM_MODULES    = args.max_modules
-MAX_DEPTH      = args.max_depth
-BASE_SEED      = args.seed
-REPEAT_EVALS   = args.repeat_evals
-RETRAIN_SURVIVORS = args.retrain_survivors
-if REPEAT_EVALS and RETRAIN_SURVIVORS:
-    parser.error("--repeat-evals and --retrain-survivors are exclusive")
-TIME_LIMIT     = args.time_limit
-BRAIN          = args.brain
-_HINGE_ARGS    = {"kp": args.hinge_kp, "kv": args.hinge_kv, "armature": args.hinge_armature,
-                  "limited": args.hinge_limit}
-HINGE_ACTUATOR = HingeActuator(**{**asdict(ZOO_HINGE), **{k: v for k, v in _HINGE_ARGS.items() if v is not None}})
-
-TOURNAMENT_SIZE = 4
-
-DATA = Path.cwd() / "__data__" / "evolve" / TASK
-DATA.mkdir(exist_ok=True, parents=True)
-CHECKPOINTS = DATA / "checkpoints"
-CHECKPOINTS.mkdir(exist_ok=True, parents=True)
-JSONL_PATH  = DATA / "run_data.jsonl"
-TIMING_PATH = DATA / "timing.jsonl"
-
-RNG = np.random.default_rng(BASE_SEED)
-
-with (DATA / "run_config.json").open("w") as _fh:
-    json.dump({**vars(args), "task": TASK, "eval_profile": args.profile, "zoo_modules": args.module_set == "zoo",
-               "control_step_freq": PROFILE_RUN.control_step_freq, "eval_profile_settings": asdict(PROFILE_RUN),
-               "hinge_actuator": asdict(HINGE_ACTUATOR),
-               "body_physics": {"module_set": args.module_set, "core_mass": args.core_mass}}, _fh, indent=2)
-
-ADAPTER = genomes.genome_adapter(GENOME_TYPE, tie_prob=args.tie_prob)
-PHYSICS = BodyPhysics(args.module_set, args.core_mass, HINGE_ACTUATOR)
-TO_SPEC = physics_spec_fn(PHYSICS)
-use_physics_globally(PHYSICS)  # the genome operators' collision checks use this geometry too
+STATE_VERSION = 1
 
 
-def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
-    w, learning_curve, eval_time, best_info = train_skill_for_body(
-        genome_dict, SKILL_BUDGET, BRAIN_WORKERS, seed, to_spec_fn=TO_SPEC, brain_kind=BRAIN, profile=PROFILE_RUN,
-    )
-    train_best = float(min(learning_curve)) if learning_curve else float("inf")
-    retest: dict[str, Any] = {}
-    if RETESTS and np.isfinite(train_best):
-        retest = retest_summary(retest_controller(genome_dict, w, BRAIN, RETESTS, BRAIN_WORKERS, seed,
-                                                  to_spec_fn=TO_SPEC, profile=PROFILE_RUN))
-    fitness = -retest["retest_mean"] if retest else train_best
-    console.log(f"    fwd: train_best={train_best:.4f}  fitness={fitness:.4f}"
-                + (f"  retest_sd={retest['retest_sd']:.4f}" if retest else ""))
-    return {
-        "fitness":     fitness,
-        "per_skill":   {"fwd": {"fitness": fitness, "train_best": train_best, "learning_curve": learning_curve,
-                                "eval_time_s": eval_time, **best_info, **retest}},
-        "weights":     {"fwd": w},
-        "eval_time_s": eval_time,
-    }
+@dataclass
+class Body:
+    id: int
+    genome: dict
+    born: int                       # generation it was created in
+    parents: list[int] = field(default_factory=list)
+    op: str = "random"              # random / crossover / mutation / fallback
+    attempts: int = 0               # draws until valid (random bodies: invalid draws before it)
+    score: float = float("-inf")    # latest training's best displacement (m)
 
 
-# ── BodyBrainEvolution ────────────────────────────────────────────────────────
+@dataclass
+class State:
+    gen: int                        # last finished generation
+    population: list[Body]
+    next_id: int
+    rng: np.random.Generator
+    py_random: tuple
+    version: int = STATE_VERSION
 
 
-class BodyBrainEvolution:
-    def __init__(self) -> None:
-        self.config = EASettings(
-            is_maximisation=False,
-            num_steps=BUDGET,
-            target_population_size=MU,
-            output_folder=DATA,
-            db_file_name=f"database_{int(time.time())}.db",
-            db_handling="delete",
-        )
-        self.outer_gen: int = 0
-        self.selected_parents: list[Individual] = []
-        self.best_seen_fitness: float = float("inf")
+def git_commit() -> str:
+    try:
+        return subprocess.run(["git", "-C", str(Path(__file__).parent), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+    except Exception:
+        return "unknown"
 
-    # -- operations -----------------------------------------------------------
 
-    def parent_selection(self, population: Population) -> Population:
-        contenders = list(population)
-        k = min(TOURNAMENT_SIZE, len(contenders))
-        winners: list[Individual] = []
-        for _ in range(MU):
-            bracket = RNG.choice(len(contenders), size=k, replace=False)
-            winner = min(
-                (contenders[i] for i in bracket),
-                key=lambda ind: ind.fitness_ if ind.fitness_ is not None else float("inf"),
-            )
-            winners.append(winner)
-        self.selected_parents = winners
-        winner_ids = {id(w) for w in winners}
-        for ind in population:
-            ind.tags = {**ind.tags, "ps": id(ind) in winner_ids}
-        return population
+class Run:
+    def __init__(self, genome: str, brain: str, evals: int, seed: int, workers: int, out: Path,
+                 protocol: Protocol = PROTOCOL) -> None:
+        self.genome, self.brain, self.evals, self.seed = genome, brain, evals, seed
+        self.workers, self.out, self.protocol = workers, out, protocol
+        self.ops = genomes.genome_ops(genome, protocol)
+        (out / "weights").mkdir(parents=True, exist_ok=True)
 
-    def reproduction(self, population: Population) -> Population:
-        parents = self.selected_parents or list(population)
-        offspring = ADAPTER.make_offspring(parents, LAM, RNG, NUM_MODULES, MAX_DEPTH)
+    # ── persistence ───────────────────────────────────────────────────────────
 
-        if REPEAT_EVALS:
-            for ind in parents:
-                ind.requires_eval = True
-        if RETRAIN_SURVIVORS:
-            for ind in population:
-                if ind.alive:
-                    ind.requires_eval = True
+    def write_config(self) -> None:
+        cfg = {"experiment": "e1", "genome": self.genome, "brain": self.brain, "evals": self.evals,
+               "seed": self.seed, "workers": self.workers, "protocol": asdict(self.protocol),
+               "git_commit": git_commit()}
+        path = self.out / "config.json"
+        if path.exists():  # resuming (possibly with more generations): everything else must match
+            old = json.loads(path.read_text())
 
-        population.extend(offspring)
-        return population
+            def key(c: dict) -> dict:
+                return {k: c[k] for k in ("genome", "brain", "evals", "seed")} | \
+                       {"protocol": {k: v for k, v in c["protocol"].items() if k != "generations"}}
 
-    def evaluate(self, population: Population) -> Population:
-        console.rule(f"[bold magenta]Outer gen {self.outer_gen}[/bold magenta]")
+            if key(old) != key(cfg):
+                raise SystemExit(f"{path} belongs to a different run; use another --out")
+            cfg = {**old, "protocol": cfg["protocol"],
+                   "resumed_with_commits": [*old.get("resumed_with_commits", []), cfg["git_commit"]]}
+        path.write_text(json.dumps(cfg, indent=2))
 
-        to_eval = [
-            ind for ind in population
-            if ind.alive and ind.tags.get("valid", True) and ind.requires_eval
-        ]
+    def load_state(self) -> Optional[State]:
+        path = self.out / "state.pkl"
+        if not path.exists():
+            return None
+        state: State = pickle.loads(path.read_bytes())
+        # Drop whatever a crash left of the unfinished generation.
+        for name in ("evaluations.jsonl", "generations.jsonl"):
+            p = self.out / name
+            if p.exists():
+                lines = [ln for ln in p.read_text().splitlines() if json.loads(ln)["gen"] <= state.gen]
+                p.write_text("".join(ln + "\n" for ln in lines))
+        for w in (self.out / "weights").glob("gen*.npz"):
+            if int(w.stem[3:]) > state.gen:
+                w.unlink()
+        return state
 
-        t0 = time.time()
-        results: list[dict[str, Any]] = []
-        for idx, ind in enumerate(to_eval):
-            genome_dict = ind.genotype["morph"]
-            console.log(f"  [{idx + 1}/{len(to_eval)}] training body {genome_hash(genome_dict)[:8]}...")
-            results.append(_train_body(genome_dict, seed=BASE_SEED + 1000 * self.outer_gen + idx))
-        wall_elapsed = time.time() - t0
-        eval_times = [r["eval_time_s"] for r in results]
+    def save_state(self, state: State) -> None:
+        tmp = self.out / "state.pkl.tmp"
+        tmp.write_bytes(pickle.dumps(state))
+        tmp.replace(self.out / "state.pkl")
 
-        for idx, (ind, res) in enumerate(zip(to_eval, results)):
-            best_fit = float(res["fitness"])
-            ind.fitness = best_fit if np.isfinite(best_fit) else float("inf")
-            ind.tags = {
-                **ind.tags,
-                "per_skill":   res["per_skill"],
-                "yz_symmetry": ADAPTER.symmetry_score(ind.genotype["morph"]),
-                "eval_time_s": res["eval_time_s"],
-            }
-            ind.requires_eval = False
+    # ── one generation ────────────────────────────────────────────────────────
 
-            self._write_jsonl(ind)
-            self._save_checkpoint(f"gen{self.outer_gen:03d}_body{idx:02d}", dict(ind.genotype["morph"]),
-                                  res["weights"], best_fit, res["per_skill"]["fwd"])
-            self.best_seen_fitness = min(self.best_seen_fitness, best_fit)
+    def train(self, gen: int, bodies: list[Body], pool) -> list[dict]:
+        """Train every body (in place: score), and log the trainings."""
+        seeds = [self.seed + 1000 * gen + i for i in range(len(bodies))]
+        jobs = [(b.genome, self.brain, self.evals, s) for b, s in zip(bodies, seeds)]
+        results = train_controllers(jobs, pool, concurrent=len(jobs), protocol=self.protocol)
+        records, weights = [], {}
+        for b, s, r in zip(bodies, seeds, results):
+            b.score = r.score
+            weights[str(b.id)] = r.weights
+            rec = {"gen": gen, "id": b.id, "born": b.born, "parents": b.parents, "op": b.op,
+                   "attempts": b.attempts, "score": r.score, "train_seed": s, "evals": r.evals,
+                   "stopped_early": r.stopped_early, "wall_s": round(r.wall_s, 2),
+                   "curve": {k: [round(x, 5) for x in v] for k, v in r.curve.items()},
+                   **genomes.describe(b.genome), "genome_hash": genome_hash(b.genome)}
+            if b.born == gen:
+                rec["genome"] = b.genome
+            records.append(rec)
+        np.savez_compressed(self.out / "weights" / f"gen{gen:03d}.npz", **weights)
+        return records
 
-        finite = [r["fitness"] for r in results if np.isfinite(r["fitness"])]
-        stats = f"min={np.min(finite):.3f}  avg={np.mean(finite):.3f}" if finite else "all-infinite"
-        console.log(f"  {len(to_eval)} bodies in {wall_elapsed:.1f}s  {stats}")
-        self._write_timing(wall_elapsed, eval_times)
+    def log(self, gen: int, records: list[dict], population: list[Body], wall_s: float) -> None:
+        with (self.out / "evaluations.jsonl").open("a") as fh:
+            fh.writelines(json.dumps(r) + "\n" for r in records)
+        new = [r for r in records if r["born"] == gen]
+        line = {"gen": gen, "ids": [b.id for b in population], "scores": [b.score for b in population],
+                "new": len(new), "fallbacks": sum(r["op"] == "fallback" for r in new),
+                "attempts": sum(r["attempts"] for r in new), "wall_s": round(wall_s, 1)}
+        with (self.out / "generations.jsonl").open("a") as fh:
+            fh.write(json.dumps(line) + "\n")
 
-        self.outer_gen += 1
-        return population
+    def select_parents(self, population: list[Body], rng: np.random.Generator) -> list[Body]:
+        k = min(self.protocol.tournament, len(population))
+        return [max((population[i] for i in rng.choice(len(population), size=k, replace=False)),
+                    key=lambda b: b.score)
+                for _ in range(self.protocol.mu)]
 
-    def survivor_selection(self, population: Population) -> Population:
-        alive_sorted = sorted((ind for ind in population if ind.alive), key=lambda i: i.fitness_ or float("inf"))
-        survivors = set(id(i) for i in alive_sorted[:MU])
-        for ind in population:
-            if ind.alive and id(ind) not in survivors:
-                ind.alive = False
+    def survivors(self, bodies: list[Body]) -> list[Body]:
+        return sorted(bodies, key=lambda b: -b.score)[: self.protocol.mu]
 
-        finite = [i.fitness_ for i in population if i.alive and i.fitness_ is not None and np.isfinite(i.fitness_)]
-        if finite:
-            console.log(f"[green]Survivors:[/green] avg={np.mean(finite):.3f}  min={np.min(finite):.3f}")
-        return population
+    # ── main loop ─────────────────────────────────────────────────────────────
 
-    # -- persistence ----------------------------------------------------------
-
-    def _write_jsonl(self, ind: Individual) -> None:
-        morph = ind.genotype["morph"]
-        record = {
-            "gen":         self.outer_gen,
-            "ind_id":      ind.id,
-            "parent_ids":  ind.genotype.get("parent_ids", []),
-            "fitness":     ind.fitness_ if ind.fitness_ is not None else None,
-            "task":        TASK,
-            "genome_type": GENOME_TYPE,
-            "per_skill":   ind.tags.get("per_skill", {}),
-            "yz_symmetry": ind.tags.get("yz_symmetry", 0.0),
-            "tied_frac":   tied_fraction(morph) if GENOME_TYPE == "tree_tied" else None,
-            "genome_hash": genome_hash(morph),
-            "eval_time_s": ind.tags.get("eval_time_s", 0.0),
-        }
-        with JSONL_PATH.open("a") as fh:
-            fh.write(json.dumps(record) + "\n")
-
-    def _write_timing(self, wall_elapsed: float, eval_times: list[float]) -> None:
-        t = np.array(eval_times) if eval_times else np.zeros(1)
-        record = {
-            "gen":               self.outer_gen,
-            "n_individuals":     len(eval_times),
-            "wall_time_s":       round(wall_elapsed, 3),
-            "mean_eval_time_s":  round(float(t.mean()), 3),
-            "min_eval_time_s":   round(float(t.min()), 3),
-            "max_eval_time_s":   round(float(t.max()), 3),
-            "total_eval_time_s": round(float(t.sum()), 3),
-        }
-        with TIMING_PATH.open("a") as fh:
-            fh.write(json.dumps(record) + "\n")
-
-    def _save_checkpoint(self, tag: str, genotype: dict, weights: dict[str, Optional[np.ndarray]],
-                         fitness: float, fwd: Optional[dict[str, Any]] = None) -> None:
-        if not np.isfinite(fitness):
-            return
-        sub = CHECKPOINTS / tag
-        sub.mkdir(exist_ok=True, parents=True)
-        for name, w in weights.items():
-            np.save(sub / f"{name}_weights.npy", w)
-        with (sub / "best_genome.json").open("w") as fh:
-            json.dump(genotype, fh, indent=2)
-        with (sub / "meta.json").open("w") as fh:
-            json.dump({
-                "gen":         self.outer_gen,
-                "fitness":     fitness,
-                "yz_symmetry": ADAPTER.symmetry_score(genotype),
-                "num_modules": genomes.module_count(genotype),
-                "task":        TASK,
-                "genome_type": GENOME_TYPE,
-                **{k: (fwd or {})[k] for k in ("train_best", "retest_scores", "retest_mean", "retest_sd")
-                   if k in (fwd or {})},
-            }, fh, indent=2)
-
-    # -- main -----------------------------------------------------------------
-
-    def evolve(self) -> Optional[Individual]:
-        console.log("[yellow]Initialising population...[/yellow]")
-        population = Population([ADAPTER.create_individual(RNG, NUM_MODULES, MAX_DEPTH) for _ in range(MU)])
-        population = self.evaluate(population)
-
-        ops = [
-            EAOperation(self.parent_selection),
-            EAOperation(self.reproduction),
-            EAOperation(self.evaluate),
-            EAOperation(self.survivor_selection),
-        ]
-        ea = EA(
-            population,
-            operations=ops,
-            num_steps=BUDGET,
-            db_file_path=self.config.db_file_path,
-            db_handling=self.config.db_handling,
-            quiet=self.config.quiet,
-        )
+    def run(self, time_limit: Optional[float] = None) -> None:
+        self.write_config()
+        state = self.load_state()
         t_start = time.time()
-        for _ in range(BUDGET):
-            if TIME_LIMIT is not None and time.time() - t_start >= TIME_LIMIT:
-                console.log(f"[yellow]Time limit {TIME_LIMIT:.0f}s reached — stopping early[/yellow]")
-                break
-            ea.step()
-        return ea.get_solution("best", only_alive=False)
+        with make_pool(self.workers) as pool:
+            if state is None:
+                random.seed(self.seed)
+                rng = np.random.default_rng(self.seed)
+                t0 = time.time()
+                population = []
+                for i in range(self.protocol.mu):
+                    g, rejected = genomes.random_body(self.ops, self.protocol)
+                    population.append(Body(id=i, genome=g, born=0, attempts=rejected))
+                records = self.train(0, population, pool)
+                population = self.survivors(population)
+                self.log(0, records, population, time.time() - t0)
+                state = State(0, population, self.protocol.mu, rng, random.getstate())
+                self.save_state(state)
+                print(f"gen 0: best {population[0].score:.3f} m", flush=True)
+            else:
+                random.setstate(state.py_random)
+                print(f"resuming after generation {state.gen}", flush=True)
+
+            while state.gen < self.protocol.generations:
+                if time_limit is not None and time.time() - t_start >= time_limit:
+                    print(f"time limit reached after generation {state.gen}", flush=True)
+                    return
+                gen, rng, population = state.gen + 1, state.rng, state.population
+                t0 = time.time()
+                parents = self.select_parents(population, rng)
+                children = []
+                for k in range(self.protocol.lam):
+                    c = genomes.make_child(self.ops, [p.genome for p in parents], rng, self.protocol)
+                    children.append(Body(id=state.next_id + k, genome=c.genome, born=gen,
+                                         parents=[parents[i].id for i in c.parents], op=c.op, attempts=c.attempts))
+                # Re-evaluation: survivors are retrained with the offspring.
+                bodies = population + children
+                records = self.train(gen, bodies, pool)
+                population = self.survivors(bodies)
+                self.log(gen, records, population, time.time() - t0)
+                state = State(gen, population, state.next_id + self.protocol.lam, rng, random.getstate())
+                self.save_state(state)
+                print(f"gen {gen}: best {population[0].score:.3f} m  top-{len(population)} mean "
+                      f"{np.mean([b.score for b in population]):.3f} m  ({time.time() - t0:.0f} s)", flush=True)
+        (self.out / "DONE").write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
 
 def main() -> None:
-    random.seed(BASE_SEED)
-    np.random.seed(BASE_SEED)
-
-    console.rule("[bold magenta]Body-brain evolution — forward[/bold magenta]")
-    console.log(
-        f"genome_type={GENOME_TYPE}  brain={BRAIN}  (mu+lam)=({MU}+{LAM})  budget={BUDGET}  "
-        f"skill_budget={SKILL_BUDGET}  hinge={HINGE_ACTUATOR.label}  brain_workers={BRAIN_WORKERS}  "
-        f"repeat_evals={REPEAT_EVALS}  fitness={args.fitness}  retests={RETESTS}  seed={BASE_SEED}"
-    )
-
-    start = time.time()
-    evo = BodyBrainEvolution()
-    best = evo.evolve()
-
-    console.rule("[bold green]Done[/bold green]")
-    if best is not None and best.fitness_ is not None:
-        console.log(f"Best fitness: {best.fitness:.3f}")
-    console.log(f"Best seen:    {evo.best_seen_fitness:.3f}")
-    console.log(f"Elapsed:      {(time.time() - start) / 60:.1f} min")
-    console.log(f"Data →        {DATA}")
+    parser = argparse.ArgumentParser(description="Experiment 1: body evolution with controller learning")
+    parser.add_argument("--genome", choices=GENOME_TYPES, required=True)
+    parser.add_argument("--brain", choices=BRAIN_KINDS, required=True)
+    parser.add_argument("--evals", type=int, required=True, help="learning evaluations per body")
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--workers", type=int, default=os.cpu_count())
+    parser.add_argument("--generations", type=int, default=PROTOCOL.generations,
+                        help="generations after the initial one (testing only; the paper uses the default)")
+    parser.add_argument("--time-limit", type=float, default=None,
+                        help="wall-clock seconds; stop after the generation running at that time")
+    args = parser.parse_args()
+    protocol = replace(PROTOCOL, generations=args.generations)
+    Run(args.genome, args.brain, args.evals, args.seed, args.workers, args.out, protocol).run(args.time_limit)
 
 
 if __name__ == "__main__":
     main()
-    gc.disable()

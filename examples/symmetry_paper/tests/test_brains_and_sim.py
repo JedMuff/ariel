@@ -1,101 +1,54 @@
-"""Brains, the hinge actuator and the episode loop."""
+"""Brains, the zoo body, the episode and controller training."""
 
+import importlib.util
 import random
-from dataclasses import asdict, replace
+import sys
+from pathlib import Path
 
 import mujoco
 import numpy as np
 import pytest
 
-import replay
-from ariel.ec.genotypes.tree.symmetry import MirrorAxis
-from brains import BangBangBrain, BangBangDriftBrain, BangBangFreeBrain, DannBrain, make_brain_for_model, model_topology
+import genomes
+from brains import AnnBrain, BangBangBrain, DannBrain, make_brain_for_model, model_topology
+from config import BRAIN_KINDS, PROTOCOL
 from sim import (
-    PROFILE,
-    TRANSLATE_MAX,
-    ZOO_HINGE,
-    HingeActuator,
+    ZOO_HINGE_ARMATURE,
+    ZOO_HINGE_KP,
+    ZOO_HINGE_KV,
     build_world,
-    create_individual,
-    profile_for,
-    retest_controller,
-    retest_summary,
-    run_skill_episode,
-    translate_score,
-    zoo_spec,
-    zoo_spec_fn,
+    evaluate,
+    make_pool,
+    run_episode,
+    train_controller,
+    train_controllers,
 )
+
+LEGACY = Path(__file__).resolve().parents[1] / "legacy"
 
 
 def body(genome_type: str = "tree_symmetric", seed: int = 0) -> dict:
     random.seed(seed)
-    axis = MirrorAxis.Y_ZERO if genome_type == "tree_symmetric" else None
-    return create_individual(25, 25, symmetry_axis=axis).genotype["morph"]
+    return genomes.random_body(genomes.genome_ops(genome_type))[0]
 
 
-# ── bang_bang ─────────────────────────────────────────────────────────────────
+# ── Brains ────────────────────────────────────────────────────────────────────
 
 
-def test_bang_bang_free_with_equal_frequencies_is_bang_bang():
-    n, rng = 5, np.random.default_rng(0)
-    shared = BangBangBrain(n)
-    g = rng.normal(size=shared.num_params)
-    shared.set_params(g)
-    per_hinge = g[4:].reshape(n, 5)
-    free = BangBangFreeBrain(n)
-    free.set_params(np.hstack([np.tile(g[:4], (n, 1)), per_hinge]).ravel())
-    for t in np.arange(0.0, 15.0, 0.05):
-        assert np.array_equal(shared.output_at(t), free.output_at(t))
-
-
-def test_bang_bang_free_frequencies_drift_apart():
-    n = 2
-    free = BangBangFreeBrain(n)
-    g = np.full((n, 9), 0.5)
-    g[1, 0:2] = 2.0  # hinge 1: higher start and end frequency
-    free.set_params(g.ravel())
-    out = np.array([free.output_at(t) for t in np.arange(0.0, 15.0, 0.05)])
-    assert set(np.unique(out)) <= {-np.pi / 2, np.pi / 2}
-    assert (out[:, 0] != out[:, 1]).mean() > 0.2
-
-
-def test_bang_bang_drift_with_offsets_at_x0_is_bang_bang():
-    n, rng = 5, np.random.default_rng(0)
-    shared = BangBangBrain(n)
-    g = rng.normal(size=shared.num_params)
-    shared.set_params(g)
-    per_hinge = g[4:].reshape(n, 5)
-    drift = BangBangDriftBrain(n)
-    drift.set_params(np.hstack([g[:4], np.hstack([np.full((n, 4), 0.5), per_hinge]).ravel()]))
-    for t in np.arange(0.0, 15.0, 0.05):
-        assert np.array_equal(shared.output_at(t), drift.output_at(t))
-
-
-def test_bang_bang_drift_offsets_move_hinges_apart():
-    n = 2
-    drift = BangBangDriftBrain(n)
-    g = np.full(drift.num_params, 0.5)
-    g[4 + 9:4 + 9 + 2] = 0.5 + 10.0  # hinge 1: start and end frequency one gene unit higher
-    drift.set_params(g)
-    assert drift.freq.start[1] > drift.freq.start[0]
-    out = np.array([drift.output_at(t) for t in np.arange(0.0, 15.0, 0.05)])
-    assert (out[:, 0] != out[:, 1]).mean() > 0.2
-
-
-def test_bang_bang_param_counts():
+@pytest.mark.parametrize("kind", BRAIN_KINDS)
+def test_param_counts(kind):
+    model, data = build_world(body())
+    n = model.nu
+    expected = {"bang_bang": 4 + 5 * n, "dann": 16 * 42 + 16 + 16 + 1, "ann": 1184 + 65 * n,
+                "cpg": n + n * (n - 1) // 2}[kind]
+    assert make_brain_for_model(kind, model, data).num_params == expected
     assert BangBangBrain(4).num_params == 24
-    assert BangBangFreeBrain(4).num_params == 36
-    assert BangBangDriftBrain(4).num_params == 40
-
-
-# ── DANN ──────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize("genome_type", ["tree", "tree_symmetric"])
 def test_dann_builds_and_resets(genome_type):
     model, data = build_world(body(genome_type))
     brain = DannBrain(model, data)
-    assert brain.num_params == 16 * 42 + 16 + 16 + 1
     brain.set_params(np.random.default_rng(0).normal(size=brain.num_params))
     state = np.zeros(3 + model.nu, dtype=np.float32)
     a1 = brain.act(data, state)
@@ -106,10 +59,11 @@ def test_dann_builds_and_resets(genome_type):
     assert np.array_equal(brain.act(data, state), a1)
 
 
-def test_dann_rejects_wrong_length():
+@pytest.mark.parametrize("kind", BRAIN_KINDS)
+def test_wrong_length_is_rejected(kind):
     model, data = build_world(body())
     with pytest.raises(IndexError):
-        DannBrain(model, data).set_params(np.zeros(3))
+        make_brain_for_model(kind, model, data).set_params(np.zeros(3))
 
 
 def test_model_topology_has_every_hinge():
@@ -118,87 +72,77 @@ def test_model_topology_has_every_hinge():
     assert sum(t == 2 for t in topo["type"].values()) == model.nu
 
 
-# ── Actuator and episode ──────────────────────────────────────────────────────
+def test_ann_matches_the_torch_version():
+    """The numpy ANN gives the zoo / v2 torch ANN's outputs for the same weights."""
+    pytest.importorskip("torch")
+    spec = importlib.util.spec_from_file_location("legacy_brains", LEGACY / "brains.py")
+    legacy = importlib.util.module_from_spec(spec)
+    sys.modules["legacy_brains"] = legacy  # dataclasses look their module up
+    spec.loader.exec_module(legacy)
+    rng = np.random.default_rng(0)
+    for n in (4, 9, 17):
+        new, old = AnnBrain(3 + n, n), legacy.AnnBrain(3 + n, n)
+        assert new.num_params == old.num_params == 1184 + 65 * n
+        w = rng.normal(0, 0.5, new.num_params).astype(np.float32)
+        new.set_params(w)
+        old.set_params(w)
+        for _ in range(5):
+            x = rng.normal(0, 1, 3 + n).astype(np.float32)
+            np.testing.assert_allclose(new.act(None, x), old.act(None, x), atol=1e-5)  # float32 sum order
 
 
-def test_default_actuator_is_zoo_hinge():
-    model, _ = build_world(body(), zoo_spec)
-    assert model.actuator_gainprm[0, 0] == pytest.approx(ZOO_HINGE.kp)
-    assert model.actuator_biasprm[0, 2] == pytest.approx(-ZOO_HINGE.kv)
+# ── Body and episode ──────────────────────────────────────────────────────────
+
+
+def test_zoo_hinge():
+    model, _ = build_world(body())
+    assert model.actuator_gainprm[0, 0] == pytest.approx(ZOO_HINGE_KP)
+    assert model.actuator_biasprm[0, 2] == pytest.approx(-ZOO_HINGE_KV)
     hinge = int(model.actuator_trnid[0, 0])
-    assert model.dof_armature[model.jnt_dofadr[hinge]] == pytest.approx(ZOO_HINGE.armature)
+    assert model.dof_armature[model.jnt_dofadr[hinge]] == pytest.approx(ZOO_HINGE_ARMATURE)
     assert model.jnt_limited[hinge]
 
 
-def test_custom_actuator():
-    act = HingeActuator(2.5, 1.0, 0.0, False)
-    model, _ = build_world(body(), zoo_spec_fn(act))
-    assert model.actuator_gainprm[0, 0] == pytest.approx(2.5)
-    assert model.actuator_biasprm[0, 2] == pytest.approx(-1.0)
-    assert not model.jnt_limited[int(model.actuator_trnid[0, 0])]
-    assert act.label == "kp2.5_kv1_arm0_lim0"
-
-
-def test_translate_score_clips_to_0_2():
-    assert translate_score(-1.0, 15.0) == 0.0
-    assert translate_score(100.0, 15.0) == TRANSLATE_MAX
-    assert translate_score(0.5 * 15.0 / 4, 15.0) == pytest.approx(0.5)
-
-
-@pytest.mark.parametrize("brain_kind", ["bang_bang", "bang_bang_free", "bang_bang_drift", "dann"])
-def test_replay_reproduces_training_episode(brain_kind):
-    genome = body()
-    model, data = build_world(genome)
-    brain = make_brain_for_model(brain_kind, model, data, duration=PROFILE.loco_duration)
-    w = np.random.default_rng(1).normal(0.5, 0.5, size=brain.num_params).astype(np.float32)
-    brain.set_params(w)
-    fit, _ = run_skill_episode(model, data, brain)
-    cfg = {"hinge_actuator": asdict(ZOO_HINGE)}
-    fit2, _, P, Q, dt = replay.replay_episode(genome, w, brain_kind, cfg)
-    assert fit2 == fit
-    assert dt == pytest.approx(0.02, abs=1e-6)
-    assert P.shape[0] == pytest.approx(PROFILE.loco_duration / dt, abs=2)
-    assert Q.shape[-1] == 4
-
-
 def test_episode_is_deterministic():
-    genome = body("tree")
-    model, data = build_world(genome)
+    model, data = build_world(body("tree"))
     brain = make_brain_for_model("bang_bang", model, data, np.full(4 + 5 * model.nu, 0.5, dtype=np.float32))
-    a = run_skill_episode(model, data, brain)
+    a = run_episode(model, data, brain)
     mujoco.mj_resetData(model, data)
-    assert run_skill_episode(model, data, brain) == a
+    assert run_episode(model, data, brain) == a
+    assert evaluate(body("tree"), "bang_bang", np.full(4 + 5 * model.nu, 0.5)) == a
 
 
-# ── v2 fitness and retests ────────────────────────────────────────────────────
+def test_episode_length_and_control_rate():
+    model, data = build_world(body())
+    brain = make_brain_for_model("cpg", model, data)
+    calls = []
+    act = brain.act
+    brain.act = lambda d, s: calls.append(d.time) or act(d, s)
+    steps = []
+    run_episode(model, data, brain, recorder=lambda d: steps.append(d.time))
+    assert len(steps) == pytest.approx(PROTOCOL.episode_s / model.opt.timestep, abs=1)
+    assert len(calls) == pytest.approx(len(steps) / PROTOCOL.control_every, abs=1)
 
 
-def test_displacement_fitness_is_unclipped_metres():
-    genome = body("tree")
-    model, data = build_world(genome)
-    brain = make_brain_for_model("bang_bang", model, data, np.full(4 + 5 * model.nu, 0.5, dtype=np.float32))
-    fit_d, info_d = run_skill_episode(model, data, brain, replace(PROFILE, fitness="displacement"))
-    assert fit_d == -info_d["raw_score"]
-    assert info_d["score"] == info_d["raw_score"]
-    fit_n, info_n = run_skill_episode(model, data, brain, replace(PROFILE, fitness="normalised"))
-    assert info_n["raw_score"] == info_d["raw_score"]
-    assert info_n["score"] == translate_score(info_n["raw_score"], PROFILE.loco_duration)
+# ── Training ──────────────────────────────────────────────────────────────────
 
 
-def test_profile_for_v1_and_v2_configs():
-    assert profile_for({}).fitness == "normalised"
-    assert profile_for({"fitness": "displacement"}).fitness == "displacement"
+def test_training_curve_and_budget():
+    with make_pool(4) as pool:
+        t = train_controller(body(), "bang_bang", 60, seed=1, pool=pool)
+    assert t.evals == 60 and len(t.curve["best"]) == 3
+    assert t.score == max(t.curve["best"])
+    assert all(b >= m for b, m in zip(t.curve["best"], t.curve["median"]))
 
 
-def test_retest_controller_returns_n_scores():
-    genome = body("tree")
-    model, data = build_world(genome)
-    w = np.full(4 + 5 * model.nu, 0.5, dtype=np.float32)
-    prof = replace(PROFILE, fitness="displacement")
-    fits = retest_controller(genome, w, "bang_bang", 3, 3, 0, profile=prof)
-    assert len(fits) == 3 and all(np.isfinite(fits))
-    brain = make_brain_for_model("bang_bang", model, data, w)
-    fit, _ = run_skill_episode(model, data, brain, prof)
-    assert fits[0] == pytest.approx(fit, abs=1e-6)
-    summ = retest_summary(fits)
-    assert summ["retest_mean"] == pytest.approx(-np.mean(fits))
+def test_concurrent_training_is_deterministic():
+    """A training gives the same result alone or alongside others."""
+    jobs = [(body("tree", s), kind, 40, 7 + s) for s, kind in enumerate(["bang_bang", "cpg", "dann"])]
+    with make_pool(6) as pool:
+        alone = [train_controller(*job, pool=pool) for job in jobs]
+        together = train_controllers(jobs, pool, concurrent=3)
+    for a, b in zip(alone, together):
+        assert a.score == b.score
+        np.testing.assert_array_equal(a.weights, b.weights)
+    # and the stored weights reproduce the score
+    assert evaluate(jobs[0][0], "bang_bang", alone[0].weights) == alone[0].score

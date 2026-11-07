@@ -6,8 +6,9 @@ import random
 
 import numpy as np
 import pytest
+import genomes
 import sim
-from genomes import DEFAULT_TIE_PROB
+from config import TIE_PROB_MATCHED
 
 from ariel.ec.genotypes.tree.collision import first_collision, mirror_node
 from ariel.ec.genotypes.tree.operators import (
@@ -28,7 +29,7 @@ from ariel.ec.genotypes.tree.tying import (
 )
 from ariel.ec.genotypes.tree.validation import validate_genome_dict
 
-P = DEFAULT_TIE_PROB
+P = TIE_PROB_MATCHED
 N_MODULES = 25
 
 
@@ -66,7 +67,7 @@ def test_random_genomes_match_symmetric() -> None:
     sym = [random_tree_symmetric(N_MODULES, MirrorAxis.Y_ZERO).to_dict() for _ in range(300)]
     for d in tied:
         check_invariant(d)
-        assert sim.genome_to_spec(d) is not None
+        assert sim.body_spec(d) is not None
     assert np.mean([tied_fraction(d) for d in tied]) == pytest.approx(2 * P / (1 + P), abs=0.05)
     n_tied, n_sym = np.mean([len(d["nodes"]) for d in tied]), np.mean([len(d["nodes"]) for d in sym])
     assert n_tied == pytest.approx(n_sym, rel=0.1)
@@ -134,9 +135,17 @@ def test_lost_twin_is_replaced() -> None:
         check_invariant(g.to_dict())
 
 
-def test_shared_offspring_path() -> None:
-    parents = [sim.create_individual(N_MODULES, 25, tie_prob=P) for _ in range(4)]
-    kids = sim.make_offspring(parents, 8, np.random.default_rng(0), N_MODULES, 25, tie_prob=P)
-    for ind in parents + kids:
-        assert "ties" in ind.genotype["morph"]
-        check_invariant(ind.genotype["morph"])
+@pytest.mark.parametrize("name", ["tree_tied", "tree_tied_full"])
+def test_shared_offspring_path(name: str) -> None:
+    ops, rng = genomes.genome_ops(name), np.random.default_rng(0)
+    parents = [genomes.random_body(ops)[0] for _ in range(4)]
+    kids = [genomes.make_child(ops, parents, rng).genome for _ in range(8)]
+    for g in parents + kids:
+        assert "ties" in g
+        check_invariant(g)
+
+
+def test_tied_full_ties_every_module() -> None:
+    ops = genomes.genome_ops("tree_tied_full")
+    fracs = [tied_fraction(genomes.random_body(ops)[0]) for _ in range(30)]
+    assert np.mean(fracs) > 0.9

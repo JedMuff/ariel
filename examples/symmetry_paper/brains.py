@@ -1,32 +1,25 @@
-"""Controllers of the paper: bang_bang, bang_bang_free, the distributed ANN and the CPG.
+"""The four controllers of the paper: bang_bang, dann, ann and cpg.
 
-Every brain is driven the same way by sim.run_skill_episode: set_params(flat
-CMA-ES vector) once, reset() before each episode, then act(data, state) at
-every control update. act returns hinge targets in ctrl units ([-pi/2, pi/2]).
+Every brain is driven the same way by sim.run_episode: set_params(flat CMA-ES
+vector) once, reset() before each episode, then act(data, state) at every
+control update. act returns hinge targets in ctrl units ([-pi/2, pi/2]). n is
+the number of hinges.
 
-  bang_bang       open loop: every hinge switches instantly between -90 and
-                  +90 deg. One frequency (4 genes, shared by every hinge), then
-                  per hinge a duty cycle (4 genes) and a phase (1 gene), so
-                  relative phases stay fixed once found. 4 + 5 n params.
-  bang_bang_free  bang_bang with the shared frequency removed: each hinge has
-                  its own frequency genes, 9 n params (per hinge: frequency x4,
-                  duty x4, phase). From x0 = 0.5 every hinge starts at the same
-                  frequency; phases drift only if CMA-ES moves them apart.
-                  But each candidate samples every hinge's frequency genes
-                  independently, so candidates start out of step.
-  bang_bang_drift control for bang_bang_free's harder search: the shared
-                  frequency plus per-hinge offsets scaled by 0.1, 4 + 9 n
-                  params (more than bang_bang_free). Candidates start nearly
-                  in step, and CMA-ES can still move hinges apart.
-  dann            distributed ANN (dann_pos_hinge_h16 of the zoo benchmark):
-                  one 42-16-1 MLP (705 params) shared by every hinge; inputs are
-                  the hinge's own velocity and angle, its nearest hinges slotted
-                  by direction, the core orientation, a sine clock and the
-                  hinge's rest position.
-  cpg             open loop: the zoo benchmark's revolve_cpg (kgd's fully
-                  connected RevolveCPG): one (x, y) oscillator pair per hinge,
-                  dS/dt = A S with A antisymmetric, clipped to [-1, 1]; the x
-                  half times pi/2 is the targets. n + n(n-1)/2 params.
+  bang_bang  open loop: every hinge switches instantly between -90 and +90 deg.
+             One frequency (4 genes, shared by every hinge), then per hinge a
+             duty cycle (4 genes) and a phase (1 gene). 4 + 5 n params.
+  dann       distributed ANN (dann_pos_hinge_h16 of the zoo benchmark): one
+             42-16-1 MLP (705 params) shared by every hinge; inputs are the
+             hinge's own velocity and angle, its nearest hinges slotted by
+             direction, the core orientation, a sine clock and the hinge's rest
+             position.
+  ann        the zoo benchmark's ann: one closed-loop MLP on the core
+             orientation (imaginary quaternion parts) and the hinge angles, two
+             ELU layers of 32, tanh output. 1184 + 65 n params.
+  cpg        open loop: the zoo benchmark's revolve_cpg (kgd's fully connected
+             RevolveCPG): one (x, y) oscillator pair per hinge, dS/dt = A S with
+             A antisymmetric, clipped to [-1, 1]; the x half times pi/2 is the
+             targets. n + n(n-1)/2 params.
 
 The square-wave rhythm is the zoo benchmark's square_wave.py engine (phase
 integrated per update, "hold" after the timeline ends) restricted to what
@@ -37,7 +30,6 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -47,12 +39,13 @@ import numpy as np
 from ariel.body_phenotypes.robogen_lite.config import ModuleFaces, ModuleType
 from ariel.simulation.controllers.utils.data_get import get_state_from_data
 
-BRAIN_KINDS: tuple[str, ...] = ("bang_bang", "bang_bang_free", "bang_bang_drift", "dann", "ann", "cpg")
-# CMA-ES mean (the profile starts from a fixed point): the square-wave genes
-# are centred for x0 = 0.5, the DANN's MLP for 0.
-BRAIN_X0: dict[str, float] = {"bang_bang": 0.5, "bang_bang_free": 0.5, "bang_bang_drift": 0.5, "cpg": 0.5}
+from config import BRAIN_KINDS, PROTOCOL
 
-SETTLE_DURATION = 3.0  # s before the controller starts; brains see t - SETTLE_DURATION
+# CMA-ES mean (CMA-ES starts from a fixed point): the square-wave genes are
+# centred for x0 = 0.5, as are the CPG weights (the zoo setting); the MLPs start at 0.
+BRAIN_X0: dict[str, float] = {"bang_bang": 0.5, "cpg": 0.5}
+
+SETTLE_DURATION = PROTOCOL.settle_s  # brains see t - SETTLE_DURATION
 HALF_PI = math.pi / 2
 
 
@@ -69,7 +62,6 @@ SQUARE_WOBBLE_RATE = 1.0                # Hz, both wobbles
 SQUARE_WOBBLE_BIAS = 3.0                # wobble amp = max * sigmoid(g - bias): near off at x0
 SQUARE_MAX_ANGLE = 90.0                 # deg
 SQUARE_PHASE_SCALE = 0.1                # phase_offset = 0.1 g mod 1 (cycles)
-DRIFT_SCALE = 0.1                       # bang_bang_drift: per-hinge frequency offset per gene unit
 
 
 @dataclass
@@ -158,38 +150,6 @@ class BangBangBrain(_BangBangBase):
                 np.mod(SQUARE_PHASE_SCALE * h[4], 1.0))
 
 
-class BangBangFreeBrain(_BangBangBase):
-    """9 genes per hinge (frequency x4, duty x4, phase): no shared frequency."""
-
-    @property
-    def num_params(self) -> int:
-        return 9 * self.n
-
-    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, ModulatedValue, np.ndarray]:
-        h = g.reshape(self.n, 9).T
-        return (_square_rhythm(h[0:4], SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP),
-                _square_rhythm(h[4:8], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
-                np.mod(SQUARE_PHASE_SCALE * h[8], 1.0))
-
-
-class BangBangDriftBrain(_BangBangBase):
-    """A shared frequency (4 genes) plus, per hinge, 4 frequency-offset genes
-    scaled by DRIFT_SCALE, then duty x4 and phase: 4 + 9 n params. Offsets are
-    centred on x0 = 0.5, so candidates start nearly in step (a tenth of
-    bang_bang_free's frequency spread) and CMA-ES can still move hinges apart."""
-
-    @property
-    def num_params(self) -> int:
-        return 4 + 9 * self.n
-
-    def _decode(self, g: np.ndarray) -> tuple[ModulatedValue, ModulatedValue, np.ndarray]:
-        h = g[4:].reshape(self.n, 9).T
-        freq_genes = g[:4, None] + DRIFT_SCALE * (h[0:4] - BRAIN_X0["bang_bang_drift"])
-        return (_square_rhythm(freq_genes, SQUARE_F_RANGE, SQUARE_F_WOBBLE_AMP),
-                _square_rhythm(h[4:8], SQUARE_DUTY_RANGE, SQUARE_DUTY_WOBBLE_AMP),
-                np.mod(SQUARE_PHASE_SCALE * h[8], 1.0))
-
-
 # ── Distributed ANN (zoo_benchmark/brains.py ZooDistributedAnnV2) ────────────
 
 # One-hot index per module type, as ariel's MorphologyAdapter (0 = empty, 4 unused).
@@ -267,31 +227,14 @@ def _hinge_neighbour_candidates(topology: dict[str, Any], positions: dict[str, n
     return out
 
 
-def hinge_neighbour_ties(topology: dict[str, Any], positions: dict[str, np.ndarray]) -> list[tuple[str, int, list[str]]]:
-    """Per hinge and direction slot, the hinges tied for nearest, as
-    (hinge, slot, sorted candidates) for every slot with more than one."""
-    return [(h, k, c) for h, cands in _hinge_neighbour_candidates(topology, positions).items()
-            for k, c in enumerate(cands) if len(c) > 1]
-
-
-def _hinge_neighbour_slots(topology: dict[str, Any], positions: dict[str, np.ndarray],
-                           tie_choice: Optional[Sequence[int]] = None) -> dict[str, list]:
+def _hinge_neighbour_slots(topology: dict[str, Any], positions: dict[str, np.ndarray]) -> dict[str, list]:
     """Per hinge, its nearest hinges in the body tree (paths through bricks and
     the core only), slotted by the dominant axis of the direction to them
     (+x, -x, +y, -y, +z, -z in the core frame).
 
-    Exact ties go to the first name. tie_choice instead picks, for each entry
-    of hinge_neighbour_ties in order, the index of its candidate: DANN runs
-    trained before the ties were made deterministic resolved them by their
-    job's hash seed, and replaying them means finding that resolution."""
+    Exact ties go to the first name."""
     cands = _hinge_neighbour_candidates(topology, positions)
-    pick = {}
-    if tie_choice is not None:
-        ties = hinge_neighbour_ties(topology, positions)
-        if len(tie_choice) != len(ties):
-            raise ValueError(f"tie_choice has {len(tie_choice)} entries, the body has {len(ties)} ties")
-        pick = {(h, k): c[i] for (h, k, c), i in zip(ties, tie_choice)}
-    return {h: [pick.get((h, k), c[0] if c else None) for k, c in enumerate(cs)] for h, cs in cands.items()}
+    return {h: [c[0] if c else None for c in cs] for h, cs in cands.items()}
 
 
 class DannBrain:
@@ -302,8 +245,7 @@ class DannBrain:
     velocities come from the MjData the brain was built with, so act() must be
     called on that data. The clock restarts on set_params and reset."""
 
-    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData,
-                 tie_choice: Optional[Sequence[int]] = None, hidden: int = DANN_HIDDEN) -> None:
+    def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, hidden: int = DANN_HIDDEN) -> None:
         topology = model_topology(model)
         self._data = data
         n = model.nu
@@ -325,8 +267,7 @@ class DannBrain:
             pos[module] = rot.T @ (data.xanchor[joint] - data.xpos[core])
         self._qpos, self._dof = np.array(qpos), np.array(dof)
 
-        self.neighbour_ties = hinge_neighbour_ties(topology, pos)
-        slots = _hinge_neighbour_slots(topology, pos, tie_choice)
+        slots = _hinge_neighbour_slots(topology, pos)
         names = list(topology["type"])
         row = {m: i for i, m in enumerate(names)}
         empty = len(names)
@@ -378,55 +319,44 @@ class DannBrain:
 
 
 class AnnBrain:
-    """The old sweep's closed-loop MLP on proprioceptive state: two ELU hidden
-    layers of 32, tanh output scaled to +-90 deg. A diagnostic for the head-mass
-    experiment (the one controller rowing was found with), not a paper brain.
-    torch is imported here so the other brains do not need it."""
+    """The zoo benchmark's ann: a closed-loop MLP on get_state_from_data (the
+    core quaternion's imaginary parts, then the hinge angles), two ELU hidden
+    layers of 32 and a tanh output scaled to +-90 deg. The parameter vector is
+    torch's nn.Linear layout, (W1, b1, W2, b2, W3, b3) with W as (out, in),
+    so zoo and v2 weights load unchanged; computed in float32 like torch
+    (outputs agree to float32 rounding, ~1e-6 rad)."""
 
     HIDDEN = 32
 
     def __init__(self, input_dim: int, output_dim: int) -> None:
-        import torch  # noqa: PLC0415
-        from torch import nn  # noqa: PLC0415
-
-        torch.set_num_threads(1)
-        self._torch = torch
-        self._fc1 = nn.Linear(input_dim, self.HIDDEN)
-        self._fc2 = nn.Linear(self.HIDDEN, self.HIDDEN)
-        self._out = nn.Linear(self.HIDDEN, output_dim)
-        self._params = [p for layer in (self._fc1, self._fc2, self._out) for p in layer.parameters()]
-        for p in self._params:
-            p.requires_grad = False
-        self.num_params = sum(p.numel() for p in self._params)
+        h = self.HIDDEN
+        self._shapes = [(h, input_dim), (h,), (h, h), (h,), (output_dim, h), (output_dim,)]
+        self.num_params = sum(int(np.prod(s)) for s in self._shapes)
+        self.set_params(np.zeros(self.num_params))
 
     def reset(self) -> None:
         pass
 
     def set_params(self, vec: np.ndarray) -> None:
-        vec = np.asarray(vec, dtype=np.float32)
-        if len(vec) != self.num_params:
+        g = np.asarray(vec, dtype=np.float32)
+        if len(g) != self.num_params:
             raise IndexError("Parameter vector length mismatch")
-        address = 0
-        with self._torch.no_grad():
-            for p in self._params:
-                d = p.data.view(-1)
-                d[:] = self._torch.as_tensor(vec[address : address + len(d)])
-                address += len(d)
+        out, i = [], 0
+        for shape in self._shapes:
+            size = int(np.prod(shape))
+            out.append(g[i:i + size].reshape(shape))
+            i += size
+        self._w1, self._b1, self._w2, self._b2, self._w3, self._b3 = out
+
+    @staticmethod
+    def _elu(x: np.ndarray) -> np.ndarray:
+        return np.where(x > 0, x, np.expm1(np.minimum(x, 0))).astype(np.float32)
 
     def act(self, data: Any, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
-        torch = self._torch
-        with torch.inference_mode():
-            x = torch.as_tensor(state, dtype=torch.float32)
-            x = torch.nn.functional.elu(self._fc1(x))
-            x = torch.nn.functional.elu(self._fc2(x))
-            return (torch.tanh(self._out(x)) * (torch.pi / 2)).numpy()
-
-
-# CPG time scale and RK4 substeps per control update. (1.0, 1) is the zoo
-# benchmark's revolve_cpg exactly; see "CPG" in "Status and notes.md" for the
-# (2 pi, 5) alternative, which starts near a stride frequency.
-CPG_TIME_SCALE = 1.0
-CPG_SUBSTEPS = 1
+        x = np.asarray(state, dtype=np.float32)
+        x = self._elu(self._w1 @ x + self._b1)
+        x = self._elu(self._w2 @ x + self._b2)
+        return np.tanh(self._w3 @ x + self._b3) * np.float32(HALF_PI)
 
 
 class CpgBrain:
@@ -436,17 +366,15 @@ class CpgBrain:
 
     One (x, y) oscillator pair per hinge. Weights (n + n(n-1)/2): n
     self-couplings x_i<->y_i, then the couplings x_i<->x_j for i < j, placed
-    antisymmetrically in a 2n x 2n matrix A (times time_scale). The state
-    follows dS/dt = A S, advanced by substeps RK4 steps over the time elapsed
-    since the previous call, clipped to [-1, 1] after each; the x half times
+    antisymmetrically in a 2n x 2n matrix A. The state follows dS/dt = A S,
+    advanced by one RK4 step over the time elapsed since the previous call,
+    clipped to [-1, 1]; the x half times
     pi/2 is the targets. Open loop: state input is ignored. set_params and
     reset restore the initial state, with time measured from the end of
     settling."""
 
-    def __init__(self, n_hinges: int, time_scale: float = CPG_TIME_SCALE, substeps: int = CPG_SUBSTEPS) -> None:
+    def __init__(self, n_hinges: int) -> None:
         self.n = n_hinges
-        self.time_scale = time_scale
-        self.substeps = substeps
         self.num_params = n_hinges + n_hinges * (n_hinges - 1) // 2
         self._pairs = np.array(np.triu_indices(n_hinges, k=1)).T
         self._initial_state = np.hstack([np.ones(n_hinges), -np.ones(n_hinges)]) * 0.5 * math.sqrt(2)
@@ -464,7 +392,7 @@ class CpgBrain:
         i, j = self._pairs.T
         m[i, j] = w[n:]
         m[j, i] = -w[n:]
-        self._a = m * self.time_scale
+        self._a = m
         self.reset()
 
     def reset(self) -> None:
@@ -472,15 +400,13 @@ class CpgBrain:
         self._time = 0.0
 
     def output_at(self, t: float) -> np.ndarray:
-        dt = (t - self._time) / self.substeps
+        dt = t - self._time
         a, s = self._a, self._state
-        for _ in range(self.substeps):
-            a1 = a @ s
-            a2 = a @ (s + dt / 2 * a1)
-            a3 = a @ (s + dt / 2 * a2)
-            a4 = a @ (s + dt * a3)
-            s = np.clip(s + dt / 6 * (a1 + 2 * (a2 + a3) + a4), -1, 1)
-        self._state = s
+        a1 = a @ s
+        a2 = a @ (s + dt / 2 * a1)
+        a3 = a @ (s + dt / 2 * a2)
+        a4 = a @ (s + dt * a3)
+        self._state = s = np.clip(s + dt / 6 * (a1 + 2 * (a2 + a3) + a4), -1, 1)
         self._time = t
         return s[: self.n] * HALF_PI
 
@@ -488,24 +414,18 @@ class CpgBrain:
         return self.output_at(float(data.time) - SETTLE_DURATION)
 
 
-Brain = "BangBangBrain | BangBangFreeBrain | BangBangDriftBrain | DannBrain | AnnBrain | CpgBrain"
+Brain = "BangBangBrain | DannBrain | AnnBrain | CpgBrain"
 
 
 def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
                          params: Optional[np.ndarray] = None,
-                         tie_choice: Optional[Sequence[int]] = None,
-                         duration: float = 15.0) -> Brain:
+                         duration: float = PROTOCOL.episode_s) -> Brain:
     """A brain sized for this body (one output per actuator). duration is the
-    episode length (the bang-bang modulations' timeline); tie_choice: see
-    _hinge_neighbour_slots (dann only)."""
+    episode length (the bang-bang modulations' timeline)."""
     if kind == "bang_bang":
         brain = BangBangBrain(model.nu, duration)
-    elif kind == "bang_bang_free":
-        brain = BangBangFreeBrain(model.nu, duration)
-    elif kind == "bang_bang_drift":
-        brain = BangBangDriftBrain(model.nu, duration)
     elif kind == "dann":
-        brain = DannBrain(model, data, tie_choice=tie_choice)
+        brain = DannBrain(model, data)
     elif kind == "ann":
         brain = AnnBrain(len(get_state_from_data(data)), model.nu)
     elif kind == "cpg":

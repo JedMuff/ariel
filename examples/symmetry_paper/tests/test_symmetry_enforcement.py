@@ -1,12 +1,12 @@
 """tree_symmetric generation, mutation and crossover always give bilaterally
-symmetric bodies (sim.bilateral_symmetry_score == 1, or no off-midline modules).
+symmetric bodies (genomes.bilateral_symmetry == 1, or no off-midline modules).
 """
 
 import random
 
 import numpy as np
 import pytest
-from sim import bilateral_symmetry_score, mutate_morph_symmetric
+from genomes import bilateral_symmetry, genome_ops
 
 from ariel.ec.genotypes.tree.operators import (
     crossover_subtree_symmetric,
@@ -38,7 +38,7 @@ def has_off_midline_modules(genome_dict: dict) -> bool:
 
 def assert_symmetric(genome_dict: dict) -> None:
     validate_genome_dict(genome_dict)
-    score = bilateral_symmetry_score(genome_dict)
+    score = bilateral_symmetry(genome_dict)
     assert score == 1.0 or (score == 0.0 and not has_off_midline_modules(genome_dict))
 
 
@@ -53,12 +53,12 @@ def test_random_generation_is_symmetric() -> None:
 
 
 def test_mutation_keeps_symmetry() -> None:
-    rng = np.random.default_rng(0)
+    rng, ops = np.random.default_rng(0), genome_ops("tree_symmetric")
     for _ in range(N_TRIALS // 2):
-        g = random_tree_symmetric(MAX_MODULES, AXIS)
+        g = random_tree_symmetric(MAX_MODULES, AXIS).to_dict()
         for _ in range(5):
-            g = mutate_morph_symmetric(g, rng, MAX_MODULES, AXIS)
-            assert_symmetric(g.to_dict())
+            g = ops.mutate(g, rng)
+            assert_symmetric(g)
 
 
 def test_crossover_keeps_symmetry() -> None:

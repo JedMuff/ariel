@@ -1,94 +1,49 @@
 """
-Simulation, skill training and body operators for the symmetry paper.
+Simulation and controller learning: zoo bodies on a flat floor, the forward
+episode, and the inner CMA-ES (config.py has the settings).
 
-Pruned from the symmetry-pressure investigation's shared.py down to what the
-paper runs: forward locomotion under the dsocial_zoo profile (zoo module
-sizes and masses, zoo hinge or a chosen HingeActuator, 15 s episodes at 20 Hz
-control, inner CMA-ES from a fixed x0 with sigma 0.5 and popsize 20), the
-tree / tree_symmetric / tree_tied body operators, and the brains of
-brains.py. What is left is unchanged, so runs reproduce the investigation's
-runs exactly for the same seed.
+Bodies are built from the local module classes with kgd's zoo sizes, masses and
+hinge servo (the zoo benchmark's zoo_modules.py). The module classes read their
+sizes and masses from module-level constants, which this module sets to the zoo
+values on import, for the whole process and its forked workers, so the genome
+operators' collision checks see the same geometry as the simulator.
+
+The episode is the v2 paper's (legacy/sim.py) with the displacement fitness
+only: the same body and weights give the same displacement. CMA-ES draws from
+its own generator per training (v2 used numpy's global one), so seeded
+trainings do not reproduce v2's.
 """
 
 from __future__ import annotations
 
-import contextlib
-import copy
-import functools
 import hashlib
 import json
 import math
 import os
-import random
-import threading
 import time
-from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, replace
-from typing import Any, Callable, Literal, Optional
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 import cma
 import mujoco
 import numpy as np
 
-from ariel.body_phenotypes.robogen_lite.config import ALLOWED_ROTATIONS, IDX_OF_CORE, ModuleType
 from ariel.body_phenotypes.robogen_lite.constructor import construct_mjspec_from_graph
-from ariel.ec import Individual
-from ariel.ec.genotypes.tree.collision import prune_colliding_subtrees, prune_colliding_subtrees_symmetric
-from ariel.ec.genotypes.tree.operators import (
-    _prune_invalid_edges,
-    crossover_subtree,
-    crossover_subtree_symmetric,
-    mutate_hoist,
-    mutate_replace_node,
-    mutate_shrink,
-    mutate_subtree_replacement,
-    random_tree,
-    random_tree_symmetric,
-    validate_tree_depth,
-)
-from ariel.ec.genotypes.tree.symmetry import MirrorAxis, mirror_face, symmetrize_genome
 from ariel.ec.genotypes.tree.tree_genome import TreeGenome
-from ariel.ec.genotypes.tree.tying import crossover_tied, mutate_morph_tied, random_tree_tied
-from ariel.ec.genotypes.tree.validation import validate_genome_dict
-from ariel.simulation.controllers.utils.data_get import get_state_from_data as get_robot_state
+from ariel.simulation.controllers.utils.data_get import get_state_from_data
 from ariel.simulation.environments import SimpleFlatWorld
 
-from brains import BRAIN_X0, SETTLE_DURATION, make_brain_for_model
+from brains import BRAIN_X0, make_brain_for_model
+from config import PROTOCOL, Protocol, cma_generations
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-MIN_HINGES = 4
 SPAWN_POSITION = (0.0, 0.0, 0.1)
+# Every body spawns unrotated, so the core camera's forward direction (world -Y)
+# is the same for every body: the reward axis.
+FORWARD_AXIS = np.array([0.0, -1.0])
 
-# Thread-safe counter for assigning individual IDs (Individual.id is a DB
-# primary key and stays None when not persisted to SQLite).
-_ind_id_lock = threading.Lock()
-_ind_id_counter = 0
+# ── Zoo modules ───────────────────────────────────────────────────────────────
 
-
-def _next_ind_id() -> int:
-    global _ind_id_counter  # noqa: PLW0603
-    with _ind_id_lock:
-        _ind_id_counter += 1
-        return _ind_id_counter
-
-
-# ── Body construction ─────────────────────────────────────────────────────────
-
-
-def genome_to_spec(genome_dict: dict) -> Optional[mujoco.MjSpec]:
-    try:
-        graph = TreeGenome.from_dict(genome_dict).to_networkx()
-        if graph.number_of_nodes() == 0:
-            return None
-        return construct_mjspec_from_graph(graph).spec
-    except Exception:
-        return None
-
-
-# kgd's zoo modules (zoo benchmark zoo_modules.py). Only the values differ:
-# the local module classes, and so their face layout, are kept, and every
-# site position scales with the dimensions.
 ZOO_HINGE_KP          = 1.3605113362038874
 ZOO_HINGE_KV          = 0.3555497840137177
 ZOO_HINGE_ARMATURE    = 0.08117047736037042
@@ -103,177 +58,58 @@ ZOO_STATOR_DIMENSIONS = (0.026, 0.022, 0.026)
 ZOO_ROTOR_DIMENSIONS  = (0.026, 0.0155, 0.026)
 
 
-@dataclass(frozen=True)
-class HingeActuator:
-    """Hinge servo applied to zoo bodies (apply_hinge_actuator): a position
-    actuator with gain kp and damping kv, the joint's armature, and whether
-    the joint has a hard +-90 deg limit (the ctrl range is +-90 deg either way)."""
-
-    kp: float
-    kv: float
-    armature: float
-    limited: bool
-
-    @property
-    def label(self) -> str:
-        return f"kp{self.kp:g}_kv{self.kv:g}_arm{self.armature:g}_lim{int(self.limited)}"
-
-
-ZOO_HINGE = HingeActuator(ZOO_HINGE_KP, ZOO_HINGE_KV, ZOO_HINGE_ARMATURE, True)
-LOCAL_HINGE = HingeActuator(1.0, 1.0, 0.0, False)  # hinge.py's servo: kp = kv = 1, no armature, no joint limit
-
-# The module classes' own constants (the old simulator), stated here because
-# use_zoo_modules_globally overwrites them in the class modules.
-LOCAL_CORE_MASS         = 1.0
-LOCAL_STATOR_MASS       = 0.020
-LOCAL_ROTOR_MASS        = 0.040
-LOCAL_BRICK_MASS        = 0.055
-LOCAL_CORE_DIMENSIONS   = (0.10, 0.10, 0.10)  # half-extents (m)
-LOCAL_BRICK_DIMENSIONS  = (0.05, 0.05, 0.05)
-LOCAL_STATOR_DIMENSIONS = (0.025, 0.03, 0.025)
-LOCAL_ROTOR_DIMENSIONS  = (0.025, 0.02, 0.025)
-
-MODULE_SETS = ("zoo", "local")
-
-
-@dataclass(frozen=True)
-class BodyPhysics:
-    """What a body is built from: the module set (sizes, stator / rotor / brick
-    masses and the default core mass), an optional core mass replacing the
-    set's, and the hinge. The default is the paper's zoo body."""
-
-    module_set: Literal["zoo", "local"] = "zoo"
-    core_mass: Optional[float] = None
-    hinge: HingeActuator = ZOO_HINGE
-
-_ZOO_LOCK = threading.RLock()
-
-
-def _physics_overrides(physics: BodyPhysics) -> list[tuple[Any, str, Any]]:
-    """(module, attribute, value) for the module-level constants the local
-    module classes read when they are instantiated."""
+def use_zoo_modules() -> None:
+    """Set the module classes' size and mass constants to the zoo values (and
+    drop the cached collision geometry compiled from the old ones)."""
+    from ariel.body_phenotypes.robogen_lite.collision_utils import module_template  # noqa: PLC0415
     from ariel.body_phenotypes.robogen_lite.modules import brick, core, hinge  # noqa: PLC0415
 
-    if physics.module_set == "zoo":
-        core_mass, core_dims = ZOO_CORE_MASS, ZOO_CORE_DIMENSIONS
-        stator_mass, stator_dims = ZOO_STATOR_MASS, ZOO_STATOR_DIMENSIONS
-        rotor_mass, rotor_dims = ZOO_ROTOR_MASS, ZOO_ROTOR_DIMENSIONS
-        brick_mass, brick_dims = ZOO_BRICK_MASS, ZOO_BRICK_DIMENSIONS
-    elif physics.module_set == "local":
-        core_mass, core_dims = LOCAL_CORE_MASS, LOCAL_CORE_DIMENSIONS
-        stator_mass, stator_dims = LOCAL_STATOR_MASS, LOCAL_STATOR_DIMENSIONS
-        rotor_mass, rotor_dims = LOCAL_ROTOR_MASS, LOCAL_ROTOR_DIMENSIONS
-        brick_mass, brick_dims = LOCAL_BRICK_MASS, LOCAL_BRICK_DIMENSIONS
-    else:
-        raise ValueError(f"Unknown module set: {physics.module_set!r} (expected one of {MODULE_SETS})")
-    if physics.core_mass is not None:
-        core_mass = physics.core_mass
-    brick_config = brick.ariel_modules_config.model_copy(
-        update={"BRICK_MASS": brick_mass, "BRICK_DIMENSIONS": brick_dims},
+    core.CORE_MASS, core.CORE_DIMENSIONS = ZOO_CORE_MASS, ZOO_CORE_DIMENSIONS
+    hinge.STATOR_MASS, hinge.ROTOR_MASS = ZOO_STATOR_MASS, ZOO_ROTOR_MASS
+    hinge.STATOR_DIMENSIONS, hinge.ROTOR_DIMENSIONS = ZOO_STATOR_DIMENSIONS, ZOO_ROTOR_DIMENSIONS
+    brick.ariel_modules_config = brick.ariel_modules_config.model_copy(
+        update={"BRICK_MASS": ZOO_BRICK_MASS, "BRICK_DIMENSIONS": ZOO_BRICK_DIMENSIONS},
     )
-    return [
-        (core, "CORE_MASS", core_mass),
-        (core, "CORE_DIMENSIONS", core_dims),
-        (hinge, "STATOR_MASS", stator_mass),
-        (hinge, "ROTOR_MASS", rotor_mass),
-        (hinge, "STATOR_DIMENSIONS", stator_dims),
-        (hinge, "ROTOR_DIMENSIONS", rotor_dims),
-        (brick, "ariel_modules_config", brick_config),
-    ]
+    module_template.cache_clear()
 
 
-def _zoo_module_overrides() -> list[tuple[Any, str, Any]]:
-    return _physics_overrides(BodyPhysics())
+use_zoo_modules()
 
 
-def _set_module_constants(values: list[tuple[Any, str, Any]]) -> None:
-    from ariel.body_phenotypes.robogen_lite.collision_utils import module_template  # noqa: PLC0415
-
-    for mod, name, value in values:
-        setattr(mod, name, value)
-    module_template.cache_clear()  # collision geometry is compiled from the module classes and cached
-
-
-@contextlib.contextmanager
-def zoo_module_constants():
-    """Build modules with the zoo sizes and masses inside this block; the
-    previous values are restored on exit."""
-    with _ZOO_LOCK:
-        overrides = _zoo_module_overrides()
-        saved = [(mod, name, getattr(mod, name)) for mod, name, _ in overrides]
-        _set_module_constants(overrides)
-        try:
-            yield
-        finally:
-            _set_module_constants(saved)
-
-
-def use_zoo_modules_globally() -> None:
-    """Zoo sizes and masses for the rest of this process (and forked workers),
-    so the genome operators' collision checks use the zoo geometry too."""
-    _set_module_constants(_zoo_module_overrides())
-
-
-def use_physics_globally(physics: BodyPhysics) -> None:
-    """This physics' sizes and masses for the rest of this process (and forked
-    workers), so the genome operators' collision checks use its geometry too."""
-    _set_module_constants(_physics_overrides(physics))
-
-
-def apply_hinge_actuator(spec: mujoco.MjSpec, actuator: HingeActuator = ZOO_HINGE) -> mujoco.MjSpec:
-    """Give a robot spec a hinge actuator (kp, kv, armature, joint limit), in
-    place. Hard-coded in hinge.py, so set after construction."""
+def apply_zoo_hinge(spec: mujoco.MjSpec) -> mujoco.MjSpec:
+    """The zoo hinge servo (gain, damping, armature, hard +-90 deg limit), in
+    place: hard-coded in hinge.py, so set after construction."""
     for a in spec.actuators:
-        a.gainprm[0] = actuator.kp
-        a.biasprm[1] = -actuator.kp
-        a.biasprm[2] = -actuator.kv
+        a.gainprm[0] = ZOO_HINGE_KP
+        a.biasprm[1] = -ZOO_HINGE_KP
+        a.biasprm[2] = -ZOO_HINGE_KV
     scale = 180.0 / math.pi if spec.compiler.degree else 1.0
     for j in spec.joints:
         if j.type == mujoco.mjtJoint.mjJNT_HINGE:
-            j.armature = actuator.armature
-            if actuator.limited:
-                j.range = [r * scale for r in ZOO_HINGE_RANGE]
-                j.limited = mujoco.mjtLimited.mjLIMITED_TRUE
-            else:
-                j.limited = mujoco.mjtLimited.mjLIMITED_FALSE
+            j.armature = ZOO_HINGE_ARMATURE
+            j.range = [r * scale for r in ZOO_HINGE_RANGE]
+            j.limited = mujoco.mjtLimited.mjLIMITED_TRUE
     return spec
 
 
-def zoo_spec(genome_dict: dict, actuator: HingeActuator = ZOO_HINGE) -> Optional[mujoco.MjSpec]:
-    """The body of a tree genome, built with zoo modules and this hinge actuator."""
-    with zoo_module_constants():
-        spec = genome_to_spec(genome_dict)
-    return apply_hinge_actuator(spec, actuator) if spec is not None else None
+def body_spec(body: dict) -> Optional[mujoco.MjSpec]:
+    """The MjSpec of a body (tree genome dict: nodes and edges; other keys are
+    ignored), or None if it cannot be built."""
+    try:
+        graph = TreeGenome.from_dict(body).to_networkx()
+        if graph.number_of_nodes() == 0:
+            return None
+        spec = construct_mjspec_from_graph(graph).spec
+    except Exception:
+        return None
+    return apply_zoo_hinge(spec)
 
 
-def zoo_spec_fn(actuator: HingeActuator = ZOO_HINGE) -> Callable[[dict], Optional[mujoco.MjSpec]]:
-    """A picklable genome -> spec function for this hinge actuator."""
-    return functools.partial(zoo_spec, actuator=actuator)
-
-
-def physics_spec(genome_dict: dict, physics: BodyPhysics = BodyPhysics()) -> Optional[mujoco.MjSpec]:  # noqa: B008
-    """The body of a tree genome built with this physics."""
-    overrides = _physics_overrides(physics)
-    with _ZOO_LOCK:
-        saved = [(mod, name, getattr(mod, name)) for mod, name, _ in overrides]
-        _set_module_constants(overrides)
-        try:
-            spec = genome_to_spec(genome_dict)
-        finally:
-            _set_module_constants(saved)
-    return apply_hinge_actuator(spec, physics.hinge) if spec is not None else None
-
-
-def physics_spec_fn(physics: BodyPhysics) -> Callable[[dict], Optional[mujoco.MjSpec]]:
-    """A picklable genome -> spec function for this physics."""
-    return functools.partial(physics_spec, physics=physics)
-
-
-def build_world(genome_dict: dict, to_spec_fn=zoo_spec) -> tuple[mujoco.MjModel, mujoco.MjData]:
+def build_world(body: dict) -> tuple[mujoco.MjModel, mujoco.MjData]:
     """The body on a flat floor."""
-    spec = to_spec_fn(genome_dict)
+    spec = body_spec(body)
     if spec is None:
-        raise ValueError("Could not decode morphology")
+        raise ValueError("Could not build the body")
     world = SimpleFlatWorld()
     try:
         world.spawn(spec, position=SPAWN_POSITION, correct_collision_with_floor=True)
@@ -281,535 +117,165 @@ def build_world(genome_dict: dict, to_spec_fn=zoo_spec) -> tuple[mujoco.MjModel,
         world = SimpleFlatWorld()
         world.spawn(spec, position=SPAWN_POSITION, correct_collision_with_floor=False)
     model = world.spec.compile()
-    data  = mujoco.MjData(model)
-    return model, data
+    return model, mujoco.MjData(model)
 
 
-def genome_hash(genome_dict: dict) -> str:
-    return hashlib.sha1(json.dumps(genome_dict, sort_keys=True).encode()).hexdigest()
+def genome_hash(body: dict) -> str:
+    return hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
 def robot_bodies(model: mujoco.MjModel) -> list[int]:
     """Robot bodies that own at least one geom (core, stators, rotors, bricks)."""
-    has_geom = set(int(b) for b in model.geom_bodyid)
-    return [
-        b for b in range(model.nbody)
-        if model.body(b).name.startswith("robot1_") and b in has_geom
-    ]
-
-
-# ── Morphological metrics ─────────────────────────────────────────────────────
-
-
-def bilateral_symmetry_score(genome_dict: dict, axis: str = "y_zero") -> float:
-    """Bilateral symmetry of a TreeGenome about ``axis`` ("y_zero" or "x_equals_y").
-
-    Modules are identified by their path of faces from the root. Two modules
-    are mirror partners if one's root-path is the other's with faces mirrored
-    per ``axis`` (the rule symmetrize_genome enforces). Returns the fraction
-    of off-midline modules that have a same-type mirror partner, in [0, 1];
-    0.0 on failure.
-    """
-    try:
-        mirror_axis = MirrorAxis.Y_ZERO if axis == "y_zero" else MirrorAxis.X_EQUALS_Y
-
-        graph = TreeGenome.from_dict(genome_dict).to_networkx()
-        if graph.number_of_nodes() == 0:
-            return 0.0
-
-        roots = [n for n in graph.nodes() if graph.in_degree(n) == 0]
-        if not roots:
-            return 0.0
-        root = roots[0]
-
-        # BFS to assign each node its path of faces from the root.
-        paths: dict[Any, tuple[str, ...]] = {root: ()}
-        queue = [root]
-        while queue:
-            node = queue.pop(0)
-            for child in graph.successors(node):
-                if child in paths:
-                    continue
-                face = (graph.get_edge_data(node, child) or {}).get("face", "FRONT")
-                paths[child] = (*paths[node], face)
-                queue.append(child)
-
-        def mirror_path(path: tuple[str, ...]) -> tuple[str, ...]:
-            return tuple(mirror_face(face, mirror_axis, is_outer=(i == 0)) for i, face in enumerate(path))
-
-        by_path: dict[tuple[str, ...], str] = {p: graph.nodes[n].get("type", "UNKNOWN") for n, p in paths.items()}
-
-        num_symmetrical = 0
-        num_off_midline = 0
-        seen: set[tuple[str, ...]] = set()
-        for path, t in by_path.items():
-            mpath = mirror_path(path)
-            if path == mpath or path in seen:
-                continue  # midline module, or already counted with its partner
-            seen.add(path)
-            seen.add(mpath)
-            num_off_midline += 1
-            if by_path.get(mpath) == t:
-                num_symmetrical += 1
-
-        return num_symmetrical / num_off_midline if num_off_midline > 0 else 0.0
-    except Exception:
-        return 0.0
-
-
-def joint_count(genome: TreeGenome) -> int:
-    """Count hinge joints by walking the genome graph — no MuJoCo compilation needed."""
-    return sum(1 for d in genome.nodes.values() if d.get("type") == "HINGE")
-
-
-# ── Body mutation + generation ────────────────────────────────────────────────
-
-
-def mutate_morph(genome: TreeGenome, rng: np.random.Generator, num_modules: int) -> TreeGenome:
-    new = copy.deepcopy(genome)
-    mutation_type = rng.choice(["point", "subtree", "shrink", "hoist"], p=[0.45, 0.35, 0.1, 0.1])
-
-    if mutation_type == "point":
-        mutate_replace_node(new)
-    elif mutation_type == "subtree":
-        mutate_subtree_replacement(new, max_modules=num_modules)
-    elif mutation_type == "shrink":
-        mutate_shrink(new)
-    else:
-        mutate_hoist(new)
-
-    if rng.random() < 0.25:
-        noncore = [nid for nid in new.nodes if nid != IDX_OF_CORE]
-        if noncore:
-            nid = random.choice(noncore)
-            mtype = ModuleType[new.nodes[nid]["type"]]
-            rots = [r.name for r in ALLOWED_ROTATIONS[mtype]]
-            if rots:
-                new.nodes[nid]["rotation"] = random.choice(rots)
-
-    _prune_invalid_edges(new)
-    # Point/rotation changes and grafted subtrees can make parts overlap;
-    # drop any subtree that now collides (FCL, real module geometry).
-    prune_colliding_subtrees(new)
-    with contextlib.suppress(ValueError):
-        validate_genome_dict(new.to_dict())
-    return new
-
-
-def mutate_morph_symmetric(
-    genome: TreeGenome, rng: np.random.Generator, num_modules: int, axis: MirrorAxis
-) -> TreeGenome:
-    """mutate_morph, then re-symmetrize about ``axis``. Mirroring can create new
-    overlaps (an arm hitting its own mirror image), so colliding subtrees are
-    pruned again, pairwise with their mirror images."""
-    mutated = mutate_morph(genome, rng, num_modules)
-    symmetric = symmetrize_genome(mutated, axis)
-    prune_colliding_subtrees_symmetric(symmetric, axis)
-    return symmetric
-
-
-def _morph_ops(
-    num_modules: int, symmetry_axis: Optional[MirrorAxis], tie_prob: Optional[float]
-) -> tuple[Callable[[], dict], Callable[[dict, dict], tuple[dict, dict]], Callable[[dict, np.random.Generator], dict]]:
-    """(random genome, crossover, mutate) on genome dicts for the body genome in use:
-    tree, tree_symmetric (symmetry_axis) or tree_tied (tie_prob, ariel...tree.tying)."""
-    if tie_prob is not None:
-        return (lambda: random_tree_tied(num_modules, tie_prob).to_dict(),
-                crossover_tied,
-                lambda d, rng: mutate_morph_tied(d, rng, num_modules, tie_prob))
-
-    def random_genome() -> dict:
-        if symmetry_axis is not None:
-            return random_tree_symmetric(num_modules, symmetry_axis).to_dict()
-        return random_tree(num_modules).to_dict()
-
-    def crossover(a: dict, b: dict) -> tuple[dict, dict]:
-        t1, t2 = TreeGenome.from_dict(a), TreeGenome.from_dict(b)
-        if symmetry_axis is not None:
-            c1, c2 = crossover_subtree_symmetric(t1, t2, symmetry_axis)
-        else:
-            c1, c2 = crossover_subtree(t1, t2)
-        return c1.to_dict(), c2.to_dict()
-
-    def mutate(d: dict, rng: np.random.Generator) -> dict:
-        t = TreeGenome.from_dict(d)
-        if symmetry_axis is not None:
-            return mutate_morph_symmetric(t, rng, num_modules, symmetry_axis).to_dict()
-        return mutate_morph(t, rng, num_modules).to_dict()
-
-    return random_genome, crossover, mutate
-
-
-def _morph_ok(genome_dict: dict, max_depth: int) -> bool:
-    genome = TreeGenome.from_dict(genome_dict)
-    return joint_count(genome) >= MIN_HINGES and validate_tree_depth(genome, max_depth)
-
-
-def create_individual(
-    num_modules: int, max_depth: int, symmetry_axis: Optional[MirrorAxis] = None,
-    tie_prob: Optional[float] = None,
-) -> Individual:
-    random_genome, _, _ = _morph_ops(num_modules, symmetry_axis, tie_prob)
-    while True:
-        genome = random_genome()
-        if _morph_ok(genome, max_depth):
-            break
-    ind = Individual()
-    ind.id = _next_ind_id()
-    ind.genotype = {"morph": genome}
-    ind.tags = {"ps": False, "valid": True, "best_brain": []}
-    return ind
-
-
-def make_offspring(
-    parents: list[Individual],
-    lam: int,
-    rng: np.random.Generator,
-    num_modules: int,
-    max_depth: int,
-    symmetry_axis: Optional[MirrorAxis] = None,
-    tie_prob: Optional[float] = None,
-) -> list[Individual]:
-    """Generate lam offspring via subtree crossover + mutation."""
-    _, crossover, mutate = _morph_ops(num_modules, symmetry_axis, tie_prob)
-    offspring: list[Individual] = []
-    while len(offspring) < lam:
-        use_sexual = len(parents) >= 2 and rng.random() < 0.6
-        if use_sexual:
-            p1, p2 = random.sample(parents, 2)
-            c1, c2 = crossover(p1.genotype["morph"], p2.genotype["morph"])
-            child_morph = c1 if rng.random() < 0.5 else c2
-            parent_ids = [p1.id, p2.id]
-        else:
-            p = random.choice(parents)
-            child_morph = p.genotype["morph"]
-            parent_ids = [p.id]
-
-        child_morph = mutate(child_morph, rng)
-
-        attempts = 0
-        valid = False
-        while attempts < 50:
-            if _morph_ok(child_morph, max_depth):
-                valid = True
-                break
-            child_morph = mutate(child_morph, rng)
-            attempts += 1
-
-        child = Individual()
-        child.id = _next_ind_id()
-        child.genotype = {"morph": child_morph, "parent_ids": parent_ids}
-        child.tags = {"ps": False, "valid": valid, "best_brain": []}
-        child.requires_eval = True
-        if not valid:
-            child.fitness = float("inf")
-            child.requires_eval = False
-        offspring.append(child)
-    return offspring
-
-
-# ── Evaluation profile (dsocial_zoo) ──────────────────────────────────────────
-#
-# d_social_learning's sim_ariel/evaluator.py "zoo" preset: 15 s translate
-# episodes at 20 Hz control (every 25 physics steps at 500 Hz), the legacy
-# 9-step alpha and jerk constants rescaled to the 25-step control period, a
-# spawn-height penalty above 0.5 m, and inner CMA-ES from a fixed x0 with
-# sigma 0.5, popsize 20, 10 generations by default. The skill is normalised
-# (translate_score, [0, 2]) before the penalties are subtracted.
-
-_LEGACY_CTRL_ALPHA     = 0.5
-_LEGACY_JERK_WEIGHT    = 3.0   # penalty per unit of mean absolute ctrl delta, above the threshold
-_LEGACY_JERK_THRESHOLD = 0.15  # hurdle: mean_jerk below this is free
-_STEP_RATIO            = 25 / 9  # zoo control period / legacy control period
-
-
-@dataclass(frozen=True)
-class EvalProfile:
-    loco_duration: float = 15.0
-    control_step_freq: int = 25          # physics steps between control updates
-    skill_budget: int = 10               # inner CMA-ES generations
-    ctrl_alpha: float = 1.0 - (1.0 - _LEGACY_CTRL_ALPHA) ** _STEP_RATIO
-    jerk_weight: float = _LEGACY_JERK_WEIGHT / _STEP_RATIO
-    jerk_threshold: float = _LEGACY_JERK_THRESHOLD * _STEP_RATIO
-    height_threshold: float = 0.5        # core height at spawn above this is penalised
-    cma_sigma: float = 0.5
-    cma_popsize: int = 20
-    # "displacement" (paper v2): fitness is the forward displacement in metres,
-    # unclipped (negative backwards), with no penalties. "normalised" (v1 runs):
-    # translate_score in [0, 2] minus the height and jerk penalties. "legacy"
-    # (the old sweep): displacement in metres minus those penalties.
-    fitness: Literal["displacement", "normalised", "legacy"] = "normalised"
-    height_after_settle: bool = False    # height penalty from the settled core, not the spawn height
-    hinge_glitch: bool = False           # over HINGE_CONTACT_LIMIT new rotor-floor contacts scores HINGE_GLITCH_FITNESS
-    cma_init_scale: float = 0.0          # x0 ~ U(-s, s); 0 = BRAIN_X0's fixed point
-
-
-PROFILE = EvalProfile()
-FITNESS_MODES = ("displacement", "normalised")
-
-# The old control-stride sweep at stride 20, where rowing was found: 30 s at
-# 25 Hz, unscaled alpha and jerk constants, CMA-ES from a random x0.
-HINGE_CONTACT_LIMIT  = 200
-HINGE_GLITCH_FITNESS = 1.0
-LEGACY_PROFILE = EvalProfile(
-    loco_duration=30.0, control_step_freq=20, skill_budget=100,
-    ctrl_alpha=_LEGACY_CTRL_ALPHA, jerk_weight=_LEGACY_JERK_WEIGHT, jerk_threshold=_LEGACY_JERK_THRESHOLD,
-    height_threshold=0.21, cma_sigma=0.7, cma_popsize=16, fitness="legacy",
-    height_after_settle=True, hinge_glitch=True, cma_init_scale=1.3,
-)
-EVAL_PROFILES = {"dsocial_zoo": PROFILE, "legacy": LEGACY_PROFILE}
-
-
-def profile_for(cfg: dict, **overrides: Any) -> EvalProfile:
-    """The EvalProfile a run used, from its run_config.json: a run without a
-    "fitness" key is a v1 run (normalised fitness)."""
-    if cfg.get("eval_profile") == "legacy":
-        return replace(LEGACY_PROFILE, **overrides)
-    if cfg.get("eval_profile") == "sweep":  # gecko_skill_tasks.py on the old simulator
-        return replace(LEGACY_PROFILE, control_step_freq=cfg["control_step_freq"], hinge_glitch=cfg.get("hinge_glitch", False),
-                       **overrides)
-    return replace(PROFILE, fitness=cfg.get("fitness", "normalised"), **overrides)
-
-TRANSLATE_REF_SPEED = 0.5        # m/s; a normalised translate skill scores TRANSLATE_MAX at this mean speed
-TRANSLATE_MAX       = 2.0        # normalised translate score cap
-
-# Every body spawns with no rotation, so the core camera's forward direction
-# (world -Y) is the same for every body: the forward skill's reward axis.
-FORWARD_AXIS = np.array([0.0, -1.0])
-
-
-def translate_score(disp: float, duration: float) -> float:
-    """Normalised translate skill: 2 x displacement along the reward axis over
-    TRANSLATE_REF_SPEED * duration, clipped to [0, TRANSLATE_MAX]."""
-    return float(np.clip(TRANSLATE_MAX * disp / (TRANSLATE_REF_SPEED * duration), 0.0, TRANSLATE_MAX))
+    has_geom = {int(b) for b in model.geom_bodyid}
+    return [b for b in range(model.nbody) if model.body(b).name.startswith("robot1_") and b in has_geom]
 
 
 # ── Episode ───────────────────────────────────────────────────────────────────
 
 
-def run_skill_episode(
+def run_episode(
     model: mujoco.MjModel, data: mujoco.MjData, brain: Any,
-    profile: EvalProfile = PROFILE,
+    protocol: Protocol = PROTOCOL,
     recorder: Optional[Callable[[mujoco.MjData], None]] = None,
     on_settle_step: Optional[Callable[[mujoco.MjData], None]] = None,
-) -> tuple[float, dict[str, Any]]:
-    """(fitness, info) of one forward episode of a brain whose params are set.
-
-    Fitness is minimised. Under profile.fitness == "normalised" it is
-    -(normalised score - height penalty - jerk penalty); under "displacement"
-    it is -(displacement along FORWARD_AXIS in m), unclipped and without
-    penalties. info holds raw_score (displacement, m), score (the maximised
-    quantity: normalised score or displacement), and the two penalties
-    (reported in both modes, applied only in "normalised"). recorder(data) is called after every post-settle physics
-    step and on_settle_step(data) after every settle step (replay.py's
-    recording); neither may change data.
-    """
+) -> float:
+    """Forward displacement in m (along FORWARD_AXIS, unclipped) of one episode
+    of a brain whose params are set. recorder(data) is called after every
+    post-settle physics step and on_settle_step(data) after every settle step
+    (replay.py's recording); neither may change data."""
     brain.reset()
     mujoco.mj_resetData(model, data)
-    initial_height = float(data.qpos[2])  # core height at spawn
-
-    while data.time < SETTLE_DURATION:
+    while data.time < protocol.settle_s:
         mujoco.mj_step(model, data)
         if on_settle_step is not None:
             on_settle_step(data)
 
-    if profile.height_after_settle:
-        core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
-        initial_height = float(data.xpos[core_id, 2])
-    c_hinge = 0
-    if profile.hinge_glitch:
-        rotor_ids = {i for i in range(model.ngeom) if model.geom(i).name.endswith("-rotor")}
-        floor = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
-        prev_contacts: set[int] = set()
-
-    step           = 0
-    current_action = np.zeros(model.nu)
-    prev_ctrl: Optional[np.ndarray] = None
-    jerk_sum       = 0.0
-    ctrl_step      = 0
-    xy0            = np.array([data.qpos[0], data.qpos[1]])
-
-    episode_end = SETTLE_DURATION + profile.loco_duration
-    while data.time < episode_end:
-        if step % profile.control_step_freq == 0:
-            state      = get_robot_state(data).astype(np.float32)
-            raw_action = brain.act(data, state)
-            current_action = np.clip(
-                current_action * (1.0 - profile.ctrl_alpha) + raw_action * profile.ctrl_alpha,
-                -math.pi / 2, math.pi / 2,
-            )
-            if prev_ctrl is not None:
-                jerk_sum += float(np.mean(np.abs(current_action - prev_ctrl)))
-            prev_ctrl = current_action.copy()
-            ctrl_step += 1
-        data.ctrl[:] = current_action
+    step   = 0
+    action = np.zeros(model.nu)
+    xy0    = np.array([data.qpos[0], data.qpos[1]])
+    end    = protocol.settle_s + protocol.episode_s
+    while data.time < end:
+        if step % protocol.control_every == 0:
+            target = brain.act(data, get_state_from_data(data).astype(np.float32))
+            action = np.clip(action * (1.0 - protocol.ctrl_alpha) + target * protocol.ctrl_alpha,
+                             -math.pi / 2, math.pi / 2)
+        data.ctrl[:] = action
         mujoco.mj_step(model, data)
-        if profile.hinge_glitch:
-            curr: set[int] = set()
-            for k in range(data.ncon):
-                g1, g2 = int(data.contact[k].geom1), int(data.contact[k].geom2)
-                if g1 == floor and g2 in rotor_ids:
-                    curr.add(g2)
-                elif g2 == floor and g1 in rotor_ids:
-                    curr.add(g1)
-            c_hinge += len(curr - prev_contacts)
-            prev_contacts = curr
         if recorder is not None:
             recorder(data)
         step += 1
-
-    mean_jerk    = jerk_sum / max(ctrl_step - 1, 1)
-    jerk_penalty = profile.jerk_weight * mean_jerk if mean_jerk >= profile.jerk_threshold else 0.0
-
-    height_penalty = initial_height if initial_height > profile.height_threshold else 0.0
-    raw = float(np.dot(np.array([data.qpos[0], data.qpos[1]]) - xy0, FORWARD_AXIS))
-    if profile.fitness == "legacy":
-        info = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty, "score": raw,
-                "c_hinge": c_hinge}
-        if profile.hinge_glitch and c_hinge > HINGE_CONTACT_LIMIT:
-            return HINGE_GLITCH_FITNESS, info
-        return -(raw - height_penalty - jerk_penalty), info
-    if profile.fitness == "displacement":
-        info = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty, "score": raw}
-        return -raw, info
-    score = translate_score(raw, profile.loco_duration)
-    info = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty, "score": score}
-    return -(score - height_penalty - jerk_penalty), info
+    return float(np.dot(np.array([data.qpos[0], data.qpos[1]]) - xy0, FORWARD_AXIS))
 
 
-# ── Inner CMA-ES (one body, candidates evaluated in parallel) ─────────────────
+# ── Inner CMA-ES ──────────────────────────────────────────────────────────────
+#
+# Candidates are evaluated by a pool of worker processes shared by every
+# training in the run: train_controllers trains several bodies at once (one
+# thread per body drives its CMA-ES), so a generation's bodies keep all
+# workers busy whatever the core count. Each worker caches the worlds it has
+# built; an episode resets the world and the brain, so its result does not
+# depend on which worker ran it.
 
-_skill_worker_ctx: Optional[dict[str, Any]] = None
-
-
-def _skill_worker_init(seed: int, genome_dict: dict, to_spec_fn, brain_kind: str, profile: EvalProfile) -> None:
-    global _skill_worker_ctx  # noqa: PLW0603
-    np.random.seed((seed + os.getpid()) % (2**32 - 1))
-    model, data = build_world(genome_dict, to_spec_fn)
-    brain       = make_brain_for_model(brain_kind, model, data, duration=profile.loco_duration)
-    _skill_worker_ctx = {"model": model, "data": data, "brain": brain, "profile": profile}
-
-
-def _skill_worker_eval(weights_list: list[float]) -> tuple[float, dict[str, Any]]:
-    """run_skill_episode for one candidate in a skill-training worker."""
-    assert _skill_worker_ctx is not None
-    ctx = _skill_worker_ctx
-    ctx["brain"].set_params(np.array(weights_list, dtype=np.float32))
-    return run_skill_episode(ctx["model"], ctx["data"], ctx["brain"], ctx["profile"])
+_WORLD_CACHE_SIZE = 64
+_worlds: dict[tuple[str, str], tuple[mujoco.MjModel, mujoco.MjData, Any]] = {}
 
 
-GenerationHook = Callable[[int, int, cma.CMAEvolutionStrategy, list[float], np.ndarray, float], None]
+def _world(body: dict, brain_kind: str, protocol: Protocol) -> tuple[mujoco.MjModel, mujoco.MjData, Any]:
+    key = (genome_hash(body), brain_kind)
+    if key not in _worlds:
+        if len(_worlds) >= _WORLD_CACHE_SIZE:
+            _worlds.pop(next(iter(_worlds)))
+        model, data = build_world(body)
+        _worlds[key] = (model, data, make_brain_for_model(brain_kind, model, data, duration=protocol.episode_s))
+    return _worlds[key]
 
 
-def train_skill_for_body(
-    genome_dict: dict,
-    budget: int,
-    workers: int,
-    seed: int,
-    to_spec_fn=zoo_spec,
-    brain_kind: str = "bang_bang",
-    profile: EvalProfile = PROFILE,
+def evaluate(body: dict, brain_kind: str, weights: np.ndarray, protocol: Protocol = PROTOCOL) -> float:
+    """Displacement in m of one episode of a controller (in this process)."""
+    model, data, brain = _world(body, brain_kind, protocol)
+    brain.set_params(np.asarray(weights, dtype=np.float32))
+    return run_episode(model, data, brain, protocol)
+
+
+def _evaluate_task(args: tuple) -> float:
+    return evaluate(*args)
+
+
+def _worker_init() -> None:
+    np.random.seed(os.getpid() % (2**32 - 1))
+
+
+def make_pool(workers: int) -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(max_workers=max(1, workers), initializer=_worker_init)
+
+
+@dataclass
+class Training:
+    """One controller training. Scores are displacements in m (higher is better).
+    curve has one entry per CMA-ES generation: the generation's best and median
+    score and CMA-ES's sigma after it (evaluations = (index + 1) x popsize)."""
+
+    weights: np.ndarray
+    score: float
+    curve: dict[str, list[float]] = field(default_factory=lambda: {"best": [], "median": [], "sigma": []})
+    evals: int = 0
+    stopped_early: bool = False
+    wall_s: float = 0.0
+
+
+GenerationHook = Callable[[int, int, np.ndarray, float], None]
+
+
+def train_controller(
+    body: dict, brain_kind: str, evals: int, seed: int, pool: ProcessPoolExecutor,
+    protocol: Protocol = PROTOCOL,
     on_generation: Optional[GenerationHook] = None,
-) -> tuple[np.ndarray, list[float], float, dict[str, Any]]:
-    """Train the forward skill of one body with CMA-ES for budget generations.
+) -> Training:
+    """Train one body's forward controller with CMA-ES for evals evaluations
+    (rounded up to whole generations), evaluating candidates on pool.
+    on_generation(gen, evals_so_far, best_weights, best_score) is called after
+    every generation.
 
-    on_generation(gen, n_evals, es, gen_fits, best_w, best_fit), if given, is
-    called after every generation (train_fixed_body.py's per-generation curve
-    and checkpoints); it must not change its arguments.
-
-    Returns (best_weights, learning_curve, eval_time_s, best_info): the
-    learning curve holds the best-so-far fitness at each improvement, and
-    best_info is run_skill_episode's info for best_weights.
-    """
-    t_start = time.perf_counter()
-
-    model, data = build_world(genome_dict, to_spec_fn)
-    num_params  = make_brain_for_model(brain_kind, model, data, duration=profile.loco_duration).num_params
-    if profile.cma_init_scale > 0:
-        x0 = np.random.default_rng(seed).uniform(-profile.cma_init_scale, profile.cma_init_scale, size=num_params).tolist()
-    else:
-        x0 = [BRAIN_X0.get(brain_kind, 0.0)] * num_params
-
+    CMA-ES stops early when its own criteria say so (e.g. every candidate
+    scores exactly the same); the result is then flagged stopped_early."""
+    t0 = time.perf_counter()
+    model, data = build_world(body)
+    n_params = make_brain_for_model(brain_kind, model, data, duration=protocol.episode_s).num_params
+    x0 = [BRAIN_X0.get(brain_kind, 0.0)] * n_params
+    # Its own generator, not cma's default np.random: trainings run concurrently.
+    rng = np.random.default_rng(seed)
     es = cma.CMAEvolutionStrategy(
-        x0, profile.cma_sigma,
-        {"popsize": profile.cma_popsize, "seed": seed, "verbose": -9, "maxiter": 10**9},
+        x0, protocol.cma_sigma,
+        {"popsize": protocol.cma_popsize, "randn": lambda *shape: rng.standard_normal(shape),
+         "verbose": -9, "maxiter": 10**9},
     )
 
-    best_fit = float("inf")
-    best_w   = np.array(x0, dtype=np.float32)
-    best_info: dict[str, Any] = {}
-    learning_curve: list[float] = []
-    n_evals = 0
-
-    effective_workers = min(profile.cma_popsize, workers)
-    with ProcessPoolExecutor(
-        max_workers=effective_workers,
-        initializer=_skill_worker_init,
-        initargs=(seed, genome_dict, to_spec_fn, brain_kind, profile),
-    ) as pool:
-        gen = 0
-        while gen < budget:
-            if es.stop():
-                break
-
-            solutions = es.ask()
-            results   = list(pool.map(_skill_worker_eval, [s.tolist() for s in solutions]))
-            fits      = [f for f, _ in results]
-            es.tell(solutions, fits)
-            n_evals  += len(solutions)
-
-            gen_best = min(fits)
-            if gen_best < best_fit:
-                best_fit  = gen_best
-                i_best    = fits.index(gen_best)
-                best_w    = np.array(solutions[i_best], dtype=np.float32)
-                best_info = results[i_best][1]
-                learning_curve.append(best_fit)
-
-            if on_generation is not None:
-                on_generation(gen, n_evals, es, fits, best_w, best_fit)
-            gen += 1
-
-    return best_w, learning_curve, time.perf_counter() - t_start, best_info
+    out = Training(weights=np.array(x0, dtype=np.float32), score=-math.inf)
+    for gen in range(cma_generations(evals, protocol)):
+        if es.stop():
+            out.stopped_early = True
+            break
+        solutions = es.ask()
+        scores = list(pool.map(_evaluate_task, [(body, brain_kind, s.astype(np.float32), protocol) for s in solutions]))
+        es.tell(solutions, [-x for x in scores])
+        out.evals += len(solutions)
+        i = int(np.argmax(scores))
+        if scores[i] > out.score:
+            out.score, out.weights = scores[i], np.array(solutions[i], dtype=np.float32)
+        out.curve["best"].append(scores[i])
+        out.curve["median"].append(float(np.median(scores)))
+        out.curve["sigma"].append(float(es.sigma))
+        if on_generation is not None:
+            on_generation(gen, out.evals, out.weights, out.score)
+    out.wall_s = time.perf_counter() - t0
+    return out
 
 
-def retest_controller(
-    genome_dict: dict,
-    weights: np.ndarray,
-    brain_kind: str,
-    n: int,
-    workers: int,
-    seed: int,
-    to_spec_fn=zoo_spec,
-    profile: EvalProfile = PROFILE,
-) -> list[float]:
-    """Fitnesses (minimised, as run_skill_episode) of n fresh episodes of one
-    trained controller, each in a new worker process as in training.
-
-    The simulation is deterministic within a process, but outcomes differ
-    slightly between machines and builds; the retest mean is what the paper
-    reports, and the spread across retests is recorded with it.
-    """
-    if n <= 0:
-        return []
-    w = np.asarray(weights, dtype=np.float32).tolist()
-    fits: list[float] = []
-    # max_tasks_per_child=1: every retest runs in a fresh process.
-    with ProcessPoolExecutor(
-        max_workers=max(1, min(n, workers)),
-        initializer=_skill_worker_init,
-        initargs=(seed, genome_dict, to_spec_fn, brain_kind, profile),
-        max_tasks_per_child=1,
-    ) as pool:
-        for f, _ in pool.map(_skill_worker_eval, [w] * n):
-            fits.append(float(f))
-    return fits
-
-
-def retest_summary(fits: list[float]) -> dict[str, Any]:
-    """retest_controller fitnesses as scores (maximised): all, mean, sd."""
-    scores = [-f for f in fits]
-    if not scores:
-        return {}
-    return {"retest_scores": scores, "retest_mean": float(np.mean(scores)),
-            "retest_sd": float(np.std(scores, ddof=1)) if len(scores) > 1 else 0.0}
+def train_controllers(
+    jobs: list[tuple[dict, str, int, int]], pool: ProcessPoolExecutor, concurrent: int,
+    protocol: Protocol = PROTOCOL,
+) -> list[Training]:
+    """train_controller for every (body, brain_kind, evals, seed) job, up to
+    concurrent at a time, in job order."""
+    with ThreadPoolExecutor(max_workers=max(1, concurrent)) as threads:
+        return list(threads.map(lambda job: train_controller(*job, pool=pool, protocol=protocol), jobs))
