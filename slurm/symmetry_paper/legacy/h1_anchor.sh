@@ -10,8 +10,8 @@
 #
 # Body lines: the first 40 of each genome in bodies_random.jsonl (80 + 80).
 #
-#   export REPO=$PWD; sbatch --array=0-159 slurm/symmetry_paper/h1_anchor.sh
-#   DRY_RUN=1 SLURM_ARRAY_TASK_ID=0 bash slurm/symmetry_paper/h1_anchor.sh
+#   export REPO=$PWD; sbatch --array=0-159 slurm/symmetry_paper/legacy/h1_anchor.sh
+#   DRY_RUN=1 SLURM_ARRAY_TASK_ID=0 bash slurm/symmetry_paper/legacy/h1_anchor.sh
 #
 #SBATCH --job-name=paper-h1
 #SBATCH --output=out_files/paper-h1-%A_%a.out
@@ -22,7 +22,7 @@
 #SBATCH --array=0-159
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 BODIES=$FINAL_ROOT/e2/bodies_random.jsonl
 [ -f "$BODIES" ] || { echo "No $BODIES"; exit 1; }

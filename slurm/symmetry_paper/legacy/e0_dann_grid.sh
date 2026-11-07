@@ -15,10 +15,10 @@
 # skipped; 9 x 2 x 5 = 90 with SKIP_DEFAULT=0). Seeds 42 + rep.
 #
 # Usage:
-#   sbatch slurm/symmetry_paper/e0_dann_grid.sh
-#   sbatch --array=0-79%20 slurm/symmetry_paper/e0_dann_grid.sh      # throttled
+#   sbatch slurm/symmetry_paper/legacy/e0_dann_grid.sh
+#   sbatch --array=0-79%20 slurm/symmetry_paper/legacy/e0_dann_grid.sh      # throttled
 # Analyse:
-#   python examples/symmetry_paper/analyse_e0.py --grid-root $FINAL_ROOT/e0_grid $FINAL_ROOT/e0_budget/sb80 \
+#   python examples/symmetry_paper/legacy/legacy/analyse_e0.py --grid-root $FINAL_ROOT/e0_grid $FINAL_ROOT/e0_budget/sb80 \
 #       --budget-roots $FINAL_ROOT/e0_budget/sb{10,40,80}
 
 #SBATCH --job-name=paper-e0-dgrid
@@ -31,7 +31,7 @@
 #SBATCH --array=0-79
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 # The default hinge's exact values (sim.ZOO_HINGE_*).
 DEF_KP=1.3605113362038874

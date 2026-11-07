@@ -20,11 +20,11 @@
 # is evolve.py's limit in seconds (default 32400); raise --time with it.
 #
 # Usage:
-#   sbatch slurm/symmetry_paper/e1_coordination_ablation.sh
-#   sbatch --array=0-179%40 slurm/symmetry_paper/e1_coordination_ablation.sh    # throttled
+#   sbatch slurm/symmetry_paper/legacy/e1_coordination_ablation.sh
+#   sbatch --array=0-179%40 slurm/symmetry_paper/legacy/e1_coordination_ablation.sh    # throttled
 # Then:
-#   E3_ROOTS=$FINAL_ROOT/e1 E3_NAME=e1 sbatch --array=0-179 slurm/symmetry_paper/e3_behaviour.sh
-#   python examples/symmetry_paper/analyse_e1.py --root $FINAL_ROOT/e1 $FINAL_ROOT/e0_budget/sb10 \
+#   E3_ROOTS=$FINAL_ROOT/e1 E3_NAME=e1 sbatch --array=0-179 slurm/symmetry_paper/legacy/e3_behaviour.sh
+#   python examples/symmetry_paper/legacy/legacy/analyse_e1.py --root $FINAL_ROOT/e1 $FINAL_ROOT/e0_budget/sb10 \
 #       --behaviour $FINAL_ROOT/e3/e1
 
 #SBATCH --job-name=paper-e1
@@ -37,7 +37,7 @@
 #SBATCH --array=0-179
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 GENOME_TYPES=(tree tree_symmetric tree_tied)
 read -r -a BRAINS <<< "${BRAINS:-bang_bang bang_bang_drift bang_bang_free}"

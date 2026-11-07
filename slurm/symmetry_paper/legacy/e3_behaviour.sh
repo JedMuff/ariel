@@ -16,14 +16,14 @@
 # size the array to that count (indices past it exit).
 #
 # Usage:
-#   python examples/symmetry_paper/replay.py --list-runs $FINAL_ROOT/e1 | wc -l
-#   E3_ROOTS=$FINAL_ROOT/e1 E3_NAME=e1 sbatch --array=0-59 slurm/symmetry_paper/e3_behaviour.sh
+#   python examples/symmetry_paper/legacy/legacy/replay.py --list-runs $FINAL_ROOT/e1 | wc -l
+#   E3_ROOTS=$FINAL_ROOT/e1 E3_NAME=e1 sbatch --array=0-59 slurm/symmetry_paper/legacy/e3_behaviour.sh
 #   E3_ROOTS="$FINAL_ROOT/e0_budget/sb10 $FINAL_ROOT/e0_budget/sb40 $FINAL_ROOT/e0_budget/sb80" E3_NAME=budget \
-#       sbatch --array=0-29 slurm/symmetry_paper/e3_behaviour.sh
-#   E3_ROOTS=$FINAL_ROOT/e2/random E3_NAME=e2_random sbatch --array=0-719%100 slurm/symmetry_paper/e3_behaviour.sh
+#       sbatch --array=0-29 slurm/symmetry_paper/legacy/e3_behaviour.sh
+#   E3_ROOTS=$FINAL_ROOT/e2/random E3_NAME=e2_random sbatch --array=0-719%100 slurm/symmetry_paper/legacy/e3_behaviour.sh
 # Then:
-#   python examples/symmetry_paper/gait_species.py --root $FINAL_ROOT/e3/e1
-#   python examples/symmetry_paper/analyse_e3.py --roots $FINAL_ROOT/e3/e1 $FINAL_ROOT/e3/budget \
+#   python examples/symmetry_paper/legacy/legacy/gait_species.py --root $FINAL_ROOT/e3/e1
+#   python examples/symmetry_paper/legacy/legacy/analyse_e3.py --roots $FINAL_ROOT/e3/e1 $FINAL_ROOT/e3/budget \
 #       --training-roots $FINAL_ROOT/e3/e2_random $FINAL_ROOT/e3/e2_evolved
 
 #SBATCH --job-name=paper-e3
@@ -35,7 +35,7 @@
 #SBATCH --array=0-59
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 read -r -a ROOTS <<< "${E3_ROOTS:?set E3_ROOTS to the run roots}"
 NAME=${E3_NAME:?set E3_NAME (output under $FINAL_ROOT/e3/)}

@@ -1,0 +1,239 @@
+"""
+Run discovery and statistics shared by the analysis scripts.
+
+An evolution run (evolve.py, or the investigation's gecko_skill_tasks.py, so
+the E0 data collected before this branch loads too) is a directory holding
+__data__/{evolve,gecko_skill_tasks}/forward/ with run_config.json,
+run_data.jsonl and checkpoints/genGGG_bodyII/.
+
+Which bodies make up a run's final population depends on the protocol. With
+--repeat-evals (v1) surviving parents are retrained and logged again, so it is
+the last generation, and the score is the best of that generation (steadier
+than the best ever, since retraining changes scores). Without it (v2) each
+generation logs only its new offspring and parents keep their scores, so the
+final population is the best MU bodies of all generations and the score is the
+best of those; the last generation alone usually misses the champion.
+With --retrain-survivors every survivor is retrained each generation, so the
+final population is the best MU of the last generation and the score is the
+best of those.
+
+Scores are -fitness: in v2 runs (run_config "fitness": "displacement") forward
+displacement in metres; in v1 runs, the normalised score in [0, 2] minus
+penalties.
+
+Paired statistics pair runs by seed (every cell uses seeds 42 + rep).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from collections import defaultdict
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+from scipy.stats import wilcoxon
+
+from sim import LOCAL_HINGE, ZOO_HINGE, BodyPhysics, HingeActuator
+
+DATA_SUBDIRS = ("evolve", "gecko_skill_tasks")
+GENOME_LABEL = {"tree": "tree", "tree_symmetric": "symmetric", "tree_tied": "tied"}
+# Figure labels: no underscores (paper style).
+BRAIN_LABEL = {"bang_bang": "bang-bang", "bang_bang_free": "free-frequency bang-bang",
+               "bang_bang_drift": "drift bang-bang", "dann": "DANN"}
+BRAIN_SHORT = {"bang_bang": "bang-bang", "bang_bang_free": "free", "bang_bang_drift": "drift", "dann": "DANN"}
+N_BOOT = 10_000
+_CKPT_RE = re.compile(r"^gen(\d+)_body(\d+)$")
+
+# Figures: categorical slots validated with the dataviz palette checker
+# (light surface); identity is always also given by a legend or label.
+GENOME_COLOR = {"tree": "#eb6834", "tree_symmetric": "#2a78d6", "tree_tied": "#1baf7a"}
+INK, INK_2, GRID = "#1f1f1d", "#6b6a63", "#e4e3de"
+# Controllers (E1 controller comparison); genome is then shown by line style.
+BRAIN_COLOR = {"bang_bang": "#2a78d6", "bang_bang_drift": "#1baf7a", "bang_bang_free": "#9a958a", "dann": "#c4501f"}
+
+
+def style(ax) -> None:  # noqa: ANN001
+    """Recessive axes: no top/right spines, light y grid, muted ticks."""
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(INK_2)
+    ax.tick_params(colors=INK_2, labelsize=8)
+    ax.grid(axis="y", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+
+
+# ── One run ───────────────────────────────────────────────────────────────────
+
+
+def data_dir(run_dir: Path) -> Optional[Path]:
+    """The run's __data__/<script>/forward directory, or None."""
+    for sub in DATA_SUBDIRS:
+        d = run_dir / "__data__" / sub / "forward"
+        if (d / "run_config.json").exists():
+            return d
+    return None
+
+
+def run_config(run_dir: Path) -> dict:
+    d = data_dir(run_dir)
+    return json.loads((d / "run_config.json").read_text()) if d else {}
+
+
+def hinge_actuator(cfg: dict) -> HingeActuator:
+    """The run's hinge (runs predating --hinge-kp etc. used the zoo hinge)."""
+    return HingeActuator(**cfg["hinge_actuator"]) if "hinge_actuator" in cfg else ZOO_HINGE
+
+
+def body_physics(cfg: dict) -> BodyPhysics:
+    """The run's body physics (runs without the key used zoo modules)."""
+    if cfg.get("zoo_modules") is False and "body_physics" not in cfg:  # gecko_skill_tasks.py on the old simulator
+        return BodyPhysics("local", None, LOCAL_HINGE)
+    return BodyPhysics(hinge=hinge_actuator(cfg), **cfg.get("body_physics", {}))
+
+
+def fitness_by_gen(run_dir: Path) -> dict[int, list[float]]:
+    d = data_dir(run_dir)
+    by_gen: dict[int, list[float]] = defaultdict(list)
+    if d is None or not (d / "run_data.jsonl").exists():
+        return by_gen
+    for line in (d / "run_data.jsonl").open():
+        rec = json.loads(line)
+        fit = rec.get("fitness")
+        if fit is not None and math.isfinite(fit):
+            by_gen[rec["gen"]].append(float(fit))
+    return by_gen
+
+
+def checkpoints_by_gen(run_dir: Path) -> dict[int, list[Path]]:
+    """gen -> checkpoint dirs of that generation."""
+    d = data_dir(run_dir)
+    by_gen: dict[int, list[Path]] = defaultdict(list)
+    if d is None or not (d / "checkpoints").exists():
+        return by_gen
+    for ckpt in sorted((d / "checkpoints").iterdir()):
+        m = _CKPT_RE.match(ckpt.name)
+        if m and (ckpt / "meta.json").exists():
+            by_gen[int(m.group(1))].append(ckpt)
+    return by_gen
+
+
+def reevaluates_parents(cfg: dict) -> bool:
+    """Whether bodies are retrained and logged again each generation
+    (--repeat-evals or --retrain-survivors). Runs predating the option's logging
+    count as yes."""
+    return bool(cfg.get("retrain_survivors")) or cfg.get("repeat_evals") is not False
+
+
+def _rated(ckpts: list[Path]) -> list[tuple[float, Path]]:
+    """(fitness, checkpoint), best first."""
+    rated = [(json.loads((c / "meta.json").read_text()).get("fitness", math.inf), c) for c in ckpts]
+    return sorted(rated, key=lambda x: (x[0], str(x[1])))
+
+
+def final_checkpoints(run_dir: Path) -> list[Path]:
+    """The checkpoints of the run's final population (see the module docstring)."""
+    by_gen = checkpoints_by_gen(run_dir)
+    if not by_gen:
+        return []
+    cfg = run_config(run_dir)
+    if cfg.get("retrain_survivors"):  # everything alive was just retrained, so the last generation ranks them all
+        return [c for _, c in _rated(by_gen[max(by_gen)])[:int(cfg["pop"])]]
+    if reevaluates_parents(cfg):
+        return by_gen[max(by_gen)]
+    rated = _rated([c for ckpts in by_gen.values() for c in ckpts])
+    return [c for _, c in rated[:int(cfg["pop"])]]
+
+
+def best_checkpoint(run_dir: Path, gen: Optional[int] = None) -> Optional[Path]:
+    """The lowest-fitness checkpoint of generation gen (default: of the final population)."""
+    ckpts = final_checkpoints(run_dir) if gen is None else checkpoints_by_gen(run_dir).get(gen, [])
+    rated = _rated(ckpts)
+    return rated[0][1] if rated else None
+
+
+def run_row(run_dir: Path) -> Optional[dict]:
+    """One row per run: brain, genome, seed, skill budget, hinge, last gen, score."""
+    cfg = run_config(run_dir)
+    by_gen = fitness_by_gen(run_dir)
+    if not cfg or not by_gen:
+        return None
+    last = max(by_gen)
+    scored = by_gen[last] if reevaluates_parents(cfg) else [f for fits in by_gen.values() for f in fits]
+    act = hinge_actuator(cfg)
+    return {
+        "run": run_dir.name, "brain": cfg.get("brain", "ann"), "genome": cfg["genome_type"],
+        "seed": int(cfg["seed"]), "skill_budget": int(cfg["skill_budget"]),
+        "evals_per_body": int(cfg["skill_budget"]) * 20,
+        "hinge": act.label, "kp": act.kp, "kv": act.kv, "armature": act.armature, "limited": act.limited,
+        "last_gen": last, "score": -min(scored), "fitness_mode": cfg.get("fitness", "normalised"),
+        "pop": int(cfg.get("pop", 10)), "path": str(run_dir),
+    }
+
+
+def curve_by_gen(run_dir: Path) -> pd.DataFrame:
+    """Best score per outer generation (-min fitness of the bodies evaluated
+    in it) and the best so far, one row per generation. With
+    --retrain-survivors a body's old scores no longer count, so best_so_far is
+    the current population's best and can fall."""
+    by_gen = fitness_by_gen(run_dir)
+    if not by_gen:
+        return pd.DataFrame(columns=["gen", "best", "best_so_far"])
+    gens = sorted(by_gen)
+    best = [-min(by_gen[g]) for g in gens]
+    so_far = best if run_config(run_dir).get("retrain_survivors") else np.maximum.accumulate(best)
+    return pd.DataFrame({"gen": gens, "best": best, "best_so_far": so_far})
+
+
+def unit_suffix(df: pd.DataFrame) -> str:
+    """" (m)" for v2 runs (displacement), "" for v1 (normalised score)."""
+    modes = set(df["fitness_mode"]) if "fitness_mode" in df else {"normalised"}
+    return " (m)" if modes == {"displacement"} else ("" if modes == {"normalised"} else " (mixed units!)")
+
+
+def score_label(df: pd.DataFrame, what: str = "score") -> str:
+    """Axis label for a score column: metres for v2 runs, the normalised score for v1."""
+    modes = set(df["fitness_mode"]) if "fitness_mode" in df else {"normalised"}
+    return f"{what} (m)" if modes == {"displacement"} else (what if modes == {"normalised"} else f"{what} (mixed units!)")
+
+
+def load_runs(*roots: Path, pattern: str = "*") -> pd.DataFrame:
+    """run_row for every finished run directly under the roots."""
+    rows = [r for root in roots for d in sorted(Path(root).glob(pattern)) if d.is_dir() and (r := run_row(d))]
+    return pd.DataFrame(rows)
+
+
+# ── Paired statistics ─────────────────────────────────────────────────────────
+
+
+def paired_gap(df: pd.DataFrame, a: str, b: str, value: str = "score", by: str = "genome",
+               pair_on: str = "seed", rng: Optional[np.random.Generator] = None) -> dict:
+    """Paired a - b difference of value between the rows with by == a and by == b,
+    matched on pair_on: mean, percentile bootstrap 95% CI over pairs, Wilcoxon
+    signed-rank p, wins and n."""
+    rng = rng or np.random.default_rng(0)
+    wide = df[df[by].isin([a, b])].pivot_table(index=pair_on, columns=by, values=value, aggfunc="mean")
+    if a not in wide or b not in wide:
+        return {"gap": math.nan, "ci_lo": math.nan, "ci_hi": math.nan, "p": math.nan, "wins": 0, "n": 0}
+    d = (wide[a] - wide[b]).dropna().to_numpy()
+    if len(d) == 0:
+        return {"gap": math.nan, "ci_lo": math.nan, "ci_hi": math.nan, "p": math.nan, "wins": 0, "n": 0}
+    boot = rng.choice(d, (N_BOOT, len(d))).mean(axis=1)
+    p = wilcoxon(d).pvalue if len(d) >= 2 and np.any(d != 0) else math.nan
+    return {"gap": float(d.mean()), "ci_lo": float(np.percentile(boot, 2.5)), "ci_hi": float(np.percentile(boot, 97.5)),
+            "p": float(p), "wins": int((d > 0).sum()), "n": len(d)}
+
+
+def gap_table(df: pd.DataFrame, groups: list[str], a: str = "tree_symmetric", b: str = "tree", **kw) -> pd.DataFrame:
+    """paired_gap of a vs b per combination of the group columns."""
+    by, value = kw.get("by", "genome"), kw.get("value", "score")
+    rows = []
+    for key, g in df.groupby(groups):
+        key = key if isinstance(key, tuple) else (key,)
+        rows.append({**dict(zip(groups, key)), **paired_gap(g, a, b, **kw),
+                     f"mean_{a}": g.loc[g[by] == a, value].mean(), f"mean_{b}": g.loc[g[by] == b, value].mean()})
+    return pd.DataFrame(rows)

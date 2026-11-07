@@ -14,10 +14,10 @@
 # Array size = 18 x 2 x 2 x N_REPS (216 for 3 reps). Seeds 42 + rep.
 #
 # Usage:
-#   sbatch slurm/symmetry_paper/e0_actuator_grid.sh
-#   CELLS="4 13" SEED_BASE=45 N_REPS=5 sbatch --array=0-19 slurm/symmetry_paper/e0_actuator_grid.sh
+#   sbatch slurm/symmetry_paper/legacy/e0_actuator_grid.sh
+#   CELLS="4 13" SEED_BASE=45 N_REPS=5 sbatch --array=0-19 slurm/symmetry_paper/legacy/e0_actuator_grid.sh
 # Analyse:
-#   python examples/symmetry_paper/analyse_e0.py --grid-root $FINAL_ROOT/e0_grid
+#   python examples/symmetry_paper/legacy/legacy/analyse_e0.py --grid-root $FINAL_ROOT/e0_grid
 
 #SBATCH --job-name=paper-e0-grid
 #SBATCH --output=out_files/paper-e0-grid-%A_%a.out
@@ -29,7 +29,7 @@
 #SBATCH --array=0-215
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 # The zoo hinge's exact values (sim.ZOO_HINGE_*).
 ZOO_KP=1.3605113362038874

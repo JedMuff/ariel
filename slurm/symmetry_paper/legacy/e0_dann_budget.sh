@@ -14,10 +14,10 @@
 # Array size = 2 x n_budgets x N_REPS (60 for "10 40 80" x 10). Seeds 42 + rep.
 #
 # Usage:
-#   sbatch slurm/symmetry_paper/e0_dann_budget.sh
-#   SKILL_BUDGETS="80" sbatch --array=0-19 slurm/symmetry_paper/e0_dann_budget.sh
+#   sbatch slurm/symmetry_paper/legacy/e0_dann_budget.sh
+#   SKILL_BUDGETS="80" sbatch --array=0-19 slurm/symmetry_paper/legacy/e0_dann_budget.sh
 # Analyse:
-#   python examples/symmetry_paper/analyse_e0.py --budget-roots $FINAL_ROOT/e0_budget/sb{10,40,80}
+#   python examples/symmetry_paper/legacy/legacy/analyse_e0.py --budget-roots $FINAL_ROOT/e0_budget/sb{10,40,80}
 
 #SBATCH --job-name=paper-e0-budget
 #SBATCH --output=out_files/paper-e0-budget-%A_%a.out
@@ -29,7 +29,7 @@
 #SBATCH --array=0-59
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 read -r -a SKILL_BUDGETS <<< "${SKILL_BUDGETS:-10 40 80}"
 GENOME_TYPES=(tree tree_symmetric)

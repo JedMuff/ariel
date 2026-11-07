@@ -22,9 +22,9 @@
 #         sym), standing in for the E1 champions.
 #
 # Usage:
-#   sbatch slurm/symmetry_paper/benchmark.sh
+#   sbatch slurm/symmetry_paper/legacy/benchmark.sh
 # Then, locally after copying $BENCH_ROOT (needs __data__/ariel_actuator_grid):
-#   python examples/symmetry_paper/benchmark_report.py --bench-root <copied BENCH_ROOT>
+#   python examples/symmetry_paper/legacy/legacy/benchmark_report.py --bench-root <copied BENCH_ROOT>
 
 #SBATCH --job-name=paper-bench
 #SBATCH --output=out_files/paper-bench-%A_%a.out
@@ -35,7 +35,7 @@
 #SBATCH --array=0-11
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 BENCH_ROOT=${BENCH_ROOT:-$FINAL_ROOT/bench}
 ID=$SLURM_ARRAY_TASK_ID
@@ -82,7 +82,7 @@ else
     if [ "$BODY_SET" = random ]; then
         timed e2_sample_bodies -- python "$SCRIPTS_DIR/sample_bodies.py" random --n 3 -o bodies.jsonl
     else
-        cp "$REPO/slurm/symmetry_paper/bench/bodies_evolved.jsonl" bodies.jsonl
+        cp "$REPO/slurm/symmetry_paper/legacy/bench/bodies_evolved.jsonl" bodies.jsonl
     fi
     for LINE in $(seq 0 $(( $(wc -l < bodies.jsonl) - 1 ))); do
         BODY_ID=$(sed -n "$((LINE + 1))p" bodies.jsonl | python -c "import json, sys; print(json.load(sys.stdin)['body_id'])")

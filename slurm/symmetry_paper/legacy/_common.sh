@@ -14,7 +14,7 @@ REPO=${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}
 FINAL_ROOT=${FINAL_ROOT:-/scratch/$USER/ariel_paper_v2}
 V2_EVOLVE_ARGS=(--budget 30 --pop 20 --lam 20 --fitness displacement --max-modules 25 --max-depth 25)
 V2_TRAIN_ARGS=(--fitness displacement)
-SCRIPTS_DIR=$REPO/examples/symmetry_paper
+SCRIPTS_DIR=$REPO/examples/symmetry_paper/legacy
 
 setup_env() {
     cd "$REPO"

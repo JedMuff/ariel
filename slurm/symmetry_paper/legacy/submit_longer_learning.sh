@@ -4,12 +4,12 @@
 # the checkout, with the code committed and pulled:
 #
 #   export REPO=$PWD
-#   bash slurm/symmetry_paper/submit_longer_learning.sh            # everything
-#   bash slurm/symmetry_paper/submit_longer_learning.sh dann       # DANN evolution, parents keep their scores
-#   bash slurm/symmetry_paper/submit_longer_learning.sh retrain    # DANN evolution, survivors retrained
-#   bash slurm/symmetry_paper/submit_longer_learning.sh x3         # x3 fixed bodies
-#   BUDGETS="10" bash slurm/symmetry_paper/submit_longer_learning.sh retrain   # one budget only
-#   DRY_RUN=1 bash slurm/symmetry_paper/submit_longer_learning.sh  # print, submit nothing
+#   bash slurm/symmetry_paper/legacy/submit_longer_learning.sh            # everything
+#   bash slurm/symmetry_paper/legacy/submit_longer_learning.sh dann       # DANN evolution, parents keep their scores
+#   bash slurm/symmetry_paper/legacy/submit_longer_learning.sh retrain    # DANN evolution, survivors retrained
+#   bash slurm/symmetry_paper/legacy/submit_longer_learning.sh x3         # x3 fixed bodies
+#   BUDGETS="10" bash slurm/symmetry_paper/legacy/submit_longer_learning.sh retrain   # one budget only
+#   DRY_RUN=1 bash slurm/symmetry_paper/legacy/submit_longer_learning.sh  # print, submit nothing
 #
 # dann     DANN evolution at 200 / 800 / 1,600 evaluations per body (BUDGETS: CMA-ES
 #          generations 10 / 40 / 80), tree / symmetric / tied x 20 seeds, in
@@ -24,16 +24,16 @@
 #          CMA-ES state, so these restart from evaluation 0 and retrace the old curves.
 #
 # Gait replays are queued to start when their experiment ends. Afterwards:
-#   python examples/symmetry_paper/compare_retraining.py --plain $FINAL_ROOT/e1_dann/sb* \
+#   python examples/symmetry_paper/legacy/legacy/compare_retraining.py --plain $FINAL_ROOT/e1_dann/sb* \
 #       --retrained $FINAL_ROOT/e1_dann_retrain/sb*
-#   python examples/symmetry_paper/verify_rerun.py --short $FINAL_ROOT/e2 --long $FINAL_ROOT/e2_x3
-#   E2_NAME=e2_x3 OUT=<local copy>/paper_x3 V2=<local copy> bash examples/symmetry_paper/paper/make_figures.sh
+#   python examples/symmetry_paper/legacy/legacy/verify_rerun.py --short $FINAL_ROOT/e2 --long $FINAL_ROOT/e2_x3
+#   E2_NAME=e2_x3 OUT=<local copy>/paper_x3 V2=<local copy> bash examples/symmetry_paper/legacy/legacy/paper/make_figures.sh
 
 set -euo pipefail
 : "${REPO:?export REPO=\$PWD (the checkout to run from)}"
-source "$REPO/slurm/symmetry_paper/_common.sh"
+source "$REPO/slurm/symmetry_paper/legacy/_common.sh"
 WHAT=${1:-all}
-SLURM_DIR=$REPO/slurm/symmetry_paper
+SLURM_DIR=$REPO/slurm/symmetry_paper/legacy
 read -r -a BUDGETS <<< "${BUDGETS:-10 40 80}"
 EVAL_SCALE=${EVAL_SCALE:-3}
 E2_NAME=${E2_NAME:-e2_x${EVAL_SCALE}}

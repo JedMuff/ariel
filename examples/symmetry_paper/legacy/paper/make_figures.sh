@@ -2,7 +2,7 @@
 # Rebuild every paper figure and number from the v2 data, then copy the figures
 # into paper/figures/ (the folder uploaded to Overleaf).
 #
-#   bash examples/symmetry_paper/paper/make_figures.sh        # from the repo root
+#   bash examples/symmetry_paper/legacy/paper/make_figures.sh        # from the repo root
 #   FAST=1 bash ...                                            # skip the two body-settle scripts
 #   V2=/path/to/ariel_paper_v2 bash ...                        # another copy of the v2 runs
 #   E2_NAME=e2_x3 OUT=$V2/paper_x3 bash ...                    # the x3 fixed-body runs
@@ -13,7 +13,7 @@
 # Outputs (CSVs, logs, inline numbers) stay in $OUT; only PNGs are copied.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-S=examples/symmetry_paper
+S=examples/symmetry_paper/legacy
 D=${V2:-__data__/ariel_paper_v2}
 OUT=${OUT:-$D/paper}
 FIG=$S/paper/figures

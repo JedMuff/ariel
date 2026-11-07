@@ -14,10 +14,10 @@
 # `replay.py --list-runs $PS_ROOTS | wc -l`; indices past the end exit.
 #
 # Usage:
-#   PS_ROOTS=$FINAL_ROOT/e2/random PS_NAME=e2_random sbatch --array=0-23 slurm/symmetry_paper/e3_phase_shift.sh
-#   PS_ROOTS=$FINAL_ROOT/e1 PS_NAME=e1 sbatch --array=0-2 slurm/symmetry_paper/e3_phase_shift.sh
+#   PS_ROOTS=$FINAL_ROOT/e2/random PS_NAME=e2_random sbatch --array=0-23 slurm/symmetry_paper/legacy/e3_phase_shift.sh
+#   PS_ROOTS=$FINAL_ROOT/e1 PS_NAME=e1 sbatch --array=0-2 slurm/symmetry_paper/legacy/e3_phase_shift.sh
 # Then:
-#   python examples/symmetry_paper/analyse_phase_shift.py \
+#   python examples/symmetry_paper/legacy/legacy/analyse_phase_shift.py \
 #       --roots $FINAL_ROOT/e3/phase_shift_e2_random $FINAL_ROOT/e3/phase_shift_e1
 
 #SBATCH --job-name=paper-ps
@@ -29,7 +29,7 @@
 #SBATCH --array=0-23
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 read -r -a ROOTS <<< "${PS_ROOTS:?set PS_ROOTS to the run roots}"
 NAME=${PS_NAME:?set PS_NAME (output under $FINAL_ROOT/e3/phase_shift_<name>)}

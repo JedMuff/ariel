@@ -36,25 +36,25 @@
 # leg_matched: 80 x 2 = 160 with BRAINS="bang_bang dann").
 #
 # Usage:
-#   python examples/symmetry_paper/sample_bodies.py random --n 80 --pool 800 -o $FINAL_ROOT/e2/bodies_random.jsonl
+#   python examples/symmetry_paper/legacy/legacy/sample_bodies.py random --n 80 --pool 800 -o $FINAL_ROOT/e2/bodies_random.jsonl
 #   BODY_SET=random BRAINS="bang_bang bang_bang_drift bang_bang_free dann" \
-#       sbatch --array=0-639 slurm/symmetry_paper/e2_fixed_body_curves.sh
-#   python examples/symmetry_paper/sample_bodies.py evolved --runs-root $FINAL_ROOT/e1 -o $FINAL_ROOT/e2/bodies_evolved.jsonl
-#   BODY_SET=evolved sbatch --array=0-119 slurm/symmetry_paper/e2_fixed_body_curves.sh
-#   python examples/symmetry_paper/sample_bodies.py tied --like $FINAL_ROOT/e2/bodies_random.jsonl -o $FINAL_ROOT/e2/bodies_tied.jsonl
-#   python examples/symmetry_paper/sample_bodies.py shape_matched --like $FINAL_ROOT/e2/bodies_random.jsonl --pool 24000 \
+#       sbatch --array=0-639 slurm/symmetry_paper/legacy/e2_fixed_body_curves.sh
+#   python examples/symmetry_paper/legacy/legacy/sample_bodies.py evolved --runs-root $FINAL_ROOT/e1 -o $FINAL_ROOT/e2/bodies_evolved.jsonl
+#   BODY_SET=evolved sbatch --array=0-119 slurm/symmetry_paper/legacy/e2_fixed_body_curves.sh
+#   python examples/symmetry_paper/legacy/legacy/sample_bodies.py tied --like $FINAL_ROOT/e2/bodies_random.jsonl -o $FINAL_ROOT/e2/bodies_tied.jsonl
+#   python examples/symmetry_paper/legacy/legacy/sample_bodies.py shape_matched --like $FINAL_ROOT/e2/bodies_random.jsonl --pool 24000 \
 #       -o $FINAL_ROOT/e2/bodies_shape_matched.jsonl
-#   python examples/symmetry_paper/sample_bodies.py shape_matched --like $FINAL_ROOT/e2/bodies_tied.jsonl --pool 24000 \
+#   python examples/symmetry_paper/legacy/legacy/sample_bodies.py shape_matched --like $FINAL_ROOT/e2/bodies_tied.jsonl --pool 24000 \
 #       --target-genome tree_tied --measures n_leg --body-source leg_matched --id-prefix legmatch_tree \
 #       -o $FINAL_ROOT/e2/bodies_leg_matched.jsonl
-#   BODY_SET=tied BRAINS="bang_bang dann" sbatch --array=0-159 slurm/symmetry_paper/e2_fixed_body_curves.sh
-#   BODY_SET=shape_matched BRAINS="bang_bang dann" sbatch --array=0-159 slurm/symmetry_paper/e2_fixed_body_curves.sh
-#   BODY_SET=leg_matched BRAINS="bang_bang dann" sbatch --array=0-159 slurm/symmetry_paper/e2_fixed_body_curves.sh
+#   BODY_SET=tied BRAINS="bang_bang dann" sbatch --array=0-159 slurm/symmetry_paper/legacy/e2_fixed_body_curves.sh
+#   BODY_SET=shape_matched BRAINS="bang_bang dann" sbatch --array=0-159 slurm/symmetry_paper/legacy/e2_fixed_body_curves.sh
+#   BODY_SET=leg_matched BRAINS="bang_bang dann" sbatch --array=0-159 slurm/symmetry_paper/legacy/e2_fixed_body_curves.sh
 # Then:
-#   python examples/symmetry_paper/analyse_matched.py --roots $FINAL_ROOT/e2/{random,tied,shape_matched} \
+#   python examples/symmetry_paper/legacy/legacy/analyse_matched.py --roots $FINAL_ROOT/e2/{random,tied,shape_matched} \
 #       --bodies $FINAL_ROOT/e2/bodies_{random,tied,shape_matched}.jsonl --out $FINAL_ROOT/e2/analysis_matched
-#   E3_ROOTS=$FINAL_ROOT/e2/random E3_NAME=e2_random sbatch --array=0-719%100 slurm/symmetry_paper/e3_behaviour.sh
-#   python examples/symmetry_paper/analyse_e2.py --roots $FINAL_ROOT/e2/random $FINAL_ROOT/e2/evolved
+#   E3_ROOTS=$FINAL_ROOT/e2/random E3_NAME=e2_random sbatch --array=0-719%100 slurm/symmetry_paper/legacy/e3_behaviour.sh
+#   python examples/symmetry_paper/legacy/legacy/analyse_e2.py --roots $FINAL_ROOT/e2/random $FINAL_ROOT/e2/evolved
 
 #SBATCH --job-name=paper-e2
 #SBATCH --output=out_files/paper-e2-%A_%a.out
@@ -65,7 +65,7 @@
 #SBATCH --array=0-639
 
 set -euo pipefail
-source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/_common.sh"
+source "${REPO:-/home/jed/workspaces/ariel-symmetry/ariel_paper}/slurm/symmetry_paper/legacy/_common.sh"
 
 BODY_SET=${BODY_SET:?set BODY_SET=random, evolved, tied, shape_matched or leg_matched}
 EVAL_SCALE=${EVAL_SCALE:-1}

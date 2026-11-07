@@ -12,14 +12,14 @@
 # then, if time remains, head 0.5 at old physics. Finished runs are skipped, so
 # rerunning resumes the queue (a run cut off mid-way starts again).
 #
-# Usage: bash examples/symmetry_paper/head_mass_overnight.sh [ROOT]
+# Usage: bash examples/symmetry_paper/legacy/head_mass_overnight.sh [ROOT]
 #   env: SEEDS, GENS, SKILL_BUDGET, JOBS, WORKERS, REPLAY_WORKERS
 set -uo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 ROOT=${1:-$REPO/__data__/ariel_head_mass/evolution}
 SEEDS=${SEEDS:-43 44 45}; GENS=${GENS:-10}; SKILL_BUDGET=${SKILL_BUDGET:-10}
 JOBS=${JOBS:-4}; WORKERS=${WORKERS:-14}; REPLAY_WORKERS=${REPLAY_WORKERS:-48}
-PY=$REPO/.venv/bin/python; SCRIPTS=$REPO/examples/symmetry_paper
+PY=$REPO/.venv/bin/python; SCRIPTS=$REPO/examples/symmetry_paper/legacy
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONHASHSEED=0 MUJOCO_GL=egl
 mkdir -p "$ROOT"
 
