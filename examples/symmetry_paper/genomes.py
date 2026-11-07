@@ -144,16 +144,22 @@ def _tied_ops(name: str, max_modules: int, tie_prob: float) -> GenomeOps:
 
 
 def _grn_ops(max_modules: int) -> GenomeOps:
+    """R2 GRN. The genome is the regulatory values ("grn"); the body is grown
+    from them (the original's cap counts the core, hence + 1) and, as for the
+    tree genomes, subtrees that collide in ARIEL's geometry are dropped. The
+    operators draw from Python's random, as the originals do."""
     from ariel.ec.genotypes.grn import GRN_R2, crossover_grn, develop_body, mutate_grn, random_grn  # noqa: PLC0415
 
     def body(values: list[float]) -> dict:
-        return {**develop_body(values, GRN_R2, max_modules=max_modules), "grn": values}
+        tree = TreeGenome.from_dict(develop_body(values, GRN_R2, max_modules=max_modules + 1))
+        prune_colliding_subtrees(tree)
+        return {**tree.to_dict(), "grn": values}
 
     return GenomeOps(
         "grn",
-        random=lambda: body(random_grn(GRN_R2)),
-        crossover=lambda a, b: body(crossover_grn(a["grn"], b["grn"], GRN_R2)),
-        mutate=lambda g, rng: body(mutate_grn(g["grn"], GRN_R2, rng)),
+        random=lambda: body(random_grn(GRN_R2, random)),
+        crossover=lambda a, b: body(crossover_grn(a["grn"], b["grn"], GRN_R2, random)),
+        mutate=lambda g, rng: body(mutate_grn(g["grn"], GRN_R2, random)),  # noqa: ARG005
     )
 
 
