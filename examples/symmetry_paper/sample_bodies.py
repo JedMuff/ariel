@@ -45,7 +45,7 @@ def main() -> None:
     args = ap.parse_args()
 
     rows = []
-    for i, g in enumerate(args.genomes):
+    for g in args.genomes:
         bodies = sample(g, args.n, args.seed + 1000 * GENOME_TYPES.index(g))
         rows += bodies
         acc = args.n / (args.n + sum(b["rejected"] for b in bodies))
