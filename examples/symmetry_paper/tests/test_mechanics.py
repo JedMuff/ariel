@@ -20,7 +20,8 @@ from mechanics import (
     pair_rows,
     participation_ratio,
 )
-from sim import build_world, create_individual, zoo_spec
+import genomes
+from sim import build_world
 
 DT = 0.02
 T = np.arange(round(13.0 / DT)) * DT
@@ -139,13 +140,13 @@ def tied_body():
 
 
 def test_actuator_nodes_are_the_genome_hinges(tied_body) -> None:
-    model, _ = build_world(tied_body, zoo_spec)
+    model, _ = build_world(tied_body)
     hinges = {int(n) for n, v in tied_body["nodes"].items() if v["type"] == "HINGE"}
     assert set(actuator_nodes(model)) == hinges
 
 
 def test_twins_are_symmetric_and_only_hinges(tied_body) -> None:
-    model, _ = build_world(tied_body, zoo_spec)
+    model, _ = build_world(tied_body)
     nodes = actuator_nodes(model)
     twin, _ = hinge_relations(tied_body, nodes)
     assert all(twin[twin[n]] == n for n in twin)
@@ -157,8 +158,8 @@ def test_mirror_partners_of_a_symmetric_body() -> None:
     random.seed(1)
     genome = None
     for _ in range(50):
-        g = create_individual(25, 25, symmetry_axis=MirrorAxis.Y_ZERO).genotype["morph"]
-        model, _ = build_world(g, zoo_spec)
+        g = genomes.random_body(genomes.genome_ops("tree_symmetric"))[0]
+        model, _ = build_world(g)
         if model.nu >= 4:
             genome = g
             break
@@ -199,8 +200,8 @@ def test_frozen_hinge_holds_its_target() -> None:
 
 def test_mean_angle_of_an_idle_body_is_near_rest(tied_body) -> None:
     # Bang-bang at x0 drives hinges; the mean angle stays inside the joint limits.
-    model, _ = build_world(tied_body, zoo_spec)
-    held = mean_angles({}, tied_body, np.full(4 + 5 * model.nu, 0.5), "bang_bang")
+    model, _ = build_world(tied_body)
+    held = mean_angles(tied_body, np.full(4 + 5 * model.nu, 0.5), "bang_bang")
     assert held.shape == (model.nu,)
     assert np.all(np.abs(held) <= np.pi / 2 + 0.05)
 
@@ -212,15 +213,15 @@ def test_no_frozen_hinges_change_nothing() -> None:
 
 def test_recording_does_not_change_the_episode(tied_body) -> None:
     """The measuring replay and the bare episode reach the same displacement."""
-    model, _ = build_world(tied_body, zoo_spec)
+    model, _ = build_world(tied_body)
     weights = np.full(4 + 5 * model.nu, 0.5)
-    row, hinges, _, _ = measure_episode({}, tied_body, weights, "bang_bang")
-    assert row["displacement"] == pytest.approx(knockout_episode({}, tied_body, weights, "bang_bang", None), abs=1e-9)
+    row, hinges, _, _ = measure_episode(tied_body, weights, "bang_bang")
+    assert row["displacement"] == pytest.approx(knockout_episode(tied_body, weights, "bang_bang", None), abs=1e-9)
     assert len(hinges) == model.nu
     assert row["cycles"] * row["path_per_cycle"] * row["straightness"] == pytest.approx(row["displacement"], abs=1e-6)
 
 
 def test_all_frozen_barely_moves(tied_body) -> None:
-    model, _ = build_world(tied_body, zoo_spec)
+    model, _ = build_world(tied_body)
     weights = np.full(4 + 5 * model.nu, 0.5)
-    assert abs(knockout_episode({}, tied_body, weights, "bang_bang", list(range(model.nu)))) < 0.05
+    assert abs(knockout_episode(tied_body, weights, "bang_bang", list(range(model.nu)))) < 0.05

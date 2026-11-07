@@ -5,8 +5,8 @@ symmetric and tied bodies are measured alike, and a hinge knockout.
 The gait detector (gait.py) pairs modules across the sagittal plane, so it says
 little about bodies with few such pairs: the stroke it covers is 0.74 of a
 symmetric E1 champion's but 0.30 of a tied one's. This replays the same trained
-checkpoints with the training episode itself (sim.run_skill_episode, so stored
-fitness is reproduced) and records what happens at the hinges and the floor.
+controllers with the training episode itself (sim.run_episode, so the stored
+score is reproduced) and records what happens at the hinges and the floor.
 
 --mode measure, one episode per checkpoint:
   Decomposition   displacement = cycles x path per cycle x straightness, exactly:
@@ -45,15 +45,15 @@ which removes its movement and keeps its pose) or at 0, the rest pose (score, wh
 also changes the body's shape if the hinge holds a bent pose). The rest of the
 controller is unchanged, and a DANN still sees the frozen hinge's true state.
 
-Checkpoints: a fixed-body training's last checkpoint; an evolution run's champion
-(the best of its final population).
+Episodes (runs.episodes, --which): an E1 run's champion (default) or final
+population; for an E2 training, its best seed (champion) or every seed.
 
 Writes <out-dir>/<run name>/ (a run with its files present is skipped):
   mechanics.csv, hinges.csv, pairs.csv    --mode measure
   knockout.csv                            --mode knockout
 
 Usage:
-    python mechanics.py --mode measure --roots ROOT [ROOT ...] [--match GLOB] [--workers 60] -o OUT
+    python mechanics.py --mode measure --roots ROOT [ROOT ...] [--match GLOB] [--which champion] [--workers 60] -o OUT
     python mechanics.py --mode knockout --run-dir RUN [RUN ...] -o OUT
 """
 
@@ -66,7 +66,6 @@ for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
 
 import argparse
 import fnmatch
-import json
 import math
 from itertools import combinations
 from multiprocessing import Pool
@@ -77,16 +76,17 @@ import mujoco
 import numpy as np
 import pandas as pd
 
-import gait
-import runs
-from analyse_bodies import AXIS_CLASS, _subtree
 from ariel.ec.genotypes.tree.collision import mirror_node
 from ariel.ec.genotypes.tree.symmetry import MirrorAxis
 from ariel.ec.genotypes.tree.tree_genome import TreeGenome
+
+import gait
+import runs
+from bodies import AXIS_CLASS, subtree
 from brains import SETTLE_DURATION, make_brain_for_model
-from phase_shift import select_checkpoints
-from replay import FIT_TOL, ckpt_config, is_fixed_body_run, list_runs, run_identity
-from sim import FORWARD_AXIS, PROFILE, build_world, profile_for, robot_bodies, run_skill_episode, zoo_spec_fn
+from config import PROTOCOL
+from replay import SCORE_TOL
+from sim import FORWARD_AXIS, build_world, robot_bodies, run_episode
 
 RECORD_EVERY_N = 10         # physics steps between samples: 50 Hz
 ACTIVE_RANGE_DEG = 10.0     # a hinge is active if its angle's 5-95% range reaches this
@@ -216,22 +216,13 @@ def nested_pairs(genome: dict, nodes: list[int]) -> frozenset[frozenset[int]]:
     return frozenset(out)
 
 
-def load_checkpoint(ckpt: Path) -> tuple[dict, dict, np.ndarray, str, float]:
-    cfg = ckpt_config(ckpt)
-    meta = json.loads((ckpt / "meta.json").read_text())
-    genome = json.loads((ckpt / "best_genome.json").read_text())
-    weights = np.load(ckpt / "fwd_weights.npy")
-    return cfg, genome, weights, cfg["brain"], float(meta["fitness"])
-
-
 # ── Episodes ──────────────────────────────────────────────────────────────────
 
 
-def measure_episode(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: str) -> tuple[dict, list[dict], list[dict], float]:
-    """(episode row, hinge rows, pair rows, fitness) of one replayed episode."""
-    model, data = build_world(genome, zoo_spec_fn(runs.hinge_actuator(cfg)))
-    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32),
-                                 duration=PROFILE.loco_duration)
+def measure_episode(genome: dict, weights: np.ndarray, brain_kind: str) -> tuple[dict, list[dict], list[dict], float]:
+    """(episode row, hinge rows, pair rows, score) of one replayed episode."""
+    model, data = build_world(genome)
+    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32))
     joints = model.actuator_trnid[:, 0]
     qadr, dadr = model.jnt_qposadr[joints], model.jnt_dofadr[joints]
     h = model.opt.timestep
@@ -262,7 +253,7 @@ def measure_episode(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: st
             contacts.append(row)
         step[0] += 1
 
-    fitness, info = run_skill_episode(model, data, brain, profile_for(cfg), recorder=record)
+    displacement = run_episode(model, data, brain, recorder=record)
     dt = RECORD_EVERY_N * h
     angles_a, ipos_a, xpos_a = np.asarray(angles), np.asarray(ipos), np.asarray(xpos)
     rot = np.asarray(cmat).reshape(-1, 3, 3)
@@ -274,7 +265,7 @@ def measure_episode(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: st
     core_pos = xpos_a[:, 0]
     limbs_3d = np.zeros((len(ts), model.nu, 3))
     for a, j in enumerate(joints):
-        sub = sorted(_subtree(model, int(model.jnt_bodyid[j])))
+        sub = sorted(subtree(model, int(model.jnt_bodyid[j])))
         m = mass[sub] / mass[sub].sum()
         com = (ipos_a[:, sub] * m[None, :, None]).sum(1) - core_pos
         limbs_3d[:, a] = np.einsum("tji,tj->ti", rot, com)
@@ -290,7 +281,6 @@ def measure_episode(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: st
         period, regularity = gait.estimate_period(np.swapaxes(centred, 0, 1), dt)
     freq = 1.0 / period if np.isfinite(period) and period > 0 else math.nan
 
-    displacement = float(info["raw_score"])
     nodes = actuator_nodes(model)
     twin, mirror = hinge_relations(genome, nodes)
     pairs = pair_rows(angles_k, limbs, nodes, twin, mirror, active, amp, freq, dt, nested_pairs(genome, nodes)) if np.isfinite(freq) else []
@@ -309,11 +299,11 @@ def measure_episode(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: st
         return sum(p["weight"] for p in use if p[col] >= gait.LOCK_MIN) / den if den > 0 else math.nan
 
     row = {
-        "fitness": fitness, "score": float(info["score"]), "displacement": displacement,
+        "score": displacement, "displacement": displacement,
         "n_hinges": int(model.nu), "n_active": int(active.sum()), "n_modules": len(TreeGenome.from_dict(genome).nodes),
         "mass": total_mass, "hinge_range_deg": float(rng_deg.mean()) if len(rng_deg) else math.nan,
         "period_s": period, "regularity": float(regularity),
-        **decompose(xpos_a[:, 0, :2], displacement, freq, dt, PROFILE.loco_duration),
+        **decompose(xpos_a[:, 0, :2], displacement, freq, dt, PROTOCOL.episode_s),
         "lateral_m": float(abs((xpos_a[-1, 0, :2] - xpos_a[0, 0, :2]) @ np.array([-FORWARD_AXIS[1], FORWARD_AXIS[0]]))),
         "participation": participation_ratio(angles_k[:, active]),
         "participation_limb": participation_ratio(limbs[:, active]),
@@ -338,9 +328,9 @@ def measure_episode(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: st
     hinges = [{"hinge": a, "node": nodes[a], "twin": twin.get(nodes[a], -1), "mirror": mirror.get(nodes[a], -1),
                "active": bool(active[a]), "range_deg": float(rng_deg[a]), "limb_amp_m": float(amp[a]), "work_j": float(work[a]),
                "axis": AXIS_CLASS[int(np.argmax(np.abs(data.xaxis[joints[a]])))],
-               "distal_mass": float(sum(mass[b] for b in _subtree(model, int(model.jnt_bodyid[joints[a]]))) / total_mass)}
+               "distal_mass": float(sum(mass[b] for b in subtree(model, int(model.jnt_bodyid[joints[a]]))) / total_mass)}
               for a in range(model.nu)]
-    return row, hinges, pairs, fitness
+    return row, hinges, pairs, displacement
 
 
 class FrozenHinges:
@@ -358,21 +348,20 @@ class FrozenHinges:
         return out
 
 
-def knockout_episode(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: str, frozen: Optional[list[int]],
+def knockout_episode(genome: dict, weights: np.ndarray, brain_kind: str, frozen: Optional[list[int]],
                      target: float = 0.0) -> float:
     """Displacement of one episode with these hinges held at target (None: unchanged brain)."""
-    model, data = build_world(genome, zoo_spec_fn(runs.hinge_actuator(cfg)))
-    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32), duration=PROFILE.loco_duration)
+    model, data = build_world(genome)
+    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32))
     if frozen is not None:
         brain = FrozenHinges(brain, np.asarray(frozen, dtype=int), target)
-    fitness, info = run_skill_episode(model, data, brain, profile_for(cfg))
-    return float(info["raw_score"])
+    return run_episode(model, data, brain)
 
 
-def mean_angles(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: str) -> np.ndarray:
+def mean_angles(genome: dict, weights: np.ndarray, brain_kind: str) -> np.ndarray:
     """Each hinge's mean angle over the unperturbed episode, after the transient."""
-    model, data = build_world(genome, zoo_spec_fn(runs.hinge_actuator(cfg)))
-    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32), duration=PROFILE.loco_duration)
+    model, data = build_world(genome)
+    brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32))
     qadr = model.jnt_qposadr[model.actuator_trnid[:, 0]]
     total, count = np.zeros(model.nu), [0]
 
@@ -381,16 +370,11 @@ def mean_angles(cfg: dict, genome: dict, weights: np.ndarray, brain_kind: str) -
             total[:] += d.qpos[qadr]
             count[0] += 1
 
-    run_skill_episode(model, data, brain, profile_for(cfg), recorder=record)
+    run_episode(model, data, brain, recorder=record)
     return total / max(count[0], 1)
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
-
-
-def _checkpoints(run_dir: Path, which: str) -> list[Path]:
-    """which: last (see the module docstring), or first (a fixed-body training's earliest checkpoint)."""
-    return select_checkpoints(run_dir, "all")[:1] if which == "first" else select_checkpoints(run_dir, "last")
 
 
 def _measure_job(args: tuple[str, str, str]) -> str:
@@ -399,20 +383,18 @@ def _measure_job(args: tuple[str, str, str]) -> str:
     if (out / "mechanics.csv").exists():
         return "skip"
     try:
-        ident = run_identity(run_dir)
+        ident = runs.identity(run_dir)
         rows, hinges, pairs = [], [], []
-        for ckpt in _checkpoints(run_dir, which):
-            cfg, genome, weights, brain, stored = load_checkpoint(ckpt)
-            row, h, p, fitness = measure_episode(cfg, genome, weights, brain)
-            base = {**ident, "ckpt": ckpt.name}
-            rows.append({**base, "stored_fitness": stored, **row})
-            hinges += [{"run": ident["run"], "ckpt": ckpt.name, **r} for r in h]
-            pairs += [{"run": ident["run"], "ckpt": ckpt.name, **r} for r in p]
+        for ep in runs.episodes(run_dir, which):
+            row, h, p, _ = measure_episode(ep.genome, ep.weights, ep.brain)
+            rows.append({**ident, "key": ep.key, "stored_score": ep.score, **row})
+            hinges += [{"run": ident["run"], "key": ep.key, **r} for r in h]
+            pairs += [{"run": ident["run"], "key": ep.key, **r} for r in p]
         out.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(hinges).to_csv(out / "hinges.csv", index=False)
         pd.DataFrame(pairs).to_csv(out / "pairs.csv", index=False)
         pd.DataFrame(rows).to_csv(out / "mechanics.csv", index=False)   # last: marks the run done
-        bad = sum(abs(r["fitness"] - r["stored_fitness"]) > FIT_TOL for r in rows)
+        bad = sum(abs(r["score"] - r["stored_score"]) > SCORE_TOL for r in rows)
         return "NOT REPRODUCED" if bad else "ok"
     except Exception as exc:  # noqa: BLE001 -- one bad body must not stop the sweep
         return f"ERROR {run_dir.name}: {type(exc).__name__}: {exc}"
@@ -424,24 +406,24 @@ def _knockout_job(args: tuple[str, str, str]) -> str:
     if (out / "knockout.csv").exists():
         return "skip"
     try:
-        ident = run_identity(run_dir)
+        ident = runs.identity(run_dir)
         rows = []
-        for ckpt in _checkpoints(run_dir, which):
-            cfg, genome, weights, brain, stored = load_checkpoint(ckpt)
-            model, _ = build_world(genome, zoo_spec_fn(runs.hinge_actuator(cfg)))
+        for ep in runs.episodes(run_dir, which):
+            g, w, b = ep.genome, ep.weights, ep.brain
+            model, _ = build_world(g)
             n, nodes = model.nu, actuator_nodes(model)
-            base = knockout_episode(cfg, genome, weights, brain, None)
-            frozen_all = knockout_episode(cfg, genome, weights, brain, list(range(n)))
-            held = mean_angles(cfg, genome, weights, brain)
+            base = knockout_episode(g, w, b, None)
+            frozen_all = knockout_episode(g, w, b, list(range(n)))
+            held = mean_angles(g, w, b)
             for a in range(n):
-                score = knockout_episode(cfg, genome, weights, brain, [a])
-                score_mean = knockout_episode(cfg, genome, weights, brain, [a], float(held[a]))
-                rows.append({**ident, "ckpt": ckpt.name, "hinge": a, "node": nodes[a], "baseline": base,
-                             "stored_score": -stored, "all_frozen": frozen_all, "score": score,
-                             "score_mean": score_mean, "held_angle": float(held[a])})
+                rows.append({**ident, "key": ep.key, "hinge": a, "node": nodes[a], "baseline": base,
+                             "stored_score": ep.score, "all_frozen": frozen_all,
+                             "score": knockout_episode(g, w, b, [a]),
+                             "score_mean": knockout_episode(g, w, b, [a], float(held[a])),
+                             "held_angle": float(held[a])})
         out.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rows).to_csv(out / "knockout.csv", index=False)
-        bad = any(abs(r["baseline"] - r["stored_score"]) > FIT_TOL for r in rows)
+        bad = any(abs(r["baseline"] - r["stored_score"]) > SCORE_TOL for r in rows)
         return "NOT REPRODUCED" if bad else "ok"
     except Exception as exc:  # noqa: BLE001
         return f"ERROR {run_dir.name}: {type(exc).__name__}: {exc}"
@@ -451,20 +433,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=("measure", "knockout"), required=True)
     parser.add_argument("--run-dir", type=Path, nargs="*", default=[])
-    parser.add_argument("--roots", type=Path, nargs="*", default=[], help="every run directly under these")
+    parser.add_argument("--roots", type=Path, nargs="*", default=[], help="every E1 / E2 run under these")
     parser.add_argument("--match", nargs="*", default=["*"], help="keep run names matching any of these globs")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
-    parser.add_argument("--which", choices=("last", "first"), default="last", help="which checkpoint of a fixed-body training")
+    parser.add_argument("--which", default="champion", help="champion, final (E1 population / every E2 seed) or g:<gens>")
     parser.add_argument("--limit", type=int, default=0, help="test: only this many runs")
     parser.add_argument("-o", "--out-dir", type=Path, required=True)
     args = parser.parse_args()
 
-    run_dirs = list(args.run_dir) + list_runs(args.roots) if args.roots else list(args.run_dir)
+    run_dirs = list(args.run_dir) + runs.find(args.roots, "e1") + runs.find(args.roots, "e2")
     run_dirs = [r for r in run_dirs if any(fnmatch.fnmatch(r.name, m) for m in args.match)]
     if args.limit:
         run_dirs = run_dirs[:args.limit]
     jobs = [(str(r), str(args.out_dir / r.name), args.which) for r in run_dirs]
-    print(f"{len(jobs)} runs, {sum(is_fixed_body_run(r) for r in run_dirs)} fixed-body", flush=True)
+    print(f"{len(jobs)} runs", flush=True)
     job = _measure_job if args.mode == "measure" else _knockout_job
     counts: dict[str, int] = {}
     with Pool(args.workers) as pool:
