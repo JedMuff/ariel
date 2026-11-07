@@ -52,7 +52,7 @@ from ariel.utils.morphological_descriptor import MorphologicalMeasures
 import gait
 import runs
 from brains import SETTLE_DURATION, make_brain_for_model
-from sim import PROFILE, build_world, joint_count, profile_for, robot_bodies, run_skill_episode, zoo_spec_fn
+from sim import build_world, joint_count, physics_spec_fn, profile_for, robot_bodies, run_skill_episode
 
 RECORD_EVERY_N = 10     # physics steps between recorded poses: 50 Hz
 FIT_TOL = 1e-6          # replayed vs stored fitness, for the DANN tie search
@@ -109,10 +109,10 @@ def replay_episode(genome: dict, weights: np.ndarray, brain_kind: str, cfg: dict
     post-settle poses of the bodies with geoms, core first. perturb(brain,
     model, data) -> brain changes the controller before the episode
     (phase_shift.py)."""
-    to_spec = zoo_spec_fn(runs.hinge_actuator(cfg))
-    model, data = build_world(genome, to_spec)
+    profile = profile_for(cfg)
+    model, data = build_world(genome, physics_spec_fn(runs.body_physics(cfg)))
     brain = make_brain_for_model(brain_kind, model, data, np.asarray(weights, dtype=np.float32), tie_choice,
-                                 duration=PROFILE.loco_duration)
+                                 duration=profile.loco_duration)
     if perturb is not None:
         brain = perturb(brain, model, data)
     bodies = robot_bodies(model)
@@ -126,7 +126,7 @@ def replay_episode(genome: dict, weights: np.ndarray, brain_kind: str, cfg: dict
             quat.append(d.xquat[bodies].copy())
 
     # The run's own fitness (v1 runs: normalised; v2: displacement).
-    fitness, info = run_skill_episode(model, data, brain, profile_for(cfg), recorder=record, on_settle_step=record)
+    fitness, info = run_skill_episode(model, data, brain, profile, recorder=record, on_settle_step=record)
     t32 = np.asarray(t, dtype=np.float32)
     keep = t32 >= SETTLE_DURATION
     P = np.asarray(pos, dtype=np.float16)[keep].astype(np.float64)
@@ -137,7 +137,7 @@ def replay_episode(genome: dict, weights: np.ndarray, brain_kind: str, cfg: dict
 
 def dann_tie_choices(genome: dict, cfg: dict) -> list[tuple[int, ...]]:
     """Every resolution of the DANN's exact neighbour ties for this body, default first."""
-    model, data = build_world(genome, zoo_spec_fn(runs.hinge_actuator(cfg)))
+    model, data = build_world(genome, physics_spec_fn(runs.body_physics(cfg)))
     ties = make_brain_for_model("dann", model, data).neighbour_ties
     return list(itertools.islice(itertools.product(*(range(len(c)) for _, _, c in ties)), MAX_TIE_CHOICES))
 

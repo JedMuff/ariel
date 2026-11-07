@@ -120,27 +120,70 @@ class HingeActuator:
 
 
 ZOO_HINGE = HingeActuator(ZOO_HINGE_KP, ZOO_HINGE_KV, ZOO_HINGE_ARMATURE, True)
+LOCAL_HINGE = HingeActuator(1.0, 1.0, 0.0, False)  # hinge.py's servo: kp = kv = 1, no armature, no joint limit
+
+# The module classes' own constants (the old simulator), stated here because
+# use_zoo_modules_globally overwrites them in the class modules.
+LOCAL_CORE_MASS         = 1.0
+LOCAL_STATOR_MASS       = 0.020
+LOCAL_ROTOR_MASS        = 0.040
+LOCAL_BRICK_MASS        = 0.055
+LOCAL_CORE_DIMENSIONS   = (0.10, 0.10, 0.10)  # half-extents (m)
+LOCAL_BRICK_DIMENSIONS  = (0.05, 0.05, 0.05)
+LOCAL_STATOR_DIMENSIONS = (0.025, 0.03, 0.025)
+LOCAL_ROTOR_DIMENSIONS  = (0.025, 0.02, 0.025)
+
+MODULE_SETS = ("zoo", "local")
+
+
+@dataclass(frozen=True)
+class BodyPhysics:
+    """What a body is built from: the module set (sizes, stator / rotor / brick
+    masses and the default core mass), an optional core mass replacing the
+    set's, and the hinge. The default is the paper's zoo body."""
+
+    module_set: Literal["zoo", "local"] = "zoo"
+    core_mass: Optional[float] = None
+    hinge: HingeActuator = ZOO_HINGE
 
 _ZOO_LOCK = threading.RLock()
 
 
-def _zoo_module_overrides() -> list[tuple[Any, str, Any]]:
-    """(module, attribute, zoo value) for the module-level constants the local
+def _physics_overrides(physics: BodyPhysics) -> list[tuple[Any, str, Any]]:
+    """(module, attribute, value) for the module-level constants the local
     module classes read when they are instantiated."""
     from ariel.body_phenotypes.robogen_lite.modules import brick, core, hinge  # noqa: PLC0415
 
+    if physics.module_set == "zoo":
+        core_mass, core_dims = ZOO_CORE_MASS, ZOO_CORE_DIMENSIONS
+        stator_mass, stator_dims = ZOO_STATOR_MASS, ZOO_STATOR_DIMENSIONS
+        rotor_mass, rotor_dims = ZOO_ROTOR_MASS, ZOO_ROTOR_DIMENSIONS
+        brick_mass, brick_dims = ZOO_BRICK_MASS, ZOO_BRICK_DIMENSIONS
+    elif physics.module_set == "local":
+        core_mass, core_dims = LOCAL_CORE_MASS, LOCAL_CORE_DIMENSIONS
+        stator_mass, stator_dims = LOCAL_STATOR_MASS, LOCAL_STATOR_DIMENSIONS
+        rotor_mass, rotor_dims = LOCAL_ROTOR_MASS, LOCAL_ROTOR_DIMENSIONS
+        brick_mass, brick_dims = LOCAL_BRICK_MASS, LOCAL_BRICK_DIMENSIONS
+    else:
+        raise ValueError(f"Unknown module set: {physics.module_set!r} (expected one of {MODULE_SETS})")
+    if physics.core_mass is not None:
+        core_mass = physics.core_mass
     brick_config = brick.ariel_modules_config.model_copy(
-        update={"BRICK_MASS": ZOO_BRICK_MASS, "BRICK_DIMENSIONS": ZOO_BRICK_DIMENSIONS},
+        update={"BRICK_MASS": brick_mass, "BRICK_DIMENSIONS": brick_dims},
     )
     return [
-        (core, "CORE_MASS", ZOO_CORE_MASS),
-        (core, "CORE_DIMENSIONS", ZOO_CORE_DIMENSIONS),
-        (hinge, "STATOR_MASS", ZOO_STATOR_MASS),
-        (hinge, "ROTOR_MASS", ZOO_ROTOR_MASS),
-        (hinge, "STATOR_DIMENSIONS", ZOO_STATOR_DIMENSIONS),
-        (hinge, "ROTOR_DIMENSIONS", ZOO_ROTOR_DIMENSIONS),
+        (core, "CORE_MASS", core_mass),
+        (core, "CORE_DIMENSIONS", core_dims),
+        (hinge, "STATOR_MASS", stator_mass),
+        (hinge, "ROTOR_MASS", rotor_mass),
+        (hinge, "STATOR_DIMENSIONS", stator_dims),
+        (hinge, "ROTOR_DIMENSIONS", rotor_dims),
         (brick, "ariel_modules_config", brick_config),
     ]
+
+
+def _zoo_module_overrides() -> list[tuple[Any, str, Any]]:
+    return _physics_overrides(BodyPhysics())
 
 
 def _set_module_constants(values: list[tuple[Any, str, Any]]) -> None:
@@ -169,6 +212,12 @@ def use_zoo_modules_globally() -> None:
     """Zoo sizes and masses for the rest of this process (and forked workers),
     so the genome operators' collision checks use the zoo geometry too."""
     _set_module_constants(_zoo_module_overrides())
+
+
+def use_physics_globally(physics: BodyPhysics) -> None:
+    """This physics' sizes and masses for the rest of this process (and forked
+    workers), so the genome operators' collision checks use its geometry too."""
+    _set_module_constants(_physics_overrides(physics))
 
 
 def apply_hinge_actuator(spec: mujoco.MjSpec, actuator: HingeActuator = ZOO_HINGE) -> mujoco.MjSpec:
@@ -200,6 +249,24 @@ def zoo_spec(genome_dict: dict, actuator: HingeActuator = ZOO_HINGE) -> Optional
 def zoo_spec_fn(actuator: HingeActuator = ZOO_HINGE) -> Callable[[dict], Optional[mujoco.MjSpec]]:
     """A picklable genome -> spec function for this hinge actuator."""
     return functools.partial(zoo_spec, actuator=actuator)
+
+
+def physics_spec(genome_dict: dict, physics: BodyPhysics = BodyPhysics()) -> Optional[mujoco.MjSpec]:  # noqa: B008
+    """The body of a tree genome built with this physics."""
+    overrides = _physics_overrides(physics)
+    with _ZOO_LOCK:
+        saved = [(mod, name, getattr(mod, name)) for mod, name, _ in overrides]
+        _set_module_constants(overrides)
+        try:
+            spec = genome_to_spec(genome_dict)
+        finally:
+            _set_module_constants(saved)
+    return apply_hinge_actuator(spec, physics.hinge) if spec is not None else None
+
+
+def physics_spec_fn(physics: BodyPhysics) -> Callable[[dict], Optional[mujoco.MjSpec]]:
+    """A picklable genome -> spec function for this physics."""
+    return functools.partial(physics_spec, physics=physics)
 
 
 def build_world(genome_dict: dict, to_spec_fn=zoo_spec) -> tuple[mujoco.MjModel, mujoco.MjData]:
@@ -469,17 +536,38 @@ class EvalProfile:
     cma_popsize: int = 20
     # "displacement" (paper v2): fitness is the forward displacement in metres,
     # unclipped (negative backwards), with no penalties. "normalised" (v1 runs):
-    # translate_score in [0, 2] minus the height and jerk penalties.
-    fitness: Literal["displacement", "normalised"] = "normalised"
+    # translate_score in [0, 2] minus the height and jerk penalties. "legacy"
+    # (the old sweep): displacement in metres minus those penalties.
+    fitness: Literal["displacement", "normalised", "legacy"] = "normalised"
+    height_after_settle: bool = False    # height penalty from the settled core, not the spawn height
+    hinge_glitch: bool = False           # over HINGE_CONTACT_LIMIT new rotor-floor contacts scores HINGE_GLITCH_FITNESS
+    cma_init_scale: float = 0.0          # x0 ~ U(-s, s); 0 = BRAIN_X0's fixed point
 
 
 PROFILE = EvalProfile()
 FITNESS_MODES = ("displacement", "normalised")
 
+# The old control-stride sweep at stride 20, where rowing was found: 30 s at
+# 25 Hz, unscaled alpha and jerk constants, CMA-ES from a random x0.
+HINGE_CONTACT_LIMIT  = 200
+HINGE_GLITCH_FITNESS = 1.0
+LEGACY_PROFILE = EvalProfile(
+    loco_duration=30.0, control_step_freq=20, skill_budget=100,
+    ctrl_alpha=_LEGACY_CTRL_ALPHA, jerk_weight=_LEGACY_JERK_WEIGHT, jerk_threshold=_LEGACY_JERK_THRESHOLD,
+    height_threshold=0.21, cma_sigma=0.7, cma_popsize=16, fitness="legacy",
+    height_after_settle=True, hinge_glitch=True, cma_init_scale=1.3,
+)
+EVAL_PROFILES = {"dsocial_zoo": PROFILE, "legacy": LEGACY_PROFILE}
+
 
 def profile_for(cfg: dict, **overrides: Any) -> EvalProfile:
     """The EvalProfile a run used, from its run_config.json: a run without a
     "fitness" key is a v1 run (normalised fitness)."""
+    if cfg.get("eval_profile") == "legacy":
+        return replace(LEGACY_PROFILE, **overrides)
+    if cfg.get("eval_profile") == "sweep":  # gecko_skill_tasks.py on the old simulator
+        return replace(LEGACY_PROFILE, control_step_freq=cfg["control_step_freq"], hinge_glitch=cfg.get("hinge_glitch", False),
+                       **overrides)
     return replace(PROFILE, fitness=cfg.get("fitness", "normalised"), **overrides)
 
 TRANSLATE_REF_SPEED = 0.5        # m/s; a normalised translate skill scores TRANSLATE_MAX at this mean speed
@@ -525,6 +613,15 @@ def run_skill_episode(
         if on_settle_step is not None:
             on_settle_step(data)
 
+    if profile.height_after_settle:
+        core_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
+        initial_height = float(data.xpos[core_id, 2])
+    c_hinge = 0
+    if profile.hinge_glitch:
+        rotor_ids = {i for i in range(model.ngeom) if model.geom(i).name.endswith("-rotor")}
+        floor = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        prev_contacts: set[int] = set()
+
     step           = 0
     current_action = np.zeros(model.nu)
     prev_ctrl: Optional[np.ndarray] = None
@@ -547,6 +644,16 @@ def run_skill_episode(
             ctrl_step += 1
         data.ctrl[:] = current_action
         mujoco.mj_step(model, data)
+        if profile.hinge_glitch:
+            curr: set[int] = set()
+            for k in range(data.ncon):
+                g1, g2 = int(data.contact[k].geom1), int(data.contact[k].geom2)
+                if g1 == floor and g2 in rotor_ids:
+                    curr.add(g2)
+                elif g2 == floor and g1 in rotor_ids:
+                    curr.add(g1)
+            c_hinge += len(curr - prev_contacts)
+            prev_contacts = curr
         if recorder is not None:
             recorder(data)
         step += 1
@@ -556,6 +663,12 @@ def run_skill_episode(
 
     height_penalty = initial_height if initial_height > profile.height_threshold else 0.0
     raw = float(np.dot(np.array([data.qpos[0], data.qpos[1]]) - xy0, FORWARD_AXIS))
+    if profile.fitness == "legacy":
+        info = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty, "score": raw,
+                "c_hinge": c_hinge}
+        if profile.hinge_glitch and c_hinge > HINGE_CONTACT_LIMIT:
+            return HINGE_GLITCH_FITNESS, info
+        return -(raw - height_penalty - jerk_penalty), info
     if profile.fitness == "displacement":
         info = {"raw_score": raw, "height_penalty": height_penalty, "jerk_penalty": jerk_penalty, "score": raw}
         return -raw, info
@@ -612,7 +725,10 @@ def train_skill_for_body(
 
     model, data = build_world(genome_dict, to_spec_fn)
     num_params  = make_brain_for_model(brain_kind, model, data, duration=profile.loco_duration).num_params
-    x0 = [BRAIN_X0.get(brain_kind, 0.0)] * num_params
+    if profile.cma_init_scale > 0:
+        x0 = np.random.default_rng(seed).uniform(-profile.cma_init_scale, profile.cma_init_scale, size=num_params).tolist()
+    else:
+        x0 = [BRAIN_X0.get(brain_kind, 0.0)] * num_params
 
     es = cma.CMAEvolutionStrategy(
         x0, profile.cma_sigma,

@@ -42,26 +42,41 @@ from pathlib import Path
 import numpy as np
 
 from brains import BRAIN_KINDS
-from sim import FITNESS_MODES, PROFILE, ZOO_HINGE, retest_controller, retest_summary, train_skill_for_body, zoo_spec_fn
+from sim import (
+    EVAL_PROFILES,
+    FITNESS_MODES,
+    LOCAL_HINGE,
+    MODULE_SETS,
+    ZOO_HINGE,
+    BodyPhysics,
+    physics_spec_fn,
+    retest_controller,
+    retest_summary,
+    train_skill_for_body,
+)
 
 CHECKPOINT_EVALS = (50, 200, 800, 1600, 5000)
 
 
 def train(body: dict, brain: str, seed: int, evals: int, workers: int, out: Path,
-          fitness: str = "displacement", retests: int = 0) -> None:
+          fitness: str = "displacement", retests: int = 0, physics: BodyPhysics = BodyPhysics(),  # noqa: B008
+          eval_profile: str = "dsocial_zoo") -> None:
     if (out / "final.json").exists():
         print(f"{out.name}: done, skipped", flush=True)
         return
     out.mkdir(parents=True, exist_ok=True)
-    gens = math.ceil(evals / PROFILE.cma_popsize)
-    profile = replace(PROFILE, skill_budget=gens, fitness=fitness)
-    to_spec = zoo_spec_fn(ZOO_HINGE)
+    base = EVAL_PROFILES[eval_profile]
+    gens = math.ceil(evals / base.cma_popsize)
+    # The legacy profile has its own fitness; --fitness applies to the paper's.
+    profile = replace(base, skill_budget=gens) if eval_profile == "legacy" else replace(base, skill_budget=gens, fitness=fitness)
+    to_spec = physics_spec_fn(physics)
     (out / "run_config.json").write_text(json.dumps({
         "body_id": body["body_id"], "body_source": body["body_source"], "genome_type": body["genome_type"],
         "n_modules": body["n_modules"], "n_hinges": body["n_hinges"], "n_limbs": body["n_limbs"],
-        "brain": brain, "seed": seed, "evals": evals, "skill_budget": gens, "eval_profile": "dsocial_zoo",
-        "fitness": fitness, "retests": retests,
-        "eval_profile_settings": asdict(profile), "hinge_actuator": asdict(ZOO_HINGE),
+        "brain": brain, "seed": seed, "evals": evals, "skill_budget": gens, "eval_profile": eval_profile,
+        "fitness": profile.fitness, "retests": retests,
+        "eval_profile_settings": asdict(profile), "hinge_actuator": asdict(physics.hinge),
+        "body_physics": {"module_set": physics.module_set, "core_mass": physics.core_mass},
     }, indent=2))
     curve_path = out / "curve.jsonl"
     curve_path.unlink(missing_ok=True)
@@ -95,7 +110,7 @@ def train(body: dict, brain: str, seed: int, evals: int, workers: int, out: Path
     # CMA-ES stops early on a flat fitness (e.g. every candidate scores 0, the
     # clip for moving backwards), as in evolve.py's inner loop: the controller
     # no longer changes, so later checkpoints repeat the final one.
-    stopped_early = last["evals"] < gens * PROFILE.cma_popsize
+    stopped_early = last["evals"] < gens * profile.cma_popsize
     while pending:
         save_checkpoint(pending.pop(0), stopped=True)
     best = float(min(curve)) if curve else math.inf
@@ -128,6 +143,11 @@ def main() -> None:
     parser.add_argument("--fitness", choices=FITNESS_MODES, default="displacement",
                         help="displacement (m, unclipped, no penalties) or normalised (v1)")
     parser.add_argument("--retests", type=int, default=0, help="fresh-process retests per checkpoint (default 0: none)")
+    parser.add_argument("--module-set", choices=MODULE_SETS, default="zoo", help="module sizes and masses (default: zoo)")
+    parser.add_argument("--core-mass", type=float, default=None, help="core mass in kg (default: the module set's)")
+    parser.add_argument("--hinge", choices=("zoo", "local"), default="zoo", help="hinge servo (default: zoo)")
+    parser.add_argument("--profile", choices=list(EVAL_PROFILES), default="dsocial_zoo",
+                        help="episode, CMA-ES and fitness settings: the paper's or the old sweep's (legacy)")
     args = parser.parse_args()
 
     lines = args.bodies.read_text().splitlines()
@@ -135,9 +155,10 @@ def main() -> None:
         print(f"line {args.line} is past the {len(lines)} bodies in {args.bodies}; nothing to do")
         return
     body = json.loads(lines[args.line])
+    physics = BodyPhysics(args.module_set, args.core_mass, ZOO_HINGE if args.hinge == "zoo" else LOCAL_HINGE)
     for seed in args.seeds:
         train(body, args.brain, seed, args.evals, args.workers, args.out_root / f"{body['body_id']}__{args.brain}__s{seed}",
-              fitness=args.fitness, retests=args.retests)
+              fitness=args.fitness, retests=args.retests, physics=physics, eval_profile=args.profile)
 
 
 if __name__ == "__main__":

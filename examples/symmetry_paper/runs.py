@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import wilcoxon
 
-from sim import ZOO_HINGE, HingeActuator
+from sim import LOCAL_HINGE, ZOO_HINGE, BodyPhysics, HingeActuator
 
 DATA_SUBDIRS = ("evolve", "gecko_skill_tasks")
 GENOME_LABEL = {"tree": "tree", "tree_symmetric": "symmetric", "tree_tied": "tied"}
@@ -87,6 +87,13 @@ def run_config(run_dir: Path) -> dict:
 def hinge_actuator(cfg: dict) -> HingeActuator:
     """The run's hinge (runs predating --hinge-kp etc. used the zoo hinge)."""
     return HingeActuator(**cfg["hinge_actuator"]) if "hinge_actuator" in cfg else ZOO_HINGE
+
+
+def body_physics(cfg: dict) -> BodyPhysics:
+    """The run's body physics (runs without the key used zoo modules)."""
+    if cfg.get("zoo_modules") is False and "body_physics" not in cfg:  # gecko_skill_tasks.py on the old simulator
+        return BodyPhysics("local", None, LOCAL_HINGE)
+    return BodyPhysics(hinge=hinge_actuator(cfg), **cfg.get("body_physics", {}))
 
 
 def fitness_by_gen(run_dir: Path) -> dict[int, list[float]]:

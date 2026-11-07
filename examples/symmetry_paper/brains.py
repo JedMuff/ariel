@@ -1,4 +1,4 @@
-"""Controllers of the paper: bang_bang, bang_bang_free and the distributed ANN.
+"""Controllers of the paper: bang_bang, bang_bang_free, the distributed ANN and the CPG.
 
 Every brain is driven the same way by sim.run_skill_episode: set_params(flat
 CMA-ES vector) once, reset() before each episode, then act(data, state) at
@@ -23,6 +23,10 @@ every control update. act returns hinge targets in ctrl units ([-pi/2, pi/2]).
                   the hinge's own velocity and angle, its nearest hinges slotted
                   by direction, the core orientation, a sine clock and the
                   hinge's rest position.
+  cpg             open loop: the zoo benchmark's revolve_cpg (kgd's fully
+                  connected RevolveCPG): one (x, y) oscillator pair per hinge,
+                  dS/dt = A S with A antisymmetric, clipped to [-1, 1]; the x
+                  half times pi/2 is the targets. n + n(n-1)/2 params.
 
 The square-wave rhythm is the zoo benchmark's square_wave.py engine (phase
 integrated per update, "hold" after the timeline ends) restricted to what
@@ -41,11 +45,12 @@ import mujoco
 import numpy as np
 
 from ariel.body_phenotypes.robogen_lite.config import ModuleFaces, ModuleType
+from ariel.simulation.controllers.utils.data_get import get_state_from_data
 
-BRAIN_KINDS: tuple[str, ...] = ("bang_bang", "bang_bang_free", "bang_bang_drift", "dann")
+BRAIN_KINDS: tuple[str, ...] = ("bang_bang", "bang_bang_free", "bang_bang_drift", "dann", "ann", "cpg")
 # CMA-ES mean (the profile starts from a fixed point): the square-wave genes
 # are centred for x0 = 0.5, the DANN's MLP for 0.
-BRAIN_X0: dict[str, float] = {"bang_bang": 0.5, "bang_bang_free": 0.5, "bang_bang_drift": 0.5}
+BRAIN_X0: dict[str, float] = {"bang_bang": 0.5, "bang_bang_free": 0.5, "bang_bang_drift": 0.5, "cpg": 0.5}
 
 SETTLE_DURATION = 3.0  # s before the controller starts; brains see t - SETTLE_DURATION
 HALF_PI = math.pi / 2
@@ -372,7 +377,118 @@ class DannBrain:
         return np.tanh(h @ self._w2.T + self._b2)[:, 0] * HALF_PI
 
 
-Brain = "BangBangBrain | BangBangFreeBrain | BangBangDriftBrain | DannBrain"
+class AnnBrain:
+    """The old sweep's closed-loop MLP on proprioceptive state: two ELU hidden
+    layers of 32, tanh output scaled to +-90 deg. A diagnostic for the head-mass
+    experiment (the one controller rowing was found with), not a paper brain.
+    torch is imported here so the other brains do not need it."""
+
+    HIDDEN = 32
+
+    def __init__(self, input_dim: int, output_dim: int) -> None:
+        import torch  # noqa: PLC0415
+        from torch import nn  # noqa: PLC0415
+
+        torch.set_num_threads(1)
+        self._torch = torch
+        self._fc1 = nn.Linear(input_dim, self.HIDDEN)
+        self._fc2 = nn.Linear(self.HIDDEN, self.HIDDEN)
+        self._out = nn.Linear(self.HIDDEN, output_dim)
+        self._params = [p for layer in (self._fc1, self._fc2, self._out) for p in layer.parameters()]
+        for p in self._params:
+            p.requires_grad = False
+        self.num_params = sum(p.numel() for p in self._params)
+
+    def reset(self) -> None:
+        pass
+
+    def set_params(self, vec: np.ndarray) -> None:
+        vec = np.asarray(vec, dtype=np.float32)
+        if len(vec) != self.num_params:
+            raise IndexError("Parameter vector length mismatch")
+        address = 0
+        with self._torch.no_grad():
+            for p in self._params:
+                d = p.data.view(-1)
+                d[:] = self._torch.as_tensor(vec[address : address + len(d)])
+                address += len(d)
+
+    def act(self, data: Any, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
+        torch = self._torch
+        with torch.inference_mode():
+            x = torch.as_tensor(state, dtype=torch.float32)
+            x = torch.nn.functional.elu(self._fc1(x))
+            x = torch.nn.functional.elu(self._fc2(x))
+            return (torch.tanh(self._out(x)) * (torch.pi / 2)).numpy()
+
+
+# CPG time scale and RK4 substeps per control update. (1.0, 1) is the zoo
+# benchmark's revolve_cpg exactly; see "CPG" in "Status and notes.md" for the
+# (2 pi, 5) alternative, which starts near a stride frequency.
+CPG_TIME_SCALE = 1.0
+CPG_SUBSTEPS = 1
+
+
+class CpgBrain:
+    """Port of the zoo benchmark's revolve_cpg (symmetry_pressure/shared.py
+    RevolveCpgBrain on branch symmetry-pressure-investigation), itself a port of
+    apets-ariel's RevolveCPG ("copied from revolve but fully connected").
+
+    One (x, y) oscillator pair per hinge. Weights (n + n(n-1)/2): n
+    self-couplings x_i<->y_i, then the couplings x_i<->x_j for i < j, placed
+    antisymmetrically in a 2n x 2n matrix A (times time_scale). The state
+    follows dS/dt = A S, advanced by substeps RK4 steps over the time elapsed
+    since the previous call, clipped to [-1, 1] after each; the x half times
+    pi/2 is the targets. Open loop: state input is ignored. set_params and
+    reset restore the initial state, with time measured from the end of
+    settling."""
+
+    def __init__(self, n_hinges: int, time_scale: float = CPG_TIME_SCALE, substeps: int = CPG_SUBSTEPS) -> None:
+        self.n = n_hinges
+        self.time_scale = time_scale
+        self.substeps = substeps
+        self.num_params = n_hinges + n_hinges * (n_hinges - 1) // 2
+        self._pairs = np.array(np.triu_indices(n_hinges, k=1)).T
+        self._initial_state = np.hstack([np.ones(n_hinges), -np.ones(n_hinges)]) * 0.5 * math.sqrt(2)
+        self.set_params(np.zeros(self.num_params))
+
+    def set_params(self, vec: np.ndarray) -> None:
+        w = np.asarray(vec, dtype=np.float64)
+        if len(w) != self.num_params:
+            raise IndexError("Parameter vector length mismatch")
+        n = self.n
+        m = np.zeros((2 * n, 2 * n))
+        idx = np.arange(n)
+        m[idx, n + idx] = w[:n]
+        m[n + idx, idx] = -w[:n]
+        i, j = self._pairs.T
+        m[i, j] = w[n:]
+        m[j, i] = -w[n:]
+        self._a = m * self.time_scale
+        self.reset()
+
+    def reset(self) -> None:
+        self._state = self._initial_state.copy()
+        self._time = 0.0
+
+    def output_at(self, t: float) -> np.ndarray:
+        dt = (t - self._time) / self.substeps
+        a, s = self._a, self._state
+        for _ in range(self.substeps):
+            a1 = a @ s
+            a2 = a @ (s + dt / 2 * a1)
+            a3 = a @ (s + dt / 2 * a2)
+            a4 = a @ (s + dt * a3)
+            s = np.clip(s + dt / 6 * (a1 + 2 * (a2 + a3) + a4), -1, 1)
+        self._state = s
+        self._time = t
+        return s[: self.n] * HALF_PI
+
+    def act(self, data: Any, state: np.ndarray) -> np.ndarray:  # noqa: ARG002
+        return self.output_at(float(data.time) - SETTLE_DURATION)
+
+
+Brain = "BangBangBrain | BangBangFreeBrain | BangBangDriftBrain | DannBrain | AnnBrain | CpgBrain"
 
 
 def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
@@ -390,6 +506,10 @@ def make_brain_for_model(kind: str, model: mujoco.MjModel, data: mujoco.MjData,
         brain = BangBangDriftBrain(model.nu, duration)
     elif kind == "dann":
         brain = DannBrain(model, data, tie_choice=tie_choice)
+    elif kind == "ann":
+        brain = AnnBrain(len(get_state_from_data(data)), model.nu)
+    elif kind == "cpg":
+        brain = CpgBrain(model.nu)
     else:
         raise ValueError(f"Unknown brain kind: {kind!r} (expected one of {BRAIN_KINDS})")
     if params is not None:

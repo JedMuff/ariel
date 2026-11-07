@@ -61,16 +61,19 @@ from ariel.ec.genotypes.tree.tying import tied_fraction
 import genomes
 from brains import BRAIN_KINDS
 from sim import (
+    EVAL_PROFILES,
     FITNESS_MODES,
+    MODULE_SETS,
     PROFILE,
     ZOO_HINGE,
+    BodyPhysics,
     HingeActuator,
+    physics_spec_fn,
     genome_hash,
     retest_controller,
     retest_summary,
     train_skill_for_body,
-    use_zoo_modules_globally,
-    zoo_spec_fn,
+    use_physics_globally,
 )
 
 install()
@@ -105,6 +108,10 @@ parser.add_argument("--hinge-kv",      type=float, default=None, help="hinge dam
 parser.add_argument("--hinge-armature", type=float, default=None, help="hinge armature (default: zoo hinge)")
 parser.add_argument("--hinge-limit",   action=argparse.BooleanOptionalAction, default=None,
                     help="hard +-90 deg hinge joint limit (default: on, as the zoo hinge)")
+parser.add_argument("--module-set",    choices=MODULE_SETS, default="zoo", help="module sizes and masses (default: zoo)")
+parser.add_argument("--core-mass",     type=float, default=None, help="core mass in kg (default: the module set's)")
+parser.add_argument("--profile",       choices=list(EVAL_PROFILES), default="dsocial_zoo",
+                    help="episode, CMA-ES and fitness settings: the paper's or the old sweep's (legacy; ignores --fitness)")
 parser.add_argument("--time-limit",    type=float, default=None,
                     help="wall-clock seconds; stop after the current generation completes")
 args = parser.parse_args()
@@ -115,7 +122,8 @@ BUDGET         = args.budget
 MU             = args.pop
 LAM            = args.lam
 SKILL_BUDGET   = args.skill_budget
-PROFILE_RUN    = replace(PROFILE, skill_budget=SKILL_BUDGET, fitness=args.fitness)
+PROFILE_RUN    = (replace(EVAL_PROFILES["legacy"], skill_budget=SKILL_BUDGET) if args.profile == "legacy"
+                  else replace(PROFILE, skill_budget=SKILL_BUDGET, fitness=args.fitness))
 RETESTS        = max(0, args.retests)
 BRAIN_WORKERS  = max(1, args.brain_workers)
 NUM_MODULES    = args.max_modules
@@ -143,13 +151,15 @@ TIMING_PATH = DATA / "timing.jsonl"
 RNG = np.random.default_rng(BASE_SEED)
 
 with (DATA / "run_config.json").open("w") as _fh:
-    json.dump({**vars(args), "task": TASK, "eval_profile": "dsocial_zoo", "zoo_modules": True,
-               "control_step_freq": PROFILE.control_step_freq, "eval_profile_settings": asdict(PROFILE_RUN),
-               "hinge_actuator": asdict(HINGE_ACTUATOR)}, _fh, indent=2)
+    json.dump({**vars(args), "task": TASK, "eval_profile": args.profile, "zoo_modules": args.module_set == "zoo",
+               "control_step_freq": PROFILE_RUN.control_step_freq, "eval_profile_settings": asdict(PROFILE_RUN),
+               "hinge_actuator": asdict(HINGE_ACTUATOR),
+               "body_physics": {"module_set": args.module_set, "core_mass": args.core_mass}}, _fh, indent=2)
 
 ADAPTER = genomes.genome_adapter(GENOME_TYPE, tie_prob=args.tie_prob)
-TO_SPEC = zoo_spec_fn(HINGE_ACTUATOR)
-use_zoo_modules_globally()  # the genome operators' collision checks use the zoo geometry too
+PHYSICS = BodyPhysics(args.module_set, args.core_mass, HINGE_ACTUATOR)
+TO_SPEC = physics_spec_fn(PHYSICS)
+use_physics_globally(PHYSICS)  # the genome operators' collision checks use this geometry too
 
 
 def _train_body(genome_dict: dict, seed: int) -> dict[str, Any]:
