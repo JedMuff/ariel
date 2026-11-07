@@ -1,31 +1,22 @@
 """
-Train one brain on one fixed body and log its learning curve (E2).
+Experiment 2: train one brain on one fixed body, once per seed.
 
-The inner loop of evolve.py (sim.train_skill_for_body: CMA-ES popsize 20,
-sigma 0.5, fixed x0, zoo hinge) run for --evals evaluations, with no outer
-loop, once per training seed. Every generation is logged, and the controller
-is checkpointed at the first generation reaching each of CHECKPOINT_EVALS and
-at the end of training, in the layout replay.py reads, so E3 can measure gait and phase quality along
-training.
+Takes line --line of a bodies file (sample_bodies.py) and trains --brain on it
+for --evals evaluations with every seed, the seeds running concurrently on
+one pool of --workers processes.
 
-Writes, per seed, <out-root>/<body_id>__<brain>__s<seed>/:
-  run_config.json   body, brain, seed, budget, hinge actuator
-  curve.jsonl       per generation: gen, evals, gen_best, gen_median, best_so_far, sigma
-  checkpoints/evalsNNNNN/  best_genome.json, fwd_weights.npy (best so far),
-                    fwd_mean.npy (CMA-ES mean), meta.json (fitness = best so far,
-                    plus retest_scores / retest_mean / retest_sd with --retests)
-  final.json        final best fitness and score (the retest mean with --retests,
-                    else the training best), wall time; a seed with it is skipped
-
---fitness displacement (paper v2, default) scores forward displacement in m,
-unclipped, without penalties; --fitness normalised reproduces the v1 runs.
+Output (--out-root/<body_id>__<brain>/):
+  config.json     body, brain, evals, seeds, protocol, git commit
+  results.jsonl   one line per seed: seed, score (best displacement, m),
+                  evals, stopped_early, wall_s, curve {best, median, sigma
+                  per CMA-ES generation}
+  weights.npz     best weights per seed (key "s<seed>")
+Seeds already in results.jsonl are skipped, so a rerun completes the set.
 
 Usage:
-    python train_fixed_body.py --bodies bodies_random.jsonl --line 0 --brain dann \\
-        --evals 5000 --seeds 42 43 44 --workers 20 -o /scratch/$USER/ariel_paper_v2/e2
+    python train_fixed_body.py --bodies bodies.jsonl --line 0 --brain dann --evals 800 \\
+        --seeds 42-61 --workers 32 --out-root runs/e2
 """
-
-from __future__ import annotations
 
 import os
 
@@ -34,131 +25,72 @@ for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
 
 import argparse
 import json
-import math
-import time
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 
-from brains import BRAIN_KINDS
-from sim import (
-    EVAL_PROFILES,
-    FITNESS_MODES,
-    LOCAL_HINGE,
-    MODULE_SETS,
-    ZOO_HINGE,
-    BodyPhysics,
-    physics_spec_fn,
-    retest_controller,
-    retest_summary,
-    train_skill_for_body,
-)
-
-CHECKPOINT_EVALS = (50, 200, 800, 1600, 5000)
+from config import BRAIN_KINDS, PROTOCOL
+from evolve import git_commit
+from sim import make_pool, train_controllers
 
 
-def train(body: dict, brain: str, seed: int, evals: int, workers: int, out: Path,
-          fitness: str = "displacement", retests: int = 0, physics: BodyPhysics = BodyPhysics(),  # noqa: B008
-          eval_profile: str = "dsocial_zoo") -> None:
-    if (out / "final.json").exists():
-        print(f"{out.name}: done, skipped", flush=True)
-        return
+def parse_seeds(text: list[str]) -> list[int]:
+    """'42-61' or '42 43 44' -> seeds."""
+    seeds = []
+    for part in text:
+        lo, _, hi = part.partition("-")
+        seeds += list(range(int(lo), int(hi) + 1)) if hi else [int(lo)]
+    return seeds
+
+
+def done_seeds(out: Path) -> set[int]:
+    path = out / "results.jsonl"
+    return {json.loads(x)["seed"] for x in path.read_text().splitlines()} if path.exists() else set()
+
+
+def train(body: dict, brain: str, evals: int, seeds: list[int], workers: int, out: Path, concurrent: int) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    base = EVAL_PROFILES[eval_profile]
-    gens = math.ceil(evals / base.cma_popsize)
-    # The legacy profile has its own fitness; --fitness applies to the paper's.
-    profile = replace(base, skill_budget=gens) if eval_profile == "legacy" else replace(base, skill_budget=gens, fitness=fitness)
-    to_spec = physics_spec_fn(physics)
-    (out / "run_config.json").write_text(json.dumps({
-        "body_id": body["body_id"], "body_source": body["body_source"], "genome_type": body["genome_type"],
-        "n_modules": body["n_modules"], "n_hinges": body["n_hinges"], "n_limbs": body["n_limbs"],
-        "brain": brain, "seed": seed, "evals": evals, "skill_budget": gens, "eval_profile": eval_profile,
-        "fitness": profile.fitness, "retests": retests,
-        "eval_profile_settings": asdict(profile), "hinge_actuator": asdict(physics.hinge),
-        "body_physics": {"module_set": physics.module_set, "core_mass": physics.core_mass},
-    }, indent=2))
-    curve_path = out / "curve.jsonl"
-    curve_path.unlink(missing_ok=True)
-    pending = sorted({e for e in CHECKPOINT_EVALS if e <= evals} | {evals})
-    last: dict = {}
-    t0 = time.time()
-
-    def save_checkpoint(threshold: int, stopped: bool) -> None:
-        ckpt = out / "checkpoints" / f"evals{threshold:05d}"
-        ckpt.mkdir(parents=True, exist_ok=True)
-        np.save(ckpt / "fwd_weights.npy", last["best_w"])
-        np.save(ckpt / "fwd_mean.npy", last["mean"])
-        (ckpt / "best_genome.json").write_text(json.dumps(body["genome"], indent=2))
-        (ckpt / "meta.json").write_text(json.dumps({"fitness": last["best_fit"], "evals": last["evals"],
-                                                    "gen": last["gen"], "stopped_early": stopped}))
-
-    def on_generation(gen, n_evals, es, fits, best_w, best_fit) -> None:  # noqa: ANN001
-        last.update(gen=gen, evals=n_evals, best_w=best_w.copy(), best_fit=float(best_fit),
-                    mean=np.asarray(es.mean, dtype=np.float32))
-        with curve_path.open("a") as fh:
-            fh.write(json.dumps({"gen": gen, "evals": n_evals, "gen_best": float(min(fits)),
-                                 "gen_median": float(np.median(fits)), "best_so_far": float(best_fit),
-                                 "sigma": float(es.sigma), "wall_s": round(time.time() - t0, 2)}) + "\n")
-        while pending and n_evals >= pending[0]:
-            save_checkpoint(pending.pop(0), stopped=False)
-
-    _, curve, eval_time, info = train_skill_for_body(
-        body["genome"], gens, workers, seed, to_spec_fn=to_spec, brain_kind=brain,
-        profile=profile, on_generation=on_generation,
-    )
-    # CMA-ES stops early on a flat fitness (e.g. every candidate scores 0, the
-    # clip for moving backwards), as in evolve.py's inner loop: the controller
-    # no longer changes, so later checkpoints repeat the final one.
-    stopped_early = last["evals"] < gens * profile.cma_popsize
-    while pending:
-        save_checkpoint(pending.pop(0), stopped=True)
-    best = float(min(curve)) if curve else math.inf
-    # Retest every checkpoint's best-so-far controller in fresh processes
-    # (after training, so the retest pool does not compete with CMA-ES).
-    final_retest: dict = {}
-    if retests > 0:
-        for ckpt in sorted((out / "checkpoints").glob("evals*")):
-            meta = json.loads((ckpt / "meta.json").read_text())
-            summ = retest_summary(retest_controller(body["genome"], np.load(ckpt / "fwd_weights.npy"), brain,
-                                                    retests, workers, seed, to_spec_fn=to_spec, profile=profile))
-            (ckpt / "meta.json").write_text(json.dumps({**meta, **summ}))
-            final_retest = summ  # the last checkpoint holds the final controller
-    score = final_retest["retest_mean"] if final_retest else -best
-    (out / "final.json").write_text(json.dumps({"fitness": -score, "score": score, "train_best_score": -best,
-                                                "evals": last["evals"], "stopped_early": stopped_early,
-                                                "wall_s": round(eval_time, 1), **info, **final_retest}))
-    print(f"{out.name}: train best {-best:.3f}, score {score:.3f} in {eval_time / 60:.1f} min", flush=True)
+    cfg = {"experiment": "e2", **{k: body[k] for k in body if k != "genome"}, "brain": brain, "evals": evals,
+           "seeds": seeds, "protocol": asdict(PROTOCOL), "git_commit": git_commit(), "genome": body["genome"]}
+    if not (out / "config.json").exists():
+        (out / "config.json").write_text(json.dumps(cfg, indent=2))
+    todo = [s for s in seeds if s not in done_seeds(out)]
+    if not todo:
+        print(f"{out.name}: done", flush=True)
+        return
+    weights_path = out / "weights.npz"
+    with make_pool(workers) as pool:
+        for i in range(0, len(todo), concurrent):
+            batch = todo[i:i + concurrent]
+            results = train_controllers([(body["genome"], brain, evals, s) for s in batch], pool, len(batch))
+            weights = dict(np.load(weights_path)) if weights_path.exists() else {}
+            weights |= {f"s{s}": r.weights for s, r in zip(batch, results)}
+            np.savez_compressed(out / "weights.tmp.npz", **weights)
+            (out / "weights.tmp.npz").replace(weights_path)
+            with (out / "results.jsonl").open("a") as fh:
+                for s, r in zip(batch, results):
+                    fh.write(json.dumps({"seed": s, "score": r.score, "evals": r.evals,
+                                         "stopped_early": r.stopped_early, "wall_s": round(r.wall_s, 2),
+                                         "curve": {k: [round(x, 5) for x in v] for k, v in r.curve.items()}}) + "\n")
+            print(f"{out.name}: seeds {batch[0]}-{batch[-1]}: "
+                  f"{', '.join(f'{r.score:.3f}' for r in results)} m", flush=True)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bodies", type=Path, required=True, help="sample_bodies.py output")
-    parser.add_argument("--line", type=int, required=True, help="0-based body index in --bodies")
-    parser.add_argument("--brain", choices=BRAIN_KINDS, required=True)
-    parser.add_argument("--evals", type=int, required=True, help="evaluations per training (rounded up to whole generations)")
-    parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
-    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
-    parser.add_argument("-o", "--out-root", type=Path, required=True)
-    parser.add_argument("--fitness", choices=FITNESS_MODES, default="displacement",
-                        help="displacement (m, unclipped, no penalties) or normalised (v1)")
-    parser.add_argument("--retests", type=int, default=0, help="fresh-process retests per checkpoint (default 0: none)")
-    parser.add_argument("--module-set", choices=MODULE_SETS, default="zoo", help="module sizes and masses (default: zoo)")
-    parser.add_argument("--core-mass", type=float, default=None, help="core mass in kg (default: the module set's)")
-    parser.add_argument("--hinge", choices=("zoo", "local"), default="zoo", help="hinge servo (default: zoo)")
-    parser.add_argument("--profile", choices=list(EVAL_PROFILES), default="dsocial_zoo",
-                        help="episode, CMA-ES and fitness settings: the paper's or the old sweep's (legacy)")
-    args = parser.parse_args()
-
-    lines = args.bodies.read_text().splitlines()
-    if args.line >= len(lines):
-        print(f"line {args.line} is past the {len(lines)} bodies in {args.bodies}; nothing to do")
-        return
-    body = json.loads(lines[args.line])
-    physics = BodyPhysics(args.module_set, args.core_mass, ZOO_HINGE if args.hinge == "zoo" else LOCAL_HINGE)
-    for seed in args.seeds:
-        train(body, args.brain, seed, args.evals, args.workers, args.out_root / f"{body['body_id']}__{args.brain}__s{seed}",
-              fitness=args.fitness, retests=args.retests, physics=physics, eval_profile=args.profile)
+    ap = argparse.ArgumentParser(description="Experiment 2: one brain on one fixed body, many seeds")
+    ap.add_argument("--bodies", type=Path, required=True)
+    ap.add_argument("--line", type=int, required=True, help="0-based line of --bodies")
+    ap.add_argument("--brain", choices=BRAIN_KINDS, required=True)
+    ap.add_argument("--evals", type=int, default=800)
+    ap.add_argument("--seeds", nargs="+", default=["42-61"], help="e.g. 42-61 or 42 43 44")
+    ap.add_argument("--workers", type=int, default=os.cpu_count())
+    ap.add_argument("--concurrent", type=int, default=20, help="seeds trained at once")
+    ap.add_argument("--out-root", type=Path, required=True)
+    args = ap.parse_args()
+    body = json.loads(args.bodies.read_text().splitlines()[args.line])
+    train(body, args.brain, args.evals, parse_seeds(args.seeds), args.workers,
+          args.out_root / f"{body['body_id']}__{args.brain}", args.concurrent)
 
 
 if __name__ == "__main__":
