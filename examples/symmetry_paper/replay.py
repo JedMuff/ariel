@@ -9,7 +9,7 @@ RECORD_EVERY_N physics steps (50 Hz), stored as float16 / float32 time as the
 investigation's traces the gait detector was validated on; gait.py then gives
 the gait class, phase relations, phase quality and mean gait cycle.
 
-Writes to <out-dir>/<run name>/:
+Writes to <out-dir>/<run name>/ (runs.run_name):
   episodes.csv   one row per episode: run condition, key, stored and replayed
                  score, body descriptors (bodies.descriptors), gait metrics
   pairs.csv      one row per left/right pair (gait.analyse_episode)
@@ -90,7 +90,7 @@ def _replay_job(ep: runs.Episode) -> tuple[dict, list[dict], Optional[np.ndarray
 def replay_run(run_dir: Path, out: Path, which: str, workers: int) -> str:
     eps = list(runs.episodes(run_dir, which))
     if not eps:
-        return f"{run_dir.name}: nothing to replay"
+        return f"{runs.run_name(run_dir)}: nothing to replay"
     ident = runs.identity(run_dir)
     if workers > 1 and len(eps) > 1:
         with Pool(processes=min(workers, len(eps))) as pool:
@@ -119,7 +119,7 @@ def replay_run(run_dir: Path, out: Path, which: str, workers: int) -> str:
         print(f"  ERROR {e}", flush=True)
     mism = int((np.abs(df["score"] - df["stored_score"]) > SCORE_TOL).sum()) if len(df) else 0
     labels = ", ".join(f"{k}={v}" for k, v in df["rowing_label"].value_counts().items()) if len(df) else ""
-    return f"{run_dir.name}: {len(df)} episodes ({mism} not reproduced, {len(errors)} errors) {labels}"
+    return f"{runs.run_name(run_dir)}: {len(df)} episodes ({mism} not reproduced, {len(errors)} errors) {labels}"
 
 
 def main() -> None:
@@ -138,7 +138,7 @@ def main() -> None:
     if not args.run_dir or not args.out_dir:
         parser.error("--run-dir and --out-dir are required (or --list-runs)")
     for run_dir in args.run_dir:
-        print(replay_run(run_dir, args.out_dir / run_dir.name, args.which, args.workers), flush=True)
+        print(replay_run(run_dir, args.out_dir / runs.run_name(run_dir), args.which, args.workers), flush=True)
 
 
 if __name__ == "__main__":

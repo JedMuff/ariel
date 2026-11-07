@@ -60,6 +60,16 @@ def config(run_dir: Path) -> dict:
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+def run_name(run_dir: Path) -> str:
+    """A name unique across the experiment, for output folders and tables: E1
+    <genome>__<brain>__e<evals>__s<seed> (run directories are all called
+    s<seed>); E2 the directory name (<body_id>__<brain>)."""
+    cfg = config(run_dir)
+    if cfg.get("experiment") == "e1":
+        return f"{cfg['genome']}__{cfg['brain']}__e{cfg['evals']}__s{cfg['seed']}"
+    return Path(run_dir).name
+
+
 def find(roots: list[Path], experiment: str) -> list[Path]:
     """Run directories of an experiment ("e1" or "e2") anywhere under the roots, sorted."""
     out = [p.parent for root in roots for p in Path(root).rglob("config.json")
@@ -143,7 +153,7 @@ def e1_episodes(run_dir: Path, which: str = "final") -> Iterator[Episode]:
         if gen not in weights:
             weights[gen] = np.load(run_dir / "weights" / f"gen{gen:03d}.npz")
         rec = record[(gen, i)]
-        yield Episode(run_dir.name, f"g{gen:03d}_b{i}", genome_of[i], cfg["brain"], weights[gen][str(i)],
+        yield Episode(run_name(run_dir), f"g{gen:03d}_b{i}", genome_of[i], cfg["brain"], weights[gen][str(i)],
                       rec["score"], {"gen": gen, "id": i, "born": rec["born"], "train_seed": rec["train_seed"]})
 
 
@@ -155,7 +165,7 @@ def e2_episodes(run_dir: Path, which: str = "all") -> Iterator[Episode]:
         results = sorted(results, key=lambda r: -r["score"])[:1]
     w = np.load(run_dir / "weights.npz")
     for r in results:
-        yield Episode(run_dir.name, f"s{r['seed']}", cfg["genome"], cfg["brain"], w[f"s{r['seed']}"], r["score"],
+        yield Episode(run_name(run_dir), f"s{r['seed']}", cfg["genome"], cfg["brain"], w[f"s{r['seed']}"], r["score"],
                       {"seed": r["seed"], "body_id": cfg["body_id"]})
 
 
@@ -169,7 +179,7 @@ def episodes(run_dir: Path, which: str = "final") -> Iterator[Episode]:
 def identity(run_dir: Path) -> dict:
     """Condition columns of a run (E1 or E2)."""
     cfg = config(run_dir)
-    out = {"run": Path(run_dir).name, "experiment": cfg.get("experiment"), "brain": cfg.get("brain"),
+    out = {"run": run_name(run_dir), "path": str(run_dir), "experiment": cfg.get("experiment"), "brain": cfg.get("brain"),
            "evals": cfg.get("evals")}
     if cfg.get("experiment") == "e2":
         return {**out, "genome": cfg["genome_type"], "body_id": cfg["body_id"]}

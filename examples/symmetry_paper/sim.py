@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -206,7 +207,11 @@ def _worker_init() -> None:
 
 
 def make_pool(workers: int) -> ProcessPoolExecutor:
-    return ProcessPoolExecutor(max_workers=max(1, workers), initializer=_worker_init)
+    # forkserver, not fork: the executor starts workers on demand while the
+    # training threads run, and a fork of a multi-threaded process can copy a
+    # held lock into the child and deadlock it.
+    return ProcessPoolExecutor(max_workers=max(1, workers), initializer=_worker_init,
+                               mp_context=multiprocessing.get_context("forkserver"))
 
 
 @dataclass

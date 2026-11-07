@@ -12,8 +12,11 @@ Re-evaluation  every survivor is retrained with a fresh seed each generation,
             together with the new offspring, and keeps only its latest score.
 
 Generation g trains its bodies with seeds seed + 1000 g + i (i = position in
-the generation's training order). The trainings of a generation run
-concurrently on one pool of --workers processes.
+the generation's training order). The trainings of a generation share one
+pool of --workers processes, --concurrent of them at a time (default: enough to
+keep the workers busy, 2 x workers / popsize; each holds CMA-ES's covariance,
+~0.3 GB for an ANN, so not all 40 at once). The order and number of concurrent
+trainings do not change the results.
 
 Output (--out DIR):
   config.json          protocol, arguments, git commit
@@ -93,9 +96,10 @@ def git_commit() -> str:
 
 class Run:
     def __init__(self, genome: str, brain: str, evals: int, seed: int, workers: int, out: Path,
-                 protocol: Protocol = PROTOCOL) -> None:
+                 protocol: Protocol = PROTOCOL, concurrent: Optional[int] = None) -> None:
         self.genome, self.brain, self.evals, self.seed = genome, brain, evals, seed
         self.workers, self.out, self.protocol = workers, out, protocol
+        self.concurrent = concurrent or max(2, -(-2 * workers // protocol.cma_popsize))
         self.ops = genomes.genome_ops(genome, protocol)
         (out / "weights").mkdir(parents=True, exist_ok=True)
 
@@ -103,7 +107,8 @@ class Run:
 
     def write_config(self) -> None:
         cfg = {"experiment": "e1", "genome": self.genome, "brain": self.brain, "evals": self.evals,
-               "seed": self.seed, "workers": self.workers, "protocol": asdict(self.protocol),
+               "seed": self.seed, "workers": self.workers, "concurrent": self.concurrent,
+               "protocol": asdict(self.protocol),
                "git_commit": git_commit()}
         path = self.out / "config.json"
         if path.exists():  # resuming (possibly with more generations): everything else must match
@@ -135,6 +140,10 @@ class Run:
                 w.unlink()
         return state
 
+    def _generations(self) -> list[dict]:
+        p = self.out / "generations.jsonl"
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
     def save_state(self, state: State) -> None:
         tmp = self.out / "state.pkl.tmp"
         tmp.write_bytes(pickle.dumps(state))
@@ -146,7 +155,7 @@ class Run:
         """Train every body (in place: score), and log the trainings."""
         seeds = [self.seed + 1000 * gen + i for i in range(len(bodies))]
         jobs = [(b.genome, self.brain, self.evals, s) for b, s in zip(bodies, seeds)]
-        results = train_controllers(jobs, pool, concurrent=len(jobs), protocol=self.protocol)
+        results = train_controllers(jobs, pool, concurrent=min(self.concurrent, len(jobs)), protocol=self.protocol)
         records, weights = [], {}
         for b, s, r in zip(bodies, seeds, results):
             b.score = r.score
@@ -187,6 +196,10 @@ class Run:
         self.write_config()
         state = self.load_state()
         t_start = time.time()
+        # A generation takes about as long as the last one (generation 0, with
+        # half the trainings, about half); a resumed run reads it from the log.
+        logged = self._generations()
+        last_wall = logged[-1]["wall_s"] * (2 if logged[-1]["gen"] == 0 else 1) if logged else 0.0
         with make_pool(self.workers) as pool:
             if state is None:
                 random.seed(self.seed)
@@ -199,6 +212,7 @@ class Run:
                 records = self.train(0, population, pool)
                 population = self.survivors(population)
                 self.log(0, records, population, time.time() - t0)
+                last_wall = 2 * (time.time() - t0)
                 state = State(0, population, self.protocol.mu, rng, random.getstate())
                 self.save_state(state)
                 print(f"gen 0: best {population[0].score:.3f} m", flush=True)
@@ -207,8 +221,8 @@ class Run:
                 print(f"resuming after generation {state.gen}", flush=True)
 
             while state.gen < self.protocol.generations:
-                if time_limit is not None and time.time() - t_start >= time_limit:
-                    print(f"time limit reached after generation {state.gen}", flush=True)
+                if time_limit is not None and time.time() - t_start + 1.2 * last_wall >= time_limit:
+                    print(f"time limit: generation {state.gen + 1} would not finish in time; stopping", flush=True)
                     return
                 gen, rng, population = state.gen + 1, state.rng, state.population
                 t0 = time.time()
@@ -223,6 +237,7 @@ class Run:
                 records = self.train(gen, bodies, pool)
                 population = self.survivors(bodies)
                 self.log(gen, records, population, time.time() - t0)
+                last_wall = time.time() - t0
                 state = State(gen, population, state.next_id + self.protocol.lam, rng, random.getstate())
                 self.save_state(state)
                 print(f"gen {gen}: best {population[0].score:.3f} m  top-{len(population)} mean "
@@ -240,11 +255,14 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=os.cpu_count())
     parser.add_argument("--generations", type=int, default=PROTOCOL.generations,
                         help="generations after the initial one (testing only; the paper uses the default)")
+    parser.add_argument("--concurrent", type=int, default=None,
+                        help="trainings at once (default 2 x workers / popsize)")
     parser.add_argument("--time-limit", type=float, default=None,
-                        help="wall-clock seconds; stop after the generation running at that time")
+                        help="wall-clock seconds: stop before a generation that would not finish within it")
     args = parser.parse_args()
     protocol = replace(PROTOCOL, generations=args.generations)
-    Run(args.genome, args.brain, args.evals, args.seed, args.workers, args.out, protocol).run(args.time_limit)
+    Run(args.genome, args.brain, args.evals, args.seed, args.workers, args.out, protocol,
+        args.concurrent).run(args.time_limit)
 
 
 if __name__ == "__main__":

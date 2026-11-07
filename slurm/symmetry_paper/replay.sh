@@ -12,9 +12,10 @@
 # line, e.g. from `python replay.py --list-runs ...`) per array task:
 # replay.py (gait class, phase quality, cycles) over WHICH (default final:
 # the final population, every seed of an E2 training) into
-# $OUT_ROOT/replay/<run>, and mechanics.py --mode measure on the champion into
-# $OUT_ROOT/mechanics/<run>. Run it on the machine type that trained the runs,
-# or the replayed scores will not reproduce the stored ones exactly.
+# $OUT_ROOT/replay/<run name>, and mechanics.py --mode measure on the
+# champion into $OUT_ROOT/mechanics/<run name> (runs.run_name: for E1
+# <genome>__<brain>__e<evals>__s<seed>). Run it on the machine type that
+# trained the runs, or the replayed scores will not reproduce the stored ones.
 
 set -euo pipefail
 source "${REPO:-$(dirname "$0")/../..}/slurm/symmetry_paper/_common.sh"
@@ -28,7 +29,8 @@ mapfile -t RUNS < <(sed -n "$(( FIRST + 1 )),$(( FIRST + PER_TASK ))p" "$LIST")
 
 banner "Runs:           ${#RUNS[@]} from line $FIRST of $LIST"
 for run in "${RUNS[@]}"; do
-    [ -f "$OUT_ROOT/replay/$(basename "$run")/episodes.csv" ] && continue
+    name=$(cd "$CODE" && python -c "import runs, sys; print(runs.run_name(sys.argv[1]))" "$run")
+    [ -f "$OUT_ROOT/replay/$name/episodes.csv" ] && continue
     python "$CODE/replay.py" --run-dir "$run" --which "$WHICH" --workers "${SLURM_CPUS_PER_TASK:-32}" \
         -o "$OUT_ROOT/replay"
 done

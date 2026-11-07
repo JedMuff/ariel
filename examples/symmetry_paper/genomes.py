@@ -204,12 +204,12 @@ def is_valid(genome: dict, protocol: Protocol = PROTOCOL) -> bool:
 def bilateral_symmetry(genome: dict) -> float:
     """Share of off-midline modules with a same-type mirror partner about y = 0
     (two modules are partners if one's path of faces from the core is the
-    other's with faces mirrored, the rule symmetrize_genome enforces); 0.0 if
-    there are none."""
+    other's with faces mirrored, the rule symmetrize_genome enforces); 1.0 if
+    there are none (a body along the midline only is mirror-symmetric)."""
     graph = TreeGenome.from_dict(genome).to_networkx()
     roots = [n for n in graph.nodes() if graph.in_degree(n) == 0]
     if not roots:
-        return 0.0
+        return 1.0
     paths: dict = {roots[0]: ()}
     queue = [roots[0]]
     while queue:
@@ -228,7 +228,7 @@ def bilateral_symmetry(genome: dict) -> float:
         seen |= {path, mpath}
         off += 1
         sym += by_path.get(mpath) == t
-    return sym / off if off else 0.0
+    return sym / off if off else 1.0
 
 
 def describe(genome: dict) -> dict:

@@ -397,7 +397,7 @@ def _measure_job(args: tuple[str, str, str]) -> str:
         bad = sum(abs(r["score"] - r["stored_score"]) > SCORE_TOL for r in rows)
         return "NOT REPRODUCED" if bad else "ok"
     except Exception as exc:  # noqa: BLE001 -- one bad body must not stop the sweep
-        return f"ERROR {run_dir.name}: {type(exc).__name__}: {exc}"
+        return f"ERROR {runs.run_name(run_dir)}: {type(exc).__name__}: {exc}"
 
 
 def _knockout_job(args: tuple[str, str, str]) -> str:
@@ -426,7 +426,7 @@ def _knockout_job(args: tuple[str, str, str]) -> str:
         bad = any(abs(r["baseline"] - r["stored_score"]) > SCORE_TOL for r in rows)
         return "NOT REPRODUCED" if bad else "ok"
     except Exception as exc:  # noqa: BLE001
-        return f"ERROR {run_dir.name}: {type(exc).__name__}: {exc}"
+        return f"ERROR {runs.run_name(run_dir)}: {type(exc).__name__}: {exc}"
 
 
 def main() -> None:
@@ -442,10 +442,10 @@ def main() -> None:
     args = parser.parse_args()
 
     run_dirs = list(args.run_dir) + runs.find(args.roots, "e1") + runs.find(args.roots, "e2")
-    run_dirs = [r for r in run_dirs if any(fnmatch.fnmatch(r.name, m) for m in args.match)]
+    run_dirs = [r for r in run_dirs if any(fnmatch.fnmatch(runs.run_name(r), m) for m in args.match)]
     if args.limit:
         run_dirs = run_dirs[:args.limit]
-    jobs = [(str(r), str(args.out_dir / r.name), args.which) for r in run_dirs]
+    jobs = [(str(r), str(args.out_dir / runs.run_name(r)), args.which) for r in run_dirs]
     print(f"{len(jobs)} runs", flush=True)
     job = _measure_job if args.mode == "measure" else _knockout_job
     counts: dict[str, int] = {}

@@ -53,8 +53,12 @@ def train(body: dict, brain: str, evals: int, seeds: list[int], workers: int, ou
     out.mkdir(parents=True, exist_ok=True)
     cfg = {"experiment": "e2", **{k: body[k] for k in body if k != "genome"}, "brain": brain, "evals": evals,
            "seeds": seeds, "protocol": asdict(PROTOCOL), "git_commit": git_commit(), "genome": body["genome"]}
-    if not (out / "config.json").exists():
-        (out / "config.json").write_text(json.dumps(cfg, indent=2))
+    if (out / "config.json").exists():  # a rerun, possibly with more seeds: the same training otherwise
+        old = json.loads((out / "config.json").read_text())
+        if any(old[k] != cfg[k] for k in ("body_id", "brain", "evals", "genome", "protocol")):
+            raise SystemExit(f"{out} holds a different training; use another --out-root")
+        cfg = {**old, "seeds": sorted(set(old["seeds"]) | set(seeds))}
+    (out / "config.json").write_text(json.dumps(cfg, indent=2))
     todo = [s for s in seeds if s not in done_seeds(out)]
     if not todo:
         print(f"{out.name}: done", flush=True)

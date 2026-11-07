@@ -5,8 +5,16 @@ analyses (mechanics.py).
 descriptors(genome)      from the genome alone: module, hinge and limb counts,
                          and the Miras et al. (2018) descriptors of
                          ariel.utils.morphological_descriptor (size, joints,
-                         limbs, branching, length of limbs, coverage, symmetry),
-                         plus this study's mirror-symmetry share (genomes.py)
+                         limbs, length of limbs, coverage), branching (in the
+                         plane: the share of core and bricks with all their
+                         in-plane faces used, core 4 and brick 3, as in Miras
+                         et al.), and symmetry: this study's mirror share
+                         (genomes.py). Two library measures are left out: its
+                         symmetry accumulates the plane count inside the loop
+                         over the third axis, so it can exceed 1 (1.78 on a GRN
+                         body), and its branching asks a brick to fill all five
+                         faces, top and bottom included, so it is 0 for almost
+                         every body
 body_measures(genome)    from the body at rest after the 3 s settle (world
                          frame: forward -y, lateral x, up z): extent, height,
                          contacts, hinge axes and leg hinges (hinges whose
@@ -48,8 +56,21 @@ def descriptors(genome: dict) -> dict:
         **genomes.describe(genome),
         "n_limbs": int(m.num_single_neighbour_modules),
         **{k: safe(lambda k=k: getattr(m, k)) for k in
-           ("size", "joints", "limbs", "branching", "length_of_limbs", "coverage", "symmetry")},
+           ("size", "joints", "limbs", "length_of_limbs", "coverage")},
+        "branching": branching_2d(genome),
     }
+
+
+PLANAR_FACES = {"CORE": {"FRONT", "BACK", "LEFT", "RIGHT"}, "BRICK": {"FRONT", "LEFT", "RIGHT"}}
+
+
+def branching_2d(genome: dict) -> float:
+    """Share of the core and bricks whose in-plane faces are all used."""
+    used: dict = {}
+    for e in genome["edges"]:
+        used.setdefault(str(e["parent"]), set()).add(e["face"])
+    hubs = [(str(k), n["type"]) for k, n in genome["nodes"].items() if n["type"] in PLANAR_FACES]
+    return sum(PLANAR_FACES[t] <= used.get(k, set()) for k, t in hubs) / len(hubs)
 
 
 def subtree(model: mujoco.MjModel, root: int) -> set[int]:
