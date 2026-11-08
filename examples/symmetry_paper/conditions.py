@@ -14,6 +14,7 @@ which keeps the tail of an array short.
 Usage:
     python conditions.py e1 --seeds 20 > e1.tsv
     python conditions.py e1 --seeds 20 --evals 800 > e1_800.tsv
+    python conditions.py e1 --seeds 10 --genomes tree tree_symmetric > e1_two.tsv
     python conditions.py pilot > pilot.tsv
     python conditions.py e2 --bodies bodies.jsonl > e2.tsv
 """
@@ -30,8 +31,8 @@ FIRST_SEED = 42
 COST = {"ann": 1.3}  # relative cost per evaluation, for ordering only
 
 
-def e1_lines(seeds: int, budgets: list[int], prefix: str) -> list[str]:
-    rows = [(g, b, e, FIRST_SEED + s) for e in budgets for b in BRAIN_KINDS for g in GENOME_TYPES for s in range(seeds)]
+def e1_lines(seeds: int, budgets: list[int], genomes: list[str], prefix: str) -> list[str]:
+    rows = [(g, b, e, FIRST_SEED + s) for e in budgets for b in BRAIN_KINDS for g in genomes for s in range(seeds)]
     rows.sort(key=lambda r: (-r[2] * COST.get(r[1], 1.0), r[3], r[1], r[0]))
     return [f"{g}\t{b}\t{e}\t{s}\t{prefix}/{g}/{b}/e{e}/s{s}" for g, b, e, s in rows]
 
@@ -48,6 +49,7 @@ def main() -> None:
     ap.add_argument("what", choices=("e1", "pilot", "e2"))
     ap.add_argument("--seeds", type=int, default=20)
     ap.add_argument("--evals", type=int, nargs="+", default=list(BUDGETS))
+    ap.add_argument("--genomes", nargs="+", choices=GENOME_TYPES, default=list(GENOME_TYPES))
     ap.add_argument("--bodies", type=Path, help="e2: sample_bodies.py output")
     args = ap.parse_args()
     if args.what == "e2":
@@ -55,9 +57,9 @@ def main() -> None:
             ap.error("e2 needs --bodies")
         lines = e2_lines(args.bodies)
     elif args.what == "pilot":
-        lines = e1_lines(1, args.evals, "pilot")
+        lines = e1_lines(1, args.evals, args.genomes, "pilot")
     else:
-        lines = e1_lines(args.seeds, args.evals, "e1")
+        lines = e1_lines(args.seeds, args.evals, args.genomes, "e1")
     sys.stdout.write("".join(x + "\n" for x in lines))
 
 

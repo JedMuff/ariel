@@ -16,6 +16,7 @@
 # Environment (defaults in brackets; see _common.sh for REPO and OUT_ROOT):
 #   ACCOUNT    Slurm account, if not the default
 #   PARTITION  [rome]       CPUS  [32]      THROTTLE [100]   MAX_ARRAY [1000]
+#   GENOMES    [all five] (pilot, e1) space-separated subset, e.g. "tree tree_symmetric"
 #   SEEDS      [20] (e1)    TIME_E100 [08:00:00]  TIME_E200 [14:00:00]  TIME_E800 [48:00:00]
 #   E2_PER_TASK [4] (body x brain jobs per task)  TIME_E2 [12:00:00]
 #   DRY_RUN=1  print the sbatch commands, submit nothing
@@ -60,7 +61,7 @@ submit_e1() {  # submit_e1 KIND EVALS...
     shift
     for e in "$@"; do
         local list="$LISTS/${kind}_e$e.tsv" time_var="TIME_E$e"
-        (cd "$CODE" && python conditions.py "$kind" --seeds "$SEEDS" --evals "$e") | undone > "$list"
+        (cd "$CODE" && python conditions.py "$kind" --seeds "$SEEDS" --evals "$e" ${GENOMES:+--genomes $GENOMES}) | undone > "$list"
         local n
         n=$(wc -l < "$list")
         echo "$kind e$e: $n runs to do ($list)"
