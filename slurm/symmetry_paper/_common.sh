@@ -46,15 +46,21 @@ line_of() {
 # seconds left before this job's time limit, minus a margin (for --time-limit)
 seconds_left() {
     local margin=${1:-900} left=""
-    [ -n "${SLURM_JOB_ID:-}" ] && left=$(squeue -h -j "$SLURM_JOB_ID" -o %L 2>/dev/null || true)
+    # An array's job id also selects its other tasks, so pick this task's own
+    # line by its unique id (%A).
+    [ -n "${SLURM_JOB_ID:-}" ] && left=$(squeue -h -j "${SLURM_ARRAY_JOB_ID:-$SLURM_JOB_ID}" -o "%A %L" 2>/dev/null \
+        | awk -v j="$SLURM_JOB_ID" '$1 == j {print $2}' || true)
     python - "$left" "$margin" <<'EOF'
 import sys
 s, margin = sys.argv[1].strip(), int(sys.argv[2])
-days, _, rest = s.rpartition("-")
-parts = [int(x) for x in rest.split(":")] if rest else []
-while len(parts) < 3:
-    parts.insert(0, 0)
-h, m, sec = parts
-print(max(60, (int(days or 0) * 24 + h) * 3600 + m * 60 + sec - margin) if rest else 10**9)
+try:
+    days, _, rest = s.rpartition("-")
+    parts = [int(x) for x in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, sec = parts
+    print(max(60, (int(days or 0) * 24 + h) * 3600 + m * 60 + sec - margin))
+except ValueError:  # no usable time left (not in a job, or UNLIMITED): no limit
+    print(10**9)
 EOF
 }
