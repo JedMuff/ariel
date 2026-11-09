@@ -17,8 +17,8 @@ per (generation, individual, metric):
     fitness       blended fitness within that pool (core/fitness.py)
     survivor      1 if the individual survived that generation's selection
     source        "live": computed during the run, used for selection
-                  "backfill": computed afterwards (analysis/backfill_novelty.py)
-                  from the stored morphologies, NOT what selection used
+                  "backfill": computed afterwards from the
+                  stored morphologies, NOT what selection used
 
 experiment.py writes the table from the tags when a run finishes; readers use
 ``read_history``, which falls back to the tags for runs that stopped early.

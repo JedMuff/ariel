@@ -1,6 +1,6 @@
-"""kgd's zoo modules (apets-ariel) for the ARIEL social-learning runs.
+"""Zoo modules (apets-ariel) for the ARIEL social-learning runs.
 
-Ported from ariel_symmetry's examples/symmetry_pressure/shared.py
+Ported from a symmetry-pressure study's examples/symmetry_pressure/shared.py
 (``--zoo-modules``), which keeps these values in sync with the vendored
 examples/zoo_benchmark/zoo_modules.py. Only the values differ from the local
 modules: the local module classes, and so their face layout, are kept, and
@@ -67,7 +67,7 @@ def use_zoo_modules_globally() -> None:
 
 
 def apply_zoo_modules(spec: mujoco.MjSpec) -> mujoco.MjSpec:
-    """Give a robot spec kgd's zoo hinge actuator (kp, kv, armature, a +-90 deg
+    """Give a robot spec the zoo hinge actuator (kp, kv, armature, a +-90 deg
     joint limit), in place."""
     for a in spec.actuators:
         a.gainprm[0] = ZOO_HINGE_KP

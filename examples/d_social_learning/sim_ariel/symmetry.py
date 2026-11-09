@@ -1,6 +1,6 @@
 """Bilateral symmetry of a TreeGenome body, two ways.
 
-`tree_symmetry` is ported from ariel_symmetry's
+`tree_symmetry` is ported from a symmetry-pressure study's
 examples/symmetry_pressure/shared.py::bilateral_symmetry_score: modules are
 matched by their path of faces from the core, so it is cheap and needs no
 model, but it ignores module rotations (a 45 deg module's mirror image,

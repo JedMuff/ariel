@@ -13,8 +13,7 @@ Curves are per generation, mean across reps with a 95% CI band:
   - best-so-far displacement: cumulative max over every individual born <= g
   - novelty / fitness: per-generation selection-pool values from the
     database's novelty_history table (core/novelty_history.py) for
-    --novelty-metric (default TOPDOWN); runs made before that table existed
-    get it from analysis/backfill_novelty.py
+    --novelty-metric (default TOPDOWN)
   - inherited displacement: tags['init_fitness'], the displacement an
     offspring achieves with its inherited brain *before* lifetime learning
 
@@ -348,15 +347,14 @@ def main() -> None:
                  out_dir / "parta_inheritance.png", n_reps)
 
     if hist.empty:
-        print(f"No run has {args.novelty_metric} novelty_history: skipping novelty/fitness plots "
-              "(run analysis/backfill_novelty.py to get them)")
+        print(f"No run has {args.novelty_metric} novelty_history: skipping novelty/fitness plots")
         final_stats(curves, args.gens, out_dir, args.novelty_metric)
         return
     hist_reps = hist.drop_duplicates(["scheme", "x", "rep"]).groupby(["scheme", "x"]).size()
     missing = n - int(hist_reps.sum())
     if missing:
         print(f"{missing} runs have no {args.novelty_metric} novelty_history: "
-              "run analysis/backfill_novelty.py; novelty/fitness use the rest")
+              "novelty/fitness use the rest")
     sources = sorted(hist.source.unique())
     note = " (backfilled)" if sources == ["backfill"] else ""
     plot_overlay(curves, [("surv_novelty", f"survivor novelty ({args.novelty_metric})"),

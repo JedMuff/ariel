@@ -62,22 +62,9 @@ Then run EvoGym scripts through that venv from the repo root.  `PYTHONPATH=src` 
 required because `ariel` declares `requires-python >=3.12` and cannot be pip-installed
 into the 3.10 venv — sourcing `src/` directly works around this.
 
-```bash
-# Single learning run
-PYTHONPATH=src evogym-venv/bin/python examples/d_social_learning/evogym_learn.py
-
-# Render video of learned gait (after learning)
-PYTHONPATH=src evogym-venv/bin/python examples/d_social_learning/make_evogym_video.py
-
-# Architecture comparison experiment
-PYTHONPATH=src evogym-venv/bin/python examples/d_social_learning/experiment_evogym.py
-
-# Render comparison videos (after experiment)
-PYTHONPATH=src evogym-venv/bin/python examples/d_social_learning/make_evogym_video_compare.py
-
-# Plot learning curves (gecko + evogym)
-PYTHONPATH=src evogym-venv/bin/python examples/d_social_learning/plot_results.py
-```
+The social-learning experiments, and the exact commands behind the published
+results, are described in
+[`examples/d_social_learning/README.md`](examples/d_social_learning/README.md).
 
 All outputs are written under `__data__/` (gitignored).
 

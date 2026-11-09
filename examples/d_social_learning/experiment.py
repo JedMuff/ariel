@@ -548,7 +548,7 @@ def main() -> None:
     parser.add_argument(
         "--sim-preset", choices=["legacy", "zoo"], default="legacy",
         help="Simulation constants (sim_ariel/evaluator.py PRESETS): legacy = the original "
-             "local modules, 30 s episodes at 55.6 Hz control and absolute final x; zoo = kgd's "
+             "local modules, 30 s episodes at 55.6 Hz control and absolute final x; zoo = the "
              "zoo module physics, 15 s episodes at 20 Hz control, displacement from the start "
              "(--platform ariel only).",
     )
@@ -676,7 +676,7 @@ def main() -> None:
 
     # Printed on its own line (not via `console`, whose rich markup/box-drawing
     # would make this harder to grep) so calling scripts can pick up exactly
-    # which directory this run landed in — see run_social_parta.sh.
+    # which directory this run landed in.
     print(f"RUN_DIR={out_dir}")
     print(f"SEED={seed}")
 

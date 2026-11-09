@@ -186,7 +186,7 @@ def tree_edit_distance_breakdown(
     """Like ``tree_edit_distance``, but returns the actual edit operations
     behind the cost instead of just the number.
 
-    Diagnostic/exploratory use only (e.g. test_tree_edit_distance.py) --
+    Diagnostic/exploratory use only --
     ``nx.optimize_edit_paths`` (the "advanced interface" under
     ``nx.graph_edit_distance``) does strictly more work to reconstruct the
     node/edge correspondence, so the hot path (``tree_edit_distance``, called

@@ -20,7 +20,7 @@ CTRL_ALPHA = 0.5   # control blending factor (0=no change, 1=instant) — damps 
 HEIGHT_PENALTY_THRESHOLD = 0.5  # m — only penalise spawn height above this
 JERK_PENALTY_WEIGHT = 3.0  # penalty per unit of mean absolute ctrl delta, applied above JERK_THRESHOLD
 JERK_THRESHOLD = 0.15  # hurdle: mean_jerk below this is free; at/above it, the full weight*mean_jerk applies
-ZOO_MODULES = False  # build bodies with kgd's zoo modules (sim_ariel/zoo_modules.py)
+ZOO_MODULES = False  # build bodies with the zoo modules (sim_ariel/zoo_modules.py)
 DISPLACEMENT_FROM_START = False  # fitness uses x travelled since the settle phase, not the absolute x
 # Start-state noise for perturbed episodes (run_episode's perturb_rng): Gaussian
 # offsets added to the root's x/y position and to every hinge angle before the
@@ -32,7 +32,7 @@ PERTURB_ANGLE_STD = 0.01  # rad
 
 # Simulation presets (experiment.py --sim-preset). "legacy" is the module
 # defaults above, used by every run before the zoo preset existed. "zoo" uses
-# kgd's zoo module physics and timing (15 s episodes, 20 Hz control), keeps the
+# the zoo module physics and timing (15 s episodes, 20 Hz control), keeps the
 # settle phase, smoothing and jerk penalty, and measures displacement from the
 # start. CTRL_ALPHA and the jerk constants act per control step, so they are
 # rescaled from legacy's 9-step control period to 25 steps: same smoothing
@@ -112,7 +112,7 @@ def run_episode(theta: np.ndarray, brain, simulator_specifics: dict,
     the start state is jittered first (PERTURB_POS_STD, PERTURB_ANGLE_STD).
     *recorder*, if given, is called as recorder(sim_step, data) after every
     rollout physics step (not the settle phase), for replays that record
-    behaviour (analysis/behavior_replay.py); it must not change *data*."""
+    behaviour; it must not change *data*."""
     import mujoco
 
     model = simulator_specifics["model"]

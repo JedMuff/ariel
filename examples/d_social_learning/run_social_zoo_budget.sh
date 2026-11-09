@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# Zoo-physics learning-budget pilot (array version). Same outer loop as
-# run_social_parta_only.sh, with these differences:
-#   - --sim-preset zoo: kgd's zoo module physics, 15 s episodes at 20 Hz
+# ARIEL learning-budget experiment, generations 0-30 (array version; extended
+# to 60 by run_social_zoo_budget_extend.sh):
+#   - --sim-preset zoo: the zoo module physics, 15 s episodes at 20 Hz
 #     control, displacement measured from the start position (see
 #     sim_ariel/evaluator.py PRESETS)
 #   - two lifetime-learning budgets, 10 and 20 inner CMA-ES generations
-#   - all 8 part A schemes, x in {0.5, 1}
+#   - all 8 schemes, x in {0.5, 1}
 #   - 20 reps
 #   - --final-evals 10: each robot's score is the mean over 10 episodes of its
 #     learned controller with a jittered start state, not CMA-ES's best
@@ -14,9 +14,8 @@
 #     Selection and the donor schemes use that score.
 #
 # Each budget gets its own data tree, __data__/social/ariel_zoo_fe10/ig{10,20},
-# laid out like __data__/social/ariel, so the part A analysis can be pointed at
-# it with --data-dir. The first pilot batch (best-of-N scoring, 5 schemes x 10
-# reps) is in __data__/social/ariel_zoo and is not mixed with these runs. As in part A, experiment.py prints each run's directory as
+# so the analysis can be pointed at it with --data-dir.
+# experiment.py prints each run's directory as
 # `RUN_DIR=<path>` in out_files/social-zoo-<jobid>_<taskid>.out, and the seed
 # is a stable hash of (scheme, x, k_inherit, rep), so both budgets share seeds.
 #
@@ -89,7 +88,7 @@ X="${X_VALUES[$X_IDX]}"
 INNER_GENS="${BUDGETS[$BUDGET_IDX]}"
 
 # ---------------------------------------------------------------------------
-# Parameters (as run_social_parta_only.sh, except INNER_GENS and SIM_PRESET)
+# Parameters
 # ---------------------------------------------------------------------------
 
 GENS=30

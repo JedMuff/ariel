@@ -1,7 +1,7 @@
 """Shared helpers for aggregating per-generation metrics across replicate runs
 of a social-learning experiment.
 
-Used by plot_run_curves.py, plot_diversity_curves.py, and compare_schemes.py.
+Used by the analysis scripts in this folder.
 """
 
 from __future__ import annotations
@@ -28,8 +28,7 @@ SCHEMES = [
 X_VALUES = [0.0, 0.5, 1.0]
 
 # novelty_history metric (core/novelty_history.py) that metric="novelty" and
-# metric="fitness" curves read; runs made before the table existed get it
-# from analysis/backfill_novelty.py.
+# metric="fitness" curves read.
 NOVELTY_METRIC = "TOPDOWN"
 
 # Distinct color per scheme, shared across all plots for consistency.

@@ -73,7 +73,7 @@ X="${X_VALUES[$X_IDX]}"
 INNER_GENS="${BUDGETS[$BUDGET_IDX]}"
 
 # ---------------------------------------------------------------------------
-# Parameters (as run_social_parta_only.sh, except INNER_GENS and SIM_PRESET)
+# Parameters
 # ---------------------------------------------------------------------------
 
 GENS=60
