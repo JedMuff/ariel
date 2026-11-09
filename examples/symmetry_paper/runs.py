@@ -133,8 +133,9 @@ class Episode:
 
 
 def e1_episodes(run_dir: Path, which: str = "final") -> Iterator[Episode]:
-    """final: the final population; champion: its best; or generations 'g:0,10,49':
-    every body trained in those generations."""
+    """final: the final population; champion: its best; generations 'g:0,10,49':
+    every body trained in those generations (survivors and offspring); or
+    's:0,10,49': only the survivors of those generations, best first."""
     run_dir = Path(run_dir)
     cfg, gens, evals = config(run_dir), generations(run_dir), evaluations(run_dir)
     genome_of = genomes_by_id(run_dir)
@@ -145,6 +146,10 @@ def e1_episodes(run_dir: Path, which: str = "final") -> Iterator[Episode]:
     elif which.startswith("g:"):
         wanted = {int(g) for g in which[2:].split(",")}
         picks = [(e["gen"], e["id"]) for e in evals if e["gen"] in wanted]
+    elif which.startswith("s:"):
+        wanted = {int(g) for g in which[2:].split(",")}
+        picks = [(g["gen"], i) for g in gens if g["gen"] in wanted
+                 for _, i in sorted(zip(g["scores"], g["ids"]), reverse=True)]
     else:
         raise ValueError(f"unknown selection {which!r}")
     record = {(e["gen"], e["id"]): e for e in evals}

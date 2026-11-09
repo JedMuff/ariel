@@ -39,6 +39,15 @@ def test_final_episodes_replay_their_stored_scores(run_dir):
     assert P.shape[0] == pytest.approx(PROTOCOL.episode_s / dt, abs=2)
 
 
+def test_survivor_episodes_of_chosen_generations(run_dir):
+    gens = runs.generations(run_dir)
+    eps = list(runs.episodes(run_dir, "s:0,1"))
+    assert [e.meta["gen"] for e in eps] == [0] * 4 + [1] * 4
+    assert [e.score for e in eps] == sorted(gens[0]["scores"], reverse=True) + sorted(gens[1]["scores"], reverse=True)
+    assert {e.meta["id"] for e in eps if e.meta["gen"] == 1} == set(gens[1]["ids"])
+    assert len(list(runs.episodes(run_dir, "g:1"))) == 8  # survivors and offspring
+
+
 def test_summary_row(run_dir):
     row = e1_run(run_dir)
     assert row["final_n_modules"] > 0 and np.isfinite(row["curve_jitter"])

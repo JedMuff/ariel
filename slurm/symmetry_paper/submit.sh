@@ -7,6 +7,8 @@
 #   submit.sh bodies                     Experiment 2 bodies: sample_bodies.py (login node, a minute)
 #   submit.sh e2                         Experiment 2 trainings of $OUT_ROOT/e2/bodies.jsonl
 #   submit.sh replay ROOT [ROOT ...]     gait measures of the finished runs under the roots
+#   submit.sh replay_gens ROOT [ROOT ...]  the same for the survivors of 16 generations (REPLAY_GENS),
+#                                        with mechanics and rest measures (MAX_TASKS=1: a pilot)
 #
 # Experiment 1 runs that are already DONE are left out, so rerunning a command
 # resubmits only what is missing; runs stopped by the time limit resume where
@@ -109,8 +111,21 @@ case "${1:-}" in
         echo "replay: $(wc -l < "$LISTS/replay.txt") runs in $n tasks"
         EXTRA_EXPORT=",PER_TASK=$per" array replay.sh "$LISTS/replay.txt" "$n" --job-name sym-replay
         ;;
+    replay_gens)
+        shift
+        [ $# -gt 0 ] || { echo "usage: submit.sh replay_gens ROOT [ROOT ...]"; exit 1; }
+        (cd "$CODE" && python replay.py --list-runs "$@") > "$LISTS/replay_gens.txt"
+        # mechanics.py runs one process per run, so one run per CPU fills a task.
+        per=${REPLAY_GENS_PER_TASK:-$CPUS}
+        n=$(( ( $(wc -l < "$LISTS/replay_gens.txt") + per - 1 ) / per ))
+        [ -z "${MAX_TASKS:-}" ] || n=$(( n < MAX_TASKS ? n : MAX_TASKS ))
+        echo "replay_gens: $(wc -l < "$LISTS/replay_gens.txt") runs, $n tasks of $per"
+        export WHICH=${REPLAY_GENS:-s:0,1,2,3,4,5,7,10,15,20,25,30,35,40,45,50}
+        export MECH_WHICH=$WHICH REPLAY_DIR=replay_gens MECH_DIR=mechanics_gens REST_DIR=rest_gens
+        EXTRA_EXPORT=",PER_TASK=$per" array replay.sh "$LISTS/replay_gens.txt" "$n" --job-name sym-replay-gens
+        ;;
     *)
-        sed -n '2,25p' "$0"
+        sed -n '2,27p' "$0"
         exit 1
         ;;
 esac
