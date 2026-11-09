@@ -30,6 +30,8 @@ GRAPHICS_ROOTS = {
     "figures/zoo_budget_fe10/budget/": FIGURES / "zoo_budget_fe10/learning_budget/pdf",
     "figures/zoo_budget_fe10_g60/paper/": FIGURES / "zoo_budget_fe10_g60/paper/pdf",
     "figures/zoo_budget_fe10_g60/budget/": FIGURES / "zoo_budget_fe10_g60/learning_budget/pdf",
+    "figures/zoo_fe10_g60_behaviour/": FIGURES / "zoo_fe10_g60_behaviour/pdf",
+    "figures/final_results/": FIGURES / "final_results/pdf",
 }
 
 

@@ -40,7 +40,7 @@ N_STEPS = 499
 
 _WORLD_JSON = Path(__file__).parent / "world_data" / "walker_long.json"
 
-def initialize_world(genome):
+def initialize_world(genome, render_mode=None):
     EvoSim._has_displayed_version = True
     from envs import WalkerLongEnv
     import evogym_adapter as adapter
@@ -50,8 +50,8 @@ def initialize_world(genome):
     world = EvoWorld.from_json(str(_WORLD_JSON))
     world.add_from_array("robot", body, 1, 1, connections=utils.get_full_connectivity(body))
 
-    # env = WalkerLongEnv(world, render_mode="screen")
-    env = WalkerLongEnv(world)
+    # render_mode="rgb_array" for videos (make_videos/render_stage_videos_evogym.py)
+    env = WalkerLongEnv(world, render_mode=render_mode)
     sim = env.unwrapped  # access evogym methods bypassing gymnasium wrappers
     adjacency = body_to_adjacency(body)
 
@@ -65,7 +65,9 @@ def initialize_world(genome):
 def kill_world(simulator_specifics: dict):
     simulator_specifics['env'].close()
 
-def run_episode(theta: np.ndarray, brain, simulator_specifics: dict) -> dict:
+def run_episode(theta: np.ndarray, brain, simulator_specifics: dict, recorder=None) -> dict:
+    """One episode. *recorder*, if given, is called as recorder(step, sim, env)
+    after every step, e.g. to grab video frames; it must not change the sim."""
     import evogym_adapter as adapter
     get_node_inputs = adapter.get_node_inputs
     scale_actions = adapter.scale_actions
@@ -90,6 +92,8 @@ def run_episode(theta: np.ndarray, brain, simulator_specifics: dict) -> dict:
             raw = brain.forward_all(node_inputs, t_sig)
         action = scale_actions(raw)
         obs, reward, terminated, truncated, info = env.step(action)
+        if recorder is not None:
+            recorder(step, sim, env)
         if terminated or truncated:
             break
     x_end = float(sim.object_pos_at_time(sim.get_time(), "robot")[0].mean())

@@ -132,8 +132,12 @@ def evaluate_individual(args: tuple) -> dict:
                 "c_hinge": float(np.mean([ep["c_hinge"] for ep in final_eps])),
             }
 
-        # Diagnostics from best theta re-evaluation
-        best_ep = simulator_dependent_functions.run_episode(best_theta, brain, simulator_specifics)
+        # Diagnostics from best theta re-evaluation. Only ariel has any
+        # (extra_results is empty for evogym), so evogym skips the episode.
+        extra = {}
+        if simulator_dependent_functions.simulator == simulator_dependent_functions.SIMULATOR_ARIEL:
+            best_ep = simulator_dependent_functions.run_episode(best_theta, brain, simulator_specifics)
+            extra = simulator_dependent_functions.extra_results(best_ep)
 
         simulator_dependent_functions.stop_simulator(simulator_specifics)
 
@@ -143,7 +147,7 @@ def evaluate_individual(args: tuple) -> dict:
             "init_fitness": init_fitness,
             "learning_curve": learning_curve,
             "donor_ids": donor_ids
-        } | simulator_dependent_functions.extra_results(best_ep)
+        } | extra
 
     except Exception as exc:  # noqa: BLE001
         print(f"[evaluator] worker error: {exc}")
