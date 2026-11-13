@@ -20,7 +20,7 @@
 #   PARTITION  [rome]       CPUS  [32]      THROTTLE [100]   MAX_ARRAY [1000]
 #   GENOMES    [all five] (pilot, e1) space-separated subset, e.g. "tree tree_symmetric"
 #   SEEDS      [20] (e1)    TIME_E100 [08:00:00]  TIME_E200 [14:00:00]  TIME_E800 [48:00:00]
-#   E2_PER_TASK [4] (body x brain jobs per task)  TIME_E2 [12:00:00]
+#   E2_PER_TASK [4] (body x brain jobs per task)  TIME_E2 [12:00:00]  E2_SEEDS [42-61]
 #   DRY_RUN=1  print the sbatch commands, submit nothing
 
 set -euo pipefail

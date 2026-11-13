@@ -9,7 +9,7 @@
 #SBATCH --error=logs/%x-%A_%a.out
 #
 # Experiment 2: per array task, PER_TASK consecutive lines of LIST
-# (conditions.py e2: body-line brain), each trained with SEEDS on body line
+# (conditions.py e2: body-line brain), each trained with E2_SEEDS on body line
 # of BODIES, into $OUT_ROOT/e2/<body_id>__<brain>. Finished seeds are
 # skipped, so resubmitting completes a set. Submit with submit.sh.
 
@@ -21,7 +21,7 @@ setup_env
 : "${BODIES:?set BODIES to the sample_bodies.py file}"
 PER_TASK=${PER_TASK:-1}
 EVALS=${EVALS:-800}
-SEEDS=${SEEDS:-42-61}
+SEEDS=${E2_SEEDS:-42-61}  # not SEEDS: that is submit.sh's E1 seed count, and sbatch passes the environment on
 FIRST=$(( ${LIST_OFFSET:-0} + SLURM_ARRAY_TASK_ID * PER_TASK ))
 
 banner "Lines:          $FIRST..$(( FIRST + PER_TASK - 1 )) of $LIST" "Bodies:         $BODIES" \
