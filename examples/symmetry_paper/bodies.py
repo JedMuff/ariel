@@ -15,6 +15,13 @@ descriptors(genome)      from the genome alone: module, hinge and limb counts,
                          body), and its branching asks a brick to fill all five
                          faces, top and bottom included, so it is 0 for almost
                          every body
+mirror_asymmetry(genome) how far the body at spawn (hinges at 0) is from its own
+                         mirror image about the best vertical plane through the
+                         core: mean distance from each module part to the nearest
+                         part of the same kind (core, stator, rotor, brick) in the
+                         reflected body, over the body's RMS radius; 0 = mirror-
+                         symmetric. Independent of the genome, so comparable
+                         across all five
 body_measures(genome)    from the body at rest after the 3 s settle (world
                          frame: forward -y, lateral x, up z): extent, height,
                          contacts, hinge axes and leg hinges (hinges whose
@@ -71,6 +78,33 @@ def branching_2d(genome: dict) -> float:
         used.setdefault(str(e["parent"]), set()).add(e["face"])
     hubs = [(str(k), n["type"]) for k, n in genome["nodes"].items() if n["type"] in PLANAR_FACES]
     return sum(PLANAR_FACES[t] <= used.get(k, set()) for k, t in hubs) / len(hubs)
+
+
+def mirror_asymmetry(genome: dict) -> float:
+    """See the module docstring. The plane is searched on gait.MORPH_GRID_DEG steps
+    over [-90, 90) degrees, with the same type-aware cost it reports."""
+    model, data = build_world(genome)
+    mujoco.mj_resetData(model, data)
+    mujoco.mj_forward(model, data)
+    core = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "robot1_core")
+    rot = data.xmat[core].reshape(3, 3)
+    parts = robot_bodies(model)
+    pos = np.array([rot.T @ (data.xpos[b] - data.xpos[core]) for b in parts])
+    kind = np.array([model.body(b).name.rsplit("-", 1)[-1] if b != core else "core" for b in parts])
+    radius = float(np.sqrt((pos ** 2).sum(axis=1).mean()))
+    if radius == 0:
+        return 0.0
+    same = kind[:, None] == kind[None, :]
+    best = np.inf
+    for deg in np.arange(-90.0, 90.0, gait.MORPH_GRID_DEG):
+        a = np.deg2rad(deg)
+        u = np.array([np.cos(a), np.sin(a)])
+        refl = pos.copy()
+        refl[:, :2] = 2 * (pos[:, :2] @ u)[:, None] * u - pos[:, :2]
+        d = np.linalg.norm(pos[:, None] - refl[None], axis=-1)
+        best = min(best, float(np.where(same, d, np.inf).min(axis=1).mean()))
+    out = best / radius
+    return 0.0 if out < 1e-9 else out  # float noise on exact mirrors
 
 
 def subtree(model: mujoco.MjModel, root: int) -> set[int]:

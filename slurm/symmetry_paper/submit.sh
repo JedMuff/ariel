@@ -6,6 +6,8 @@
 #   submit.sh e1 [EVALS ...]             Experiment 1, SEEDS seeds (default all three budgets)
 #   submit.sh bodies                     Experiment 2 bodies: sample_bodies.py (login node, a minute)
 #   submit.sh e2                         Experiment 2 trainings of $OUT_ROOT/e2/bodies.jsonl
+#   submit.sh e2m                        Experiment 2b: trainings of the shape-matched bodies in
+#                                        $OUT_ROOT/e2m/bodies.jsonl (sample_bodies.py --like, made locally)
 #   submit.sh replay ROOT [ROOT ...]     gait measures of the finished runs under the roots
 #   submit.sh replay_gens ROOT [ROOT ...]  the same for the survivors of 16 generations (REPLAY_GENS),
 #                                        with mechanics and rest measures (MAX_TASKS=1: a pilot)
@@ -92,15 +94,16 @@ case "${1:-}" in
     bodies)
         (cd "$CODE" && python sample_bodies.py --n 80 -o "$OUT_ROOT/e2/bodies.jsonl")
         ;;
-    e2)
-        BODIES=$OUT_ROOT/e2/bodies.jsonl
-        [ -f "$BODIES" ] || { echo "no $BODIES: run 'submit.sh bodies' first"; exit 1; }
-        (cd "$CODE" && python conditions.py e2 --bodies "$BODIES") > "$LISTS/e2.tsv"
+    e2|e2m)
+        dir=$1
+        BODIES=$OUT_ROOT/$dir/bodies.jsonl
+        [ -f "$BODIES" ] || { echo "no $BODIES: run 'submit.sh bodies' (e2) or copy the matched bodies (e2m) first"; exit 1; }
+        (cd "$CODE" && python conditions.py e2 --bodies "$BODIES") > "$LISTS/$dir.tsv"
         per=${E2_PER_TASK:-4}
-        n=$(( ( $(wc -l < "$LISTS/e2.tsv") + per - 1 ) / per ))
-        echo "e2: $(wc -l < "$LISTS/e2.tsv") body x brain jobs in $n tasks"
-        EXTRA_EXPORT=",BODIES=$BODIES,PER_TASK=$per" \
-            array e2_train.sh "$LISTS/e2.tsv" "$n" --job-name sym-e2 --time "${TIME_E2:-12:00:00}"
+        n=$(( ( $(wc -l < "$LISTS/$dir.tsv") + per - 1 ) / per ))
+        echo "$dir: $(wc -l < "$LISTS/$dir.tsv") body x brain jobs in $n tasks"
+        EXTRA_EXPORT=",BODIES=$BODIES,PER_TASK=$per,E2_DIR=$dir" \
+            array e2_train.sh "$LISTS/$dir.tsv" "$n" --job-name "sym-$dir" --time "${TIME_E2:-12:00:00}"
         ;;
     replay)
         shift

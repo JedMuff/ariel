@@ -10,7 +10,8 @@
 #
 # Experiment 2: per array task, PER_TASK consecutive lines of LIST
 # (conditions.py e2: body-line brain), each trained with E2_SEEDS on body line
-# of BODIES, into $OUT_ROOT/e2/<body_id>__<brain>. Finished seeds are
+# of BODIES, into $OUT_ROOT/$E2_DIR/<body_id>__<brain> (E2_DIR: e2, or e2m for the
+# shape-matched bodies). Finished seeds are
 # skipped, so resubmitting completes a set. Submit with submit.sh.
 
 set -euo pipefail
@@ -31,6 +32,6 @@ for (( i = FIRST; i < FIRST + PER_TASK; i++ )); do
     [ -z "$LINE" ] && break
     read -r BODY BRAIN <<< "$LINE"
     python "$CODE/train_fixed_body.py" --bodies "$BODIES" --line "$BODY" --brain "$BRAIN" --evals "$EVALS" \
-        --seeds "$SEEDS" --workers "${SLURM_CPUS_PER_TASK:-32}" --out-root "$OUT_ROOT/e2"
+        --seeds "$SEEDS" --workers "${SLURM_CPUS_PER_TASK:-32}" --out-root "$OUT_ROOT/${E2_DIR:-e2}"
 done
 echo "Finished: $(date)"
