@@ -10,7 +10,7 @@ All settings live in `config.py` (`PROTOCOL`), and every run stores them in its 
 
 | | |
 | --- | --- |
-| Genomes | `tree` (Standard), `tree_symmetric` (Symmetric), `tree_tied` (Tied-matched, tie probability 0.47), `tree_tied_full` (Tied-full, 1.0), `grn` (Indirect: R2 GRN of Miras and Feenstra 2026) |
+| Genomes | `tree` (Standard), `tree_symmetric` (Symmetric), `tree_tied` (Tied-matched, tie probability 0.47), `tree_tied_full` (Tied-full, 1.0), `grn` (GRN: R2 of Miras and Feenstra 2026) |
 | Bodies | ≤ 25 modules besides the core, ≥ 4 hinges, depth ≤ 25, enforced for every genome by `genomes.is_valid`; random bodies and children are redrawn until valid |
 | Controllers | `bang_bang`, `dann`, `ann`, `cpg` (`brains.py`) |
 | Learning | CMA-ES, population 20, sigma 0.5, fixed x0; 100 / 200 / 800 evaluations per body |

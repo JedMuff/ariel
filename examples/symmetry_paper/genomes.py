@@ -9,7 +9,7 @@ bodies and offspring.
                   tree_symmetric), never at its mirror position
                   (ariel.ec.genotypes.tree.tying)
   tree_tied_full  Tied-full: tree_tied with every module tied (probability 1)
-  grn             Indirect: the R2 genetic regulatory network of Miras and
+  grn             GRN: the R2 genetic regulatory network of Miras and
                   Feenstra (2026), grown in 2D (ariel.ec.genotypes.grn)
 
 A genome is a dict: the tree genome of the body it builds (nodes, edges), plus

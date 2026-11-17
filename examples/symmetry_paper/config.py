@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 GENOME_TYPES: tuple[str, ...] = ("tree", "tree_symmetric", "tree_tied", "tree_tied_full", "grn")
 GENOME_LABEL = {"tree": "Standard", "tree_symmetric": "Symmetric", "tree_tied": "Tied-matched",
-                "tree_tied_full": "Tied-full", "grn": "Indirect"}
+                "tree_tied_full": "Tied-full", "grn": "GRN"}
 BRAIN_KINDS: tuple[str, ...] = ("bang_bang", "dann", "ann", "cpg")
 BRAIN_LABEL = {"bang_bang": "Bang-bang", "dann": "DANN", "ann": "ANN", "cpg": "CPG"}
 BUDGETS: tuple[int, ...] = (100, 200, 800)  # learning evaluations per body
