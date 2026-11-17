@@ -31,7 +31,7 @@ WHICH=${WHICH:-final}
 REPLAY_DIR=${REPLAY_DIR:-replay}
 MECH_DIR=${MECH_DIR:-mechanics}
 MECH_WHICH=${MECH_WHICH:-champion}
-FIRST=$(( ${LIST_OFFSET:-0} + SLURM_ARRAY_TASK_ID * PER_TASK ))
+FIRST=$(( ( ${LIST_OFFSET:-0} + SLURM_ARRAY_TASK_ID ) * PER_TASK ))  # LIST_OFFSET counts tasks (submit.sh chunks)
 mapfile -t RUNS < <(sed -n "$(( FIRST + 1 )),$(( FIRST + PER_TASK ))p" "$LIST")
 
 banner "Runs:           ${#RUNS[@]} from line $FIRST of $LIST"

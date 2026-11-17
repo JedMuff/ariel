@@ -69,6 +69,17 @@ bash $S e2                    #    1,600 body x brain jobs, 20 seeds each
 bash $S replay $OUT_ROOT/e1   # 5. gait measures of finished runs
 ```
 
+Experiment 4 retrains every distinct final-generation body of Experiment 1 (10,982 bodies) from scratch with its own controller for 10,000 evaluations, one seed. The bodies are exported locally from the Experiment 1 runs and copied to the cluster:
+
+```bash
+python examples/symmetry_paper/export_final_bodies.py --e1 __data__/symmetry_paper/e1 \
+    -o __data__/symmetry_paper/e4/bodies.jsonl --allow-unfinished   # one GRN run stopped at generation 42
+rsync -av __data__/symmetry_paper/e4/bodies.jsonl <cluster>:$OUT_ROOT/e4/
+bash $S e4                    # on the cluster: 229 tasks of 48 bodies; ~0.8 core-h per body
+```
+
+Results go to `$OUT_ROOT/e4/results/<first line>.jsonl` (one line per body, with the full CMA-ES curve) and `weights/<body_id>.npy`; resubmitting trains only the missing bodies.
+
 `DRY_RUN=1` prints the `sbatch` commands instead. Rerunning `e1` submits only runs without `DONE`; runs stopped by the time limit resume from their last generation. Set `PARTITION`, `CPUS`, `ACCOUNT`, `THROTTLE`, `MAX_ARRAY` and `TIME_E100` / `TIME_E200` / `TIME_E800` to match the cluster's limits (see `submit.sh`).
 
 Analysis is cheap and runs anywhere:

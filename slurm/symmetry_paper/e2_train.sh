@@ -23,7 +23,7 @@ setup_env
 PER_TASK=${PER_TASK:-1}
 EVALS=${EVALS:-800}
 SEEDS=${E2_SEEDS:-42-61}  # not SEEDS: that is submit.sh's E1 seed count, and sbatch passes the environment on
-FIRST=$(( ${LIST_OFFSET:-0} + SLURM_ARRAY_TASK_ID * PER_TASK ))
+FIRST=$(( ( ${LIST_OFFSET:-0} + SLURM_ARRAY_TASK_ID ) * PER_TASK ))  # LIST_OFFSET counts tasks (submit.sh chunks)
 
 banner "Lines:          $FIRST..$(( FIRST + PER_TASK - 1 )) of $LIST" "Bodies:         $BODIES" \
        "Evals / seeds:  $EVALS / $SEEDS"

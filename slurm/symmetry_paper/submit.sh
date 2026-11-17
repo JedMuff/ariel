@@ -8,6 +8,8 @@
 #   submit.sh e2                         Experiment 2 trainings of $OUT_ROOT/e2/bodies.jsonl
 #   submit.sh e2m                        Experiment 2b: trainings of the shape-matched bodies in
 #                                        $OUT_ROOT/e2m/bodies.jsonl (sample_bodies.py --like, made locally)
+#   submit.sh e4                         Experiment 4: 10,000-evaluation retraining of the final-generation
+#                                        bodies in $OUT_ROOT/e4/bodies.jsonl (export_final_bodies.py, made locally)
 #   submit.sh replay ROOT [ROOT ...]     gait measures of the finished runs under the roots
 #   submit.sh replay_gens ROOT [ROOT ...]  the same for the survivors of 16 generations (REPLAY_GENS),
 #                                        with mechanics and rest measures (MAX_TASKS=1: a pilot)
@@ -23,6 +25,8 @@
 #   GENOMES    [all five] (pilot, e1) space-separated subset, e.g. "tree tree_symmetric"
 #   SEEDS      [20] (e1)    TIME_E100 [08:00:00]  TIME_E200 [14:00:00]  TIME_E800 [48:00:00]
 #   E2_PER_TASK [4] (body x brain jobs per task)  TIME_E2 [12:00:00]  E2_SEEDS [42-61]
+#   E4_PER_TASK [48] (bodies per task)  TIME_E4 [06:00:00]  E4_EVALS [10000]  E4_SEED [42]
+#   E4_CONCURRENT [8] (bodies trained at once per task)
 #   DRY_RUN=1  print the sbatch commands, submit nothing
 
 set -euo pipefail
@@ -105,6 +109,18 @@ case "${1:-}" in
         EXTRA_EXPORT=",BODIES=$BODIES,PER_TASK=$per,E2_DIR=$dir" \
             array e2_train.sh "$LISTS/$dir.tsv" "$n" --job-name "sym-$dir" --time "${TIME_E2:-12:00:00}"
         ;;
+    e4)
+        BODIES=$OUT_ROOT/e4/bodies.jsonl
+        [ -f "$BODIES" ] || { echo "no $BODIES: copy the export_final_bodies.py file there first"; exit 1; }
+        per=${E4_PER_TASK:-48}
+        lines=$(wc -l < "$BODIES")
+        n=$(( ( lines + per - 1 ) / per ))
+        echo "e4: $lines bodies in $n tasks of $per"
+        # LIST is only for array(); e4_train.sh reads BODIES itself.
+        EXTRA_EXPORT=",BODIES=$BODIES,PER_TASK=$per,E4_EVALS=${E4_EVALS:-10000},E4_SEED=${E4_SEED:-42}"\
+",E4_CONCURRENT=${E4_CONCURRENT:-8}" \
+            array e4_train.sh "$BODIES" "$n" --job-name sym-e4 --time "${TIME_E4:-06:00:00}"
+        ;;
     replay)
         shift
         [ $# -gt 0 ] || { echo "usage: submit.sh replay ROOT [ROOT ...]"; exit 1; }
@@ -128,7 +144,7 @@ case "${1:-}" in
         EXTRA_EXPORT=",PER_TASK=$per" array replay.sh "$LISTS/replay_gens.txt" "$n" --job-name sym-replay-gens
         ;;
     *)
-        sed -n '2,27p' "$0"
+        sed -n '2,30p' "$0"
         exit 1
         ;;
 esac
