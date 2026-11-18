@@ -21,11 +21,13 @@
 #
 # Environment (defaults in brackets; see _common.sh for REPO and OUT_ROOT):
 #   ACCOUNT    Slurm account, if not the default
+#   MEM        memory per task (sbatch --mem, e.g. 32G); unset = the cluster default. Each
+#              worker process takes ~0.7 GB, so allow ~0.75 GB per CPU
 #   PARTITION  [rome]       CPUS  [32]      THROTTLE [100]   MAX_ARRAY [1000]
 #   GENOMES    [all five] (pilot, e1) space-separated subset, e.g. "tree tree_symmetric"
 #   SEEDS      [20] (e1)    TIME_E100 [08:00:00]  TIME_E200 [14:00:00]  TIME_E800 [48:00:00]
 #   E2_PER_TASK [4] (body x brain jobs per task)  TIME_E2 [12:00:00]  E2_SEEDS [42-61]
-#   E4_PER_TASK [48] (bodies per task)  TIME_E4 [06:00:00]  E4_EVALS [10000]  E4_SEED [42]
+#   E4_PER_TASK [48] (bodies per task)  TIME_E4 [24:00:00]  E4_EVALS [10000]  E4_SEED [42]
 #   E4_CONCURRENT [8] (bodies trained at once per task)
 #   DRY_RUN=1  print the sbatch commands, submit nothing
 
@@ -44,7 +46,7 @@ mkdir -p "$LISTS" "$OUT_ROOT/logs"
 sb() {  # sbatch with the common options; prints the command under DRY_RUN
     local cmd=(sbatch --parsable --chdir "$OUT_ROOT" --partition "$PARTITION" --cpus-per-task "$CPUS"
                --output "$OUT_ROOT/logs/%x-%A_%a.out" --error "$OUT_ROOT/logs/%x-%A_%a.out"
-               --export "ALL,REPO=$REPO,OUT_ROOT=$OUT_ROOT,VENV=$VENV${EXTRA_EXPORT:-}" ${ACCOUNT:+--account "$ACCOUNT"} "$@")
+               --export "ALL,REPO=$REPO,OUT_ROOT=$OUT_ROOT,VENV=$VENV${EXTRA_EXPORT:-}" ${ACCOUNT:+--account "$ACCOUNT"} ${MEM:+--mem "$MEM"} "$@")
     if [ -n "${DRY_RUN:-}" ]; then echo "${cmd[*]}"; else "${cmd[@]}"; fi
 }
 
@@ -119,7 +121,7 @@ case "${1:-}" in
         # LIST is only for array(); e4_train.sh reads BODIES itself.
         EXTRA_EXPORT=",BODIES=$BODIES,PER_TASK=$per,E4_EVALS=${E4_EVALS:-10000},E4_SEED=${E4_SEED:-42}"\
 ",E4_CONCURRENT=${E4_CONCURRENT:-8}" \
-            array e4_train.sh "$BODIES" "$n" --job-name sym-e4 --time "${TIME_E4:-06:00:00}"
+            array e4_train.sh "$BODIES" "$n" --job-name sym-e4 --time "${TIME_E4:-24:00:00}"
         ;;
     replay)
         shift
@@ -144,7 +146,7 @@ case "${1:-}" in
         EXTRA_EXPORT=",PER_TASK=$per" array replay.sh "$LISTS/replay_gens.txt" "$n" --job-name sym-replay-gens
         ;;
     *)
-        sed -n '2,30p' "$0"
+        sed -n '2,32p' "$0"
         exit 1
         ;;
 esac
